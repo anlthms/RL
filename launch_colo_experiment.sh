@@ -19,8 +19,13 @@ export JOB_NAME="async_${MODE}"
 # NRL_MEGATRON_CHECKPOINT_DIR caches the one-time HF -> Megatron conversion of
 # the initial checkpoint; both modes start from the same model, so they share it.
 # Training checkpoints go to checkpointing.checkpoint_dir from the yaml instead.
+# HF_MODULES_CACHE is per-node-local: trust_remote_code dynamic modules are
+# tiny and rewriting them in a shared cache races across concurrent jobs
+# (observed: transformers_modules...configuration_nemotron_h imported while
+# half-written -> AttributeError: no attribute 'NemotronHConfig').
 export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \
 TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
+HF_MODULES_CACHE=/tmp/hf_modules_${MODE} \
 NETRC=/home/anthomas/.netrc \
 NRL_MEGATRON_CHECKPOINT_DIR=/lustre/fsw/portfolios/nemotron/users/anthomas/megatron_ckpt_cache \
 NEMO_GYM_VENV_DIR=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/gym_venvs \
