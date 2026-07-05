@@ -68,4 +68,4 @@ cluster:
 checkpointing:
   enabled: true
   save_period: 4
-  checkpoint_dir: /lustre/fsw/portfolios/llmservice/users/anthomas/checkpoints/${logger.wandb.name}
+  checkpoint_dir: /lustre/fsw/portfolios/nemotron/users/anthomas/checkpoints/${logger.wandb.name}

@@ -24,6 +24,3 @@ env:
 logger:
   wandb:
     name: async_non_colocated
-
-checkpointing:
-  checkpoint_dir: /lustre/fsw/portfolios/nemotron/users/anthomas/checkpoints/${logger.wandb.name}
