@@ -10,6 +10,12 @@ grpo:
 policy:
   train_global_batch_size: 256
 
+  megatron_cfg:
+    # First training step OOMed in backward on 184GB GB200 (~150GB allocated;
+    # 49k-token packed microbatches with no recompute). Applied to both
+    # colocated and non-colocated configs to keep the comparison fair.
+    activation_checkpointing: true
+
   generation:
     colocated:
       enabled: false

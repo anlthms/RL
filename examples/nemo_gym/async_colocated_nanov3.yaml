@@ -16,6 +16,10 @@ policy:
     # generation time. With EP > 1, Megatron-LM's TextGenerationController
     # requires expert padding in that combination (inference-only flag).
     moe_pad_experts_for_cuda_graph_inference: true
+    # First training step OOMed in backward on 184GB GB200 (~150GB allocated;
+    # 49k-token packed microbatches with no recompute). Applied to both
+    # colocated and non-colocated configs to keep the comparison fair.
+    activation_checkpointing: true
 
   generation:
     colocated:

@@ -99,6 +99,19 @@ class MegatronGeneration(GenerationInterface):
             # Reuse the existing training policy.
             self._policy = policy
             self._owns_policy = False
+            # Start the persistent engine + HTTP server now (offloading training
+            # buffers first to make room for KV cache) so that
+            # dp_openai_server_base_urls is populated before consumers such as
+            # NeMo Gym build their clients from it. The training loop's
+            # subsequent prepare_for_generation calls are no-ops/wakes.
+            self._policy.offload_before_refit()
+            self.prepare_for_generation()
+            url_futures = self._policy.worker_group.run_all_workers_single_data(
+                "report_dp_openai_server_base_url"
+            )
+            self.dp_openai_server_base_urls = [
+                url for url in ray.get(url_futures) if url is not None
+            ]
             return
 
         # Stand up a dedicated inference-only policy.
