@@ -22,6 +22,13 @@ policy:
     activation_checkpointing: true
 
   generation:
+    mcore_generation_config:
+      # 80GB (inherited) OOMed at the first training pause: with
+      # kv_cache_management_mode=persist the KV buffer stays resident during
+      # training, and logprob/train forward needed ~11-22GB more than the
+      # ~22GB left free. 48GB leaves ~54GB headroom for the training phase.
+      buffer_size_gb: 48
+
     colocated:
       enabled: true
       resources:
