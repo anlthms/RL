@@ -1,0 +1,29 @@
+defaults: actually_run_nanov3.yaml
+
+# Colocated async GRPO: training and inference share all 8 nodes x 4 GPUs.
+# Scaled down from base (64 prompts / 1024 gbs) to fit 8 GB200 nodes on OCI-HSG.
+# num_prompts_per_step * num_generations_per_prompt (16) = train_global_batch_size.
+
+grpo:
+  num_prompts_per_step: 16
+
+policy:
+  train_global_batch_size: 256
+
+  generation:
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: 4
+        num_nodes: null
+
+env:
+  nemo_gym:
+    skip_venv_if_present: true
+
+logger:
+  wandb:
+    name: async_colocated
+
+checkpointing:
+  checkpoint_dir: /lustre/fsw/portfolios/nemotron/users/anthomas/checkpoints/${logger.wandb.name}

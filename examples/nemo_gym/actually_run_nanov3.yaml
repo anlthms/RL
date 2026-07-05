@@ -1,0 +1,71 @@
+defaults: grpo_nanov3.yaml
+
+grpo:
+  async_grpo:
+    enabled: true
+    in_flight_weight_updates: true
+    max_trajectory_age_steps: 4
+  num_prompts_per_step: 64
+
+loss_fn:
+  use_importance_sampling_correction: True
+
+policy:
+  model_name: "/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
+
+  train_global_batch_size: 1024
+  logprob_chunk_size: 1024
+
+  megatron_cfg:
+    tensor_model_parallel_size: 2
+    context_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    expert_model_parallel_size: 4
+    cuda_graph_impl: "none"
+    cuda_graph_scope: "full_iteration"
+    activation_checkpointing: false
+
+  generation:
+    mcore_generation_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      expert_model_parallel_size: 4
+      buffer_size_gb: 80
+      logging_step_interval: 1
+
+    vllm_cfg:
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.85
+      async_engine: true
+      max_num_seqs: 1024
+      max_num_batched_tokens: 32768
+
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 4
+
+data:
+  use_multiple_dataloader: false
+  train:
+    data_path: "/lustre/fsw/portfolios/llmservice/users/rkirby/nemo-rl-workspace/data/train-split.jsonl"
+  validation:
+    data_path: "/lustre/fsw/portfolios/llmservice/users/rkirby/nemo-rl-workspace/data/val-split.jsonl"
+
+logger:
+  wandb_enabled: true
+  wandb:
+    project: nano-v3-megatron-inference
+    name: mcore-nanov3-megatron-inference
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 8
+
+checkpointing:
+  enabled: true
+  save_period: 4
+  checkpoint_dir: /lustre/fsw/portfolios/llmservice/users/anthomas/checkpoints/${logger.wandb.name}
