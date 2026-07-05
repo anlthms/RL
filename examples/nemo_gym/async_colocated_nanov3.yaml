@@ -23,11 +23,13 @@ policy:
 
   generation:
     mcore_generation_config:
-      # 80GB (inherited) OOMed at the first training pause: with
-      # kv_cache_management_mode=persist the KV buffer stays resident during
-      # training, and logprob/train forward needed ~11-22GB more than the
-      # ~22GB left free. 48GB leaves ~54GB headroom for the training phase.
-      buffer_size_gb: 48
+      # The default "persist" keeps the KV buffer resident through the
+      # training pause; at this scale that OOMed get_logprobs/train forward
+      # both at 80GB (162GB resident) and 48GB (140GB resident vs a 21.75GB
+      # contiguous ask). Offloading the KV cache to CPU during training frees
+      # the whole buffer, letting generation keep the full 80GB (inherited)
+      # for parity with the non-colocated inference pool.
+      kv_cache_management_mode: "offload"
 
     colocated:
       enabled: true
