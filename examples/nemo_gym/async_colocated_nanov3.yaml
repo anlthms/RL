@@ -10,6 +10,13 @@ grpo:
 policy:
   train_global_batch_size: 256
 
+  megatron_cfg:
+    # Colocated generation reuses the training model (transformer_engine impl,
+    # not inference_optimized) and toggles cuda_graph_impl=local on it at
+    # generation time. With EP > 1, Megatron-LM's TextGenerationController
+    # requires expert padding in that combination (inference-only flag).
+    moe_pad_experts_for_cuda_graph_inference: true
+
   generation:
     colocated:
       enabled: true
