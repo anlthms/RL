@@ -20,16 +20,22 @@ policy:
     # 49k-token packed microbatches with no recompute). Applied to both
     # colocated and non-colocated configs to keep the comparison fair.
     activation_checkpointing: true
+    # The 48GB-persist attempt failed on fragmentation, not capacity: a
+    # 21.75GB contiguous logprob-forward ask vs 16GB free + 16GB reserved-
+    # but-unallocated. expandable_segments reclaims that. Its documented cost
+    # (slower weight transfer) does not apply: colocated mode never refits.
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
 
   generation:
     mcore_generation_config:
-      # The default "persist" keeps the KV buffer resident through the
-      # training pause; at this scale that OOMed get_logprobs/train forward
-      # both at 80GB (162GB resident) and 48GB (140GB resident vs a 21.75GB
-      # contiguous ask). Offloading the KV cache to CPU during training frees
-      # the whole buffer, letting generation keep the full 80GB (inherited)
-      # for parity with the non-colocated inference pool.
-      kv_cache_management_mode: "offload"
+      # persist @80GB left only ~22GB for the training phase (OOM); persist
+      # @48GB failed only on allocator fragmentation (fixed via
+      # expandable_segments above); "offload" mode hung NCCL collectives in
+      # the first post-pause forward (torch_memory_saver unmap vs inference
+      # CUDA graphs). 48GB persist + expandable_segments is the workable
+      # point: ~32GB usable for the 21.75GB training-phase ask.
+      buffer_size_gb: 48
 
     colocated:
       enabled: true
