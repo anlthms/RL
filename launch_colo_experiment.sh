@@ -19,6 +19,13 @@ export JOB_NAME="async_${MODE}"
 # NRL_MEGATRON_CHECKPOINT_DIR caches the one-time HF -> Megatron conversion of
 # the initial checkpoint; both modes start from the same model, so they share it.
 # Training checkpoints go to checkpointing.checkpoint_dir from the yaml instead.
+# kv_cache_management_mode=offload (colocated config) requires torch_memory_saver
+# in the Megatron policy worker venv; the Jun-24 container's baked venvs predate
+# its addition to uv.lock. Installed on every node before Ray starts (compute
+# nodes may lack egress, so the wheel is pre-staged on lustre). Harmless for
+# non-colocated (persist mode never touches it).
+export SETUP_COMMAND="uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
+
 # HF_MODULES_CACHE is per-node-local: trust_remote_code dynamic modules are
 # tiny and rewriting them in a shared cache races across concurrent jobs
 # (observed: transformers_modules...configuration_nemotron_h imported while
