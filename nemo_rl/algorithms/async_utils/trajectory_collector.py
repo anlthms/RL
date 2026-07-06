@@ -491,8 +491,15 @@ class AsyncTrajectoryCollector:
         in_flight_weight_updates = self.master_config.grpo.get("async_grpo", {}).get(
             "in_flight_weight_updates", False
         )
+        # Colocated generation shares GPUs and NCCL communicators with the
+        # training compute that runs right after this pause. Pausing the
+        # engine mid-decode leaves incomplete collectives queued on those
+        # communicators (ranks pause at different step boundaries), which
+        # deadlocks the training-phase forward. Always drain in-flight
+        # generations first so the engine is idle when suspended.
+        colocated_inference = generation_cfg.get("colocated", {}).get("enabled", False)
 
-        if is_async_engine and in_flight_weight_updates:
+        if is_async_engine and in_flight_weight_updates and not colocated_inference:
             # async engines support in-flight weight updates
             # Ongoing generations will continue with their current KV caches
             # New generations (after weight update) will use the updated weights
