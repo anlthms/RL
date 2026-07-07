@@ -10,6 +10,12 @@ grpo:
 policy:
   train_global_batch_size: 256
 
+  # Reduced from 49152: the 49k-token packed microbatches were the memory
+  # wall that blocked the colocated training phase. Applied to both configs
+  # to keep the comparison fair; cascades to mb_tokens / max_new_tokens /
+  # max_model_len via interpolation in grpo_nanov3.yaml.
+  max_total_sequence_length: 32768
+
   megatron_cfg:
     # Colocated generation reuses the training model (transformer_engine impl,
     # not inference_optimized) and toggles cuda_graph_impl=local on it at
@@ -44,4 +50,4 @@ env:
 
 logger:
   wandb:
-    name: async_colocated
+    name: async_colocated_32k
