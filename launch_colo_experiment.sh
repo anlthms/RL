@@ -1,6 +1,6 @@
 #!/bin/bash
 # Launch one side of the colocated vs non-colocated async GRPO experiment
-# (see colo_vs_noncolo.txt). Submits an 8-node Slurm job via submit_nemorl.sh;
+# Submits an 8-node Slurm job via submit_nemorl.sh;
 # the training command runs on the Ray head node (driver log: <jobid>-logs/ray-driver.log).
 #
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_colo_experiment.sh {colocated|non_colocated}
