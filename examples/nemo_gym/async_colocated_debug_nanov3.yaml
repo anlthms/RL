@@ -1,0 +1,23 @@
+defaults: async_colocated_nanov3.yaml
+
+# Smoke-scale repro config for the colocated first-training-pause NCCL hang.
+# See async_colo_debug_guide.md §6. Goal: reach the pause->logprobs transition
+# in minutes instead of ~3h. If the hang does NOT reproduce at this scale,
+# bisect upward: max_total_sequence_length 8192 -> 16384 -> 32768, then
+# num_prompts_per_step 2 -> 8 -> 16.
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 4
+  val_at_start: false
+  val_period: 100000  # never validate during a debug session
+
+policy:
+  train_global_batch_size: 8  # = prompts x generations
+  max_total_sequence_length: 8192
+
+logger:
+  wandb_enabled: false
+
+checkpointing:
+  enabled: false
