@@ -362,6 +362,20 @@ class MegatronGenerationMixin:
             ]
             if cuda_graph_impl != "none":
                 toggle_cuda_graphs(lang_module, set_to="none")
+                # The generation controller toggles decode expert padding per
+                # decode step from rank-local state (using_cuda_graph_this_step),
+                # mutating the shared model config and every MoE dispatcher's
+                # drop_and_pad. Suspend can freeze ranks in DIFFERENT padding
+                # states; the training-phase forward then runs shape-mismatched
+                # EP dispatch across peers and deadlocks NCCL (py-spy on hung
+                # job 4306397: ranks spinning in MoE routing, EP alltoall
+                # watchdog timeouts). Normalize to unpadded for training;
+                # generation re-enables it per step on resume.
+                from megatron.core.inference.utils import set_decode_expert_padding
+
+                set_decode_expert_padding(
+                    lang_module, set_to=False, capacity_factor=None
+                )
 
         rotary_module = getattr(lang_module, "rotary_pos_emb", None)
         if rotary_module is not None and hasattr(
