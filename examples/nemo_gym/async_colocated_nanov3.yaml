@@ -33,10 +33,10 @@ policy:
       # the logprob/train forward. 80GB OOMed the first logprob forward once
       # inference CUDA graphs + expert padding were enabled (graph pools +
       # padding workspaces consume the margin — RL.old issue #12); 64 frees
-      # 16GB of headroom at ~20% less KV capacity. If the first-logprobs NCCL
-      # hang recurs at 64GB, the proven fallback is inference graphs off
-      # (cuda_graph_impl: "none" here; RL.old job 3988899 completed step 1
-      # that way) at ~10x slower decode.
+      # 16GB of headroom at ~20% less KV capacity. Inference CUDA graphs must
+      # stay ON (graphs off is ~10x slower decode — unacceptable); if the
+      # first-logprobs NCCL hang recurs, debug the graphs-on path (suspects
+      # S2/S3 in async_colo_debug_guide.md) rather than disabling graphs.
       buffer_size_gb: 64
 
     colocated:
