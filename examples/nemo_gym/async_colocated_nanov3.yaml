@@ -30,13 +30,14 @@ policy:
   generation:
     mcore_generation_config:
       # The buffer persists on GPU through the training pause, competing with
-      # the logprob/train forward (21.75GB contiguous asks + ~8.4GB EP
-      # alltoall workspace). Attempt history: persist@80 OOM, persist@48 OOM
-      # (~10GB short), offload@80 and persist@48+expandable_segments both
-      # hung NCCL in the first post-pause forward (VMM-backed allocators
-      # under pressure). 32GB with the standard allocator leaves ~32GB free
-      # for the training phase.
-      buffer_size_gb: 32
+      # the logprob/train forward. 80GB OOMed the first logprob forward once
+      # inference CUDA graphs + expert padding were enabled (graph pools +
+      # padding workspaces consume the margin — RL.old issue #12); 64 frees
+      # 16GB of headroom at ~20% less KV capacity. If the first-logprobs NCCL
+      # hang recurs at 64GB, the proven fallback is inference graphs off
+      # (cuda_graph_impl: "none" here; RL.old job 3988899 completed step 1
+      # that way) at ~10x slower decode.
+      buffer_size_gb: 64
 
     colocated:
       enabled: true

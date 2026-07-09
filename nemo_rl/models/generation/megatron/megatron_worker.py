@@ -240,11 +240,17 @@ class MegatronGenerationMixin:
         """Resume + unpause the engine. No-op if already awake."""
         if not self._inference_engine_asleep:
             return
+        # Barrier BEFORE waking the engine, while every rank's engine is still
+        # suspended and quiescent. Ranks that wake early immediately resume
+        # in-flight generations, so a barrier placed after the wake runs its
+        # world NCCL kernel concurrently with inference TP/EP collectives on
+        # the same GPUs while engine-group peers are still mid-transition —
+        # which deadlocks (both prior colocated runs died here at step 1).
+        torch.distributed.barrier()
         future = asyncio.run_coroutine_threadsafe(
             self._wake_engine(), self._inference_loop
         )
         future.result()
-        torch.distributed.barrier()
         self._inference_engine_asleep = False
         print(f"[Rank {self.rank}] resumed inference engine")
 
@@ -385,6 +391,19 @@ class MegatronGenerationMixin:
             self.model = self.move_model(
                 self.model, "cuda", move_params=True, move_grads=False
             )
+            # train() re-enables the DDP forward pre-hook (overlap_param_gather)
+            # at the end of each optimizer step. If it stays enabled, every
+            # inference forward issues param all-gathers on the DP group from
+            # the inference thread; the dynamic engine schedules forwards
+            # independently per rank (real vs dummy_forward, differing step
+            # counts), so those collectives interleave inconsistently across
+            # ranks and deadlock NCCL. disable(param_sync=True) also
+            # all-gathers the freshly updated params into the shared buffer,
+            # which is what makes the post-step weights visible to the
+            # colocated inference engine.
+            if self._forward_pre_hook_enabled():
+                self.disable_forward_pre_hook(param_sync=True)
+                self._disable_forward_pre_hook_until_next_train_step()
 
         lang_module = unwrap_model(self.model)
         lang_module.eval()

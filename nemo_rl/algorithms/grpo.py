@@ -3773,6 +3773,12 @@ def async_grpo_train(
 
     print(f"✅ Buffer ready for step {step}! Starting training loop...")
 
+    # Restart the iteration clock now that the one-time initial buffer fill is
+    # done. Otherwise the fill (potentially hours) is recorded as iteration #1,
+    # and check_save()'s elapsed + avg_iteration estimate trips
+    # checkpoint_must_save_by after the very first training step.
+    timeout.start_iterations()
+
     # Main training loop
     try:
         while step < master_config.grpo["max_num_steps"]:
@@ -4319,6 +4325,18 @@ def async_grpo_train(
 
                     with timer.time("checkpointing"):
                         print(f"Saving checkpoint for step {step + 1}...")
+                        # In colocated mode the checkpoint save runs a world
+                        # AllGather (gather_object in save_state_dict_async_plan)
+                        # while the inference background thread runs TP
+                        # reduce_scatter. Both NCCL operations target the same
+                        # GPU and deadlock after the watchdog timeout fires.
+                        # Pause the inference engine and collector first, exactly
+                        # as we do before each training step.
+                        if colocated_inference:
+                            print("⏸️ Pausing colocated engine for checkpointing...")
+                            ray.get(trajectory_collector.prepare_for_refit.remote())
+                            policy_generation.finish_generation()
+
                         checkpoint_path = checkpointer.init_tmp_checkpoint(
                             step + 1, grpo_save_state, master_config
                         )
@@ -4355,6 +4373,13 @@ def async_grpo_train(
                             f"{len(replay_buffer_state['trajectories'])} trajectories"
                         )
                         checkpointer.finalize_checkpoint(checkpoint_path)
+
+                        if colocated_inference:
+                            print(
+                                "🔄 Resuming colocated engine after checkpointing..."
+                            )
+                            policy_generation.prepare_for_generation()
+                            trajectory_collector.resume_after_refit.remote()
 
             # Logging
             # Log training data (match sync GRPO logging payload for parity)

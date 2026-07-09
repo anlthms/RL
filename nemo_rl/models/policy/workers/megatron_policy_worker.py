@@ -463,10 +463,11 @@ class MegatronPolicyWorkerImpl(
         assert isinstance(self.model, DistributedDataParallel)
         if self._forward_pre_hook_enabled():
             self.disable_forward_pre_hook(param_sync=False)
-        model_config = get_model_config(self.model)
-        self._first_train_step_param_sync_func = model_config.param_sync_func
-        model_config.param_sync_func = None
-        self._first_train_step_forward_pre_hook_disabled = True
+        if not self._first_train_step_forward_pre_hook_disabled:
+            model_config = get_model_config(self.model)
+            self._first_train_step_param_sync_func = model_config.param_sync_func
+            model_config.param_sync_func = None
+            self._first_train_step_forward_pre_hook_disabled = True
 
     def _copy_main_params_to_param_buffer(self, zero_grad_buffer: bool = False) -> None:
         if not isinstance(self.model, DistributedDataParallel):

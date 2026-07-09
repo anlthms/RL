@@ -14,7 +14,9 @@ grpo:
 
 policy:
   train_global_batch_size: 8  # = prompts x generations
-  max_total_sequence_length: 8192
+  # Not lower: with too little room past the prompt the dynamic engine returns
+  # empty completions and crashes on request_log_probs[-1] (RL.old issue #6).
+  max_total_sequence_length: 16384
 
 logger:
   wandb_enabled: false
