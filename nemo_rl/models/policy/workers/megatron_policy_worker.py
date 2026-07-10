@@ -333,6 +333,21 @@ class MegatronPolicyWorkerImpl(
                 "Use policy.generation.mcore_generation_config.transformer_impl=inference_optimized instead, "
                 "or set megatron_cfg.allow_inference_optimized_training=true to train a single dual-mode model."
             )
+        if config["megatron_cfg"].get("transformer_impl") == "inference_optimized":
+            # The Megatron->HF weight converter (megatron-bridge), used by
+            # prepare_refit_info() and the refit path, detects tensor-parallelism by
+            # module class name. Its registry covers InferenceRowParallelLinear and
+            # InferenceLayerNormColumnParallelLinear but omits InferenceColumnParallelLinear
+            # (used e.g. by shared_experts.linear_fc1). This gap never bites the normal
+            # non-colocated setup because the inference_optimized model is only the TARGET
+            # of a refit there, never the SOURCE that gets exported. In the single dual-mode
+            # colocated model, the training model IS inference_optimized, so its params flow
+            # through the exporter -- register the missing type (column-parallel).
+            from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+            AutoMapping.register_module_type(
+                "InferenceColumnParallelLinear", "column"
+            )
         runtime_config = validate_and_set_config(
             config,
             self.rank,
