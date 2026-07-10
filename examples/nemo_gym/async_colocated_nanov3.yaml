@@ -51,4 +51,4 @@ env:
 
 logger:
   wandb:
-    name: async_colocated_32k
+    name: async_colocated_32k_phaseA
