@@ -1,0 +1,43 @@
+defaults: async_colocated_nanov3.yaml
+
+# Single-model colocated async GRPO. Unlike async_colocated_nanov3.yaml (which
+# reuses the transformer_engine TRAINING model for generation and pays a ~10x
+# decode penalty because it lacks the inference kernels), this builds the ONE
+# shared model as transformer_impl=inference_optimized. The inference_optimized
+# layers are dual-mode: they run fast decode kernels while the dynamic engine is
+# active (InferenceMode) and fall back to the trainable Transformer-Engine path
+# for the training/logprob forward. This gives non-colocated decode speed with a
+# single model instance -- no second model and no per-step weight sync.
+# See colo_single_model_plan.md.
+
+policy:
+  megatron_cfg:
+    # Build the shared training+generation model with the fast inference layers.
+    transformer_impl: "inference_optimized"
+    # Opt in past the training-worker guard (megatron_policy_worker.py). The guard
+    # exists because inference_optimized used to imply forward-only; these layers
+    # are dual-mode, so training via the TE fallback is valid.
+    allow_inference_optimized_training: true
+
+    # Inference kernel selection (mirrors the non-colocated inference model).
+    inference_moe_token_dispatcher_type: "nccl"
+    inference_grouped_gemm_backend: "vllm"
+
+    # InferenceTopKRouter requires num_groups=None. nano-v3 uses n_group=1 /
+    # topk_group=1, so null is numerically equivalent (single group == no grouping).
+    moe_router_num_groups: null
+    moe_router_group_topk: null
+
+    # Expert padding for cuda-graph decode is FORBIDDEN with inference_optimized
+    # (text_generation_controller.py asserts) and unnecessary (it uses the NCCL
+    # dispatcher + dropless grouped-GEMM). Turning it off also removes the Phase-A
+    # set_decode_expert_padding normalization hack -- nothing to normalize now.
+    moe_pad_experts_for_cuda_graph_inference: false
+
+    # Keep activation checkpointing ON: the training-phase forward still needs it
+    # to avoid the backward OOM on 184GB GB200 (the TE-fallback path honors it).
+    activation_checkpointing: true
+
+logger:
+  wandb:
+    name: async_colocated_singlemodel

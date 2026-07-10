@@ -314,13 +314,24 @@ class MegatronPolicyWorkerImpl(
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Step 3: Setup model configuration
-        # Training workers cannot use inference_optimized transformer spec.
-        if init_optimizer:
+        # Training workers cannot use inference_optimized transformer spec, UNLESS
+        # explicitly opted in via megatron_cfg.allow_inference_optimized_training.
+        # The inference_optimized layers are dual-mode: they fall back to the
+        # trainable Transformer-Engine path when InferenceMode is inactive
+        # (moe_layer.py dispatcher switch, inference_layers.py `if self.training`,
+        # router.py / experts.py InferenceMode gating), so a single model can both
+        # train (TE fallback) and generate (fast kernels). Used by the colocated
+        # single-model decode-speed path so generation gets the fast kernels
+        # without a second model instance + weight sync.
+        if init_optimizer and not config["megatron_cfg"].get(
+            "allow_inference_optimized_training", False
+        ):
             assert (
                 config["megatron_cfg"].get("transformer_impl") != "inference_optimized"
             ), (
                 "transformer_impl=inference_optimized must not be set on training workers. "
-                "Use policy.generation.mcore_generation_config.transformer_impl=inference_optimized instead."
+                "Use policy.generation.mcore_generation_config.transformer_impl=inference_optimized instead, "
+                "or set megatron_cfg.allow_inference_optimized_training=true to train a single dual-mode model."
             )
         runtime_config = validate_and_set_config(
             config,

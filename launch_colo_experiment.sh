@@ -6,10 +6,10 @@
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_colo_experiment.sh {colocated|non_colocated}
 set -eu
 
-MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated"}
+MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated|colocated_singlemodel"}
 case "$MODE" in
-  colocated|non_colocated) ;;
-  *) echo "invalid mode: $MODE (expected colocated or non_colocated)" >&2; exit 1 ;;
+  colocated|non_colocated|colocated_singlemodel) ;;
+  *) echo "invalid mode: $MODE (expected colocated, non_colocated, or colocated_singlemodel)" >&2; exit 1 ;;
 esac
 
 cd "$(dirname "$0")"
