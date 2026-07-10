@@ -492,22 +492,39 @@ class AsyncTrajectoryCollector:
             "in_flight_weight_updates", False
         )
         # Colocated generation shares GPUs and NCCL communicators with the
-        # training compute that runs right after this pause. Pausing the
-        # engine mid-decode leaves incomplete collectives queued on those
-        # communicators (ranks pause at different step boundaries), which
-        # deadlocks the training-phase forward. Always drain in-flight
-        # generations first so the engine is idle when suspended.
+        # training compute that runs right after this pause. An earlier fix
+        # drained all in-flight generations here (waiting out the rollout tail,
+        # 30-99 min/step) under the hypothesis that a mid-decode pause left
+        # incomplete collectives queued on the shared communicators and
+        # deadlocked the training-phase forward. That hypothesis was falsified:
+        # the actual deadlock was set_decode_expert_padding leaving EP peers in
+        # divergent state at suspend (fixed in 9a77aa5c). The Megatron dynamic
+        # engine's own suspend() reaches a barrier-synchronized, globally-idle
+        # PAUSED state before suspending and *retains* in-flight requests,
+        # resuming them after the weight update. So the collector-level drain is
+        # redundant: for colocated async we now keep the in-flight generations
+        # and let the engine suspend/resume carry them across the training step,
+        # continuing the stragglers with the updated policy (Phase A).
         colocated_inference = generation_cfg.get("colocated", {}).get("enabled", False)
 
-        if is_async_engine and in_flight_weight_updates and not colocated_inference:
-            # async engines support in-flight weight updates
-            # Ongoing generations will continue with their current KV caches
-            # New generations (after weight update) will use the updated weights
-            print(
-                f"🚀 Using {backend} in-flight weight update - skipping wait for pending generations"
+        if is_async_engine and in_flight_weight_updates:
+            # async engines carry in-flight generations across the weight update.
+            # Non-colocated: generations keep running on the dedicated inference
+            # pool with their current KV caches. Colocated: the engine suspends
+            # them for the training step and resumes them afterward. Either way,
+            # new generations (after the weight update) use the updated weights.
+            carry_mode = (
+                "engine suspend/resume (colocated)"
+                if colocated_inference
+                else "concurrent in-flight (non-colocated)"
             )
             print(
-                f"   {len(self._inflight_threads)} ongoing generations will complete with current weights"
+                f"🚀 Using {backend} in-flight weight update via {carry_mode} - "
+                "skipping wait for pending generations"
+            )
+            print(
+                f"[NRL-COLO-PHASEA] retained {len(self._inflight_threads)} in-flight "
+                f"generation group(s) across refit (not drained); colocated={colocated_inference}"
             )
         else:
             # For non-async engines, wait for all pending generations to complete

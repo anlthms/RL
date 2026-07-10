@@ -112,6 +112,22 @@ class MegatronGeneration(GenerationInterface):
             self.dp_openai_server_base_urls = [
                 url for url in ray.get(url_futures) if url is not None
             ]
+            # Backend confirmation banner: colocated generation is served by the
+            # native Megatron dynamic inference engine (the training model reused
+            # in-place), NOT a separate vLLM backend. The presence of populated
+            # dp_openai_server_base_urls here is what NeMo-Gym's policy_model
+            # proxy is pointed at, so these URLs prove the Megatron engine is the
+            # thing answering /run. Logged once at setup; grep [NRL-COLO-BACKEND].
+            mcore_cfg = self.cfg.get("mcore_generation_config", {})
+            megatron_cfg = self._policy_config.get("megatron_cfg", {})
+            print(
+                "[NRL-COLO-BACKEND] colocated generation served by native Megatron "
+                "dynamic inference engine | "
+                f"backend=megatron async_engine={mcore_cfg.get('async_engine')} "
+                f"transformer_impl={megatron_cfg.get('transformer_impl')} "
+                f"kv_cache_management_mode={mcore_cfg.get('kv_cache_management_mode')} "
+                f"openai_urls={self.dp_openai_server_base_urls}"
+            )
             return
 
         # Stand up a dedicated inference-only policy.

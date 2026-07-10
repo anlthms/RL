@@ -195,7 +195,14 @@ class MegatronGenerationMixin:
 
         self._inference_engine_initialized = True
         self._inference_engine_asleep = True
-        print(f"[Rank {self.rank}] Initialized persistent inference engine")
+        # [NRL-COLO-BACKEND] per-rank confirmation that this worker's rollouts are
+        # served by the Megatron DynamicInferenceEngine (not a vLLM backend).
+        print(
+            f"[NRL-COLO-BACKEND][Rank {self.rank}] Initialized persistent "
+            f"{type(self.dynamic_inference_engine).__name__} "
+            f"(kv_cache_management_mode={kv_cache_management_mode}, "
+            f"transformer_impl={getattr(self.model.config, 'transformer_impl', 'unknown')})"
+        )
 
     async def _start_inference_coordinator(self):
         """Start the inference coordinator and engine loop."""
