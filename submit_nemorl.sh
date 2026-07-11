@@ -1,4 +1,4 @@
-export NUM_ACTOR_NODES=8
+export NUM_ACTOR_NODES=${NUM_ACTOR_NODES:-8}
 export GPUS_PER_NODE=4
 
 export CONTAINER="/lustre/fs1/portfolios/llmservice/projects/llmservice_fm_text/users/tene/nemo_rl_0624.sqsh"

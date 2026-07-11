@@ -1,0 +1,14 @@
+defaults: gentrace_colocated_nanov3.yaml
+
+# Small-scale (2-node = 8 GPU = exactly one TP2xEP4 replica) variant of the
+# colocated gen-trace run, for fast iteration. Only used to measure per-replica
+# decode step-rate (steps_per_s) during validation, which stabilizes within a
+# minute — kill the job early. Per-replica decode rate is independent of pool
+# size, so 1 replica is sufficient and schedules far faster than 8 nodes.
+
+cluster:
+  num_nodes: 2
+
+logger:
+  wandb:
+    name: gentrace_colocated_2n
