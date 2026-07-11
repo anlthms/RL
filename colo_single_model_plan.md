@@ -85,3 +85,12 @@ two-model design in `colo_decode_fast_plan.md`, or retry the single model at PP=
 - Sidesteps the plan's #1 risk (CUDA-graph lifecycle across inference-model offload) — nothing to offload.
 - Your CPU-offload doubt resolves: with one model there is no separate inference model to offload;
   the training weights *are* the generation weights.
+
+## Result (E1b, job 4564982, 2026-07-10)
+
+VALIDATED. Decode throughput ~7685 tok/s/GPU (Generation Worker Group) vs ~640 old-colo / ~7400
+non-colo target — full parity, ~12× gain. Step time ~23.4s vs ~2h22m old-colo. Single model trains
++ generates in the colocated loop; no second model, no weight sync. Two fixes were needed beyond the
+config: relax the training-worker guard (opt-in flag), and register `InferenceColumnParallelLinear`
+with megatron-bridge's AutoMapping (shared_experts.linear_fc1 export). Reward-curve correctness (E2)
+pending more wall-clock.
