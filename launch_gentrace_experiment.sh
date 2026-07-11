@@ -8,13 +8,14 @@
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_gentrace_experiment.sh {colocated|noncolocated}
 set -eu
 
-MODE=${1:?"usage: bash launch_gentrace_experiment.sh colocated|noncolocated|colocated2n"}
+MODE=${1:?"usage: bash launch_gentrace_experiment.sh colocated|noncolocated|colocated2n|colocated2ncap"}
 case "$MODE" in
   colocated)     CONFIG=examples/nemo_gym/gentrace_colocated_nanov3.yaml ;;
   noncolocated)  CONFIG=examples/nemo_gym/gentrace_noncolocated_nanov3.yaml ;;
   # 2-node (single replica) fast-iteration variant; caller should also export
   # NUM_ACTOR_NODES=2 so the Slurm allocation matches cluster.num_nodes.
   colocated2n)   CONFIG=examples/nemo_gym/gentrace_colocated_2n_nanov3.yaml ;;
+  colocated2ncap) CONFIG=examples/nemo_gym/gentrace_colocated_2n_cap48_nanov3.yaml ;;
   *) echo "invalid mode: $MODE (expected colocated, noncolocated, or colocated2n)" >&2; exit 1 ;;
 esac
 

@@ -1,0 +1,17 @@
+defaults: gentrace_colocated_2n_nanov3.yaml
+
+# Controlled test: cap the colocated engine to ~48 concurrent decode requests so
+# it runs at the SAME per-replica batch (~40) as the non-colocated validation
+# (which sat at ~41 concurrent). This isolates model/engine decode efficiency
+# from the batch-size confound. Compare steps_per_s at batch~40 against non-colo's
+# ~88 steps/s. If colo~=88 the shared model is fine (slowdown was batch regime);
+# if colo<<88 the shared training-model engine is intrinsically slower.
+
+policy:
+  generation:
+    mcore_generation_config:
+      max_requests: 48
+
+logger:
+  wandb:
+    name: gentrace_colocated_2n_cap48
