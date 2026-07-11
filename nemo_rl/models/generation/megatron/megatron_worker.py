@@ -223,6 +223,40 @@ class MegatronGenerationMixin:
             text_generation_controller, self.inference_context
         )
 
+        # Diagnostic (NRL_GEN_TRACE=1): report the actual MoE cudagraph scope state
+        # AFTER capture, so we can directly compare colo (reused training model) vs
+        # non-colo (dedicated inference model) instead of inferring from log order.
+        # use_partial_cudagraphs=True => expert dispatch ran EAGER during capture.
+        if os.environ.get("NRL_GEN_TRACE", "0") == "1" and self.rank == 0:
+            try:
+                from megatron.core.transformer.transformer_layer import (
+                    MoETransformerLayer,
+                )
+
+                _lm = unwrap_model(self.model)
+                _states = []
+                for _m in _lm.modules():
+                    if isinstance(_m, MoETransformerLayer):
+                        _states.append(
+                            (
+                                getattr(_m, "use_partial_cudagraphs", "n/a"),
+                                hasattr(_m, "cudagraph_manager"),
+                                getattr(
+                                    getattr(_m, "mlp", None), "fwd_execution_map", "n/a"
+                                ),
+                            )
+                        )
+                if _states:
+                    up, hascg, fmap = _states[0]
+                    print(
+                        f"[NRL-CG-DIAG] rank=0 n_moe_layers={len(_states)} "
+                        f"use_partial_cudagraphs={up} has_full_manager={hascg} "
+                        f"fwd_execution_map={fmap}",
+                        flush=True,
+                    )
+            except Exception as _e:  # pragma: no cover - diagnostic only
+                print(f"[NRL-CG-DIAG] error: {_e}", flush=True)
+
         # Opt-in generation-concurrency trace (NRL_GEN_TRACE=1). Wraps the engine's
         # per-step coroutine to emit a compact line every NRL_GEN_TRACE_EVERY steps
         # (rank 0 only) reporting in-flight concurrency: active decoding requests
