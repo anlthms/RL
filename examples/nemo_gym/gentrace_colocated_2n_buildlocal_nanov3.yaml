@@ -1,0 +1,20 @@
+defaults: gentrace_colocated_2n_cap48_nanov3.yaml
+
+# Test the build-time fix for the ~7x colocated decode slowdown. Root cause
+# hypothesis: the colo model is BUILT with cuda_graph_impl='none' (training
+# default), so Megatron's create_mcore_cudagraph_manager (gated on
+# cuda_graph_impl=='local') never creates the per-layer CUDA-graph managers.
+# The runtime toggle_cuda_graphs('local') then has nothing proper to restore, so
+# decode graphs are weak/eager vs the non-colo dedicated model (built 'local').
+# Fix: build the (shared) training model with cuda_graph_impl='local' so the
+# managers exist; training still toggles graphs off via finish_generation.
+# val_at_start measures decode BEFORE any training step, so this isolates the
+# decode effect from training-compatibility questions.
+
+policy:
+  megatron_cfg:
+    cuda_graph_impl: "local"
+
+logger:
+  wandb:
+    name: gentrace_colocated_2n_buildlocal

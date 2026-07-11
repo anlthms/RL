@@ -16,6 +16,7 @@ case "$MODE" in
   # NUM_ACTOR_NODES=2 so the Slurm allocation matches cluster.num_nodes.
   colocated2n)   CONFIG=examples/nemo_gym/gentrace_colocated_2n_nanov3.yaml ;;
   colocated2ncap) CONFIG=examples/nemo_gym/gentrace_colocated_2n_cap48_nanov3.yaml ;;
+  colocated2nbuildlocal) CONFIG=examples/nemo_gym/gentrace_colocated_2n_buildlocal_nanov3.yaml ;;
   *) echo "invalid mode: $MODE (expected colocated, noncolocated, or colocated2n)" >&2; exit 1 ;;
 esac
 
