@@ -205,16 +205,28 @@ class MegatronGenerationMixin:
             _orig_async_step = _eng.async_step
             _every = max(1, int(os.environ.get("NRL_GEN_TRACE_EVERY", "25")))
             _rank = self.rank
-            _state = {"i": 0}
+            _state = {"i": 0, "t_last": None, "step_last": 0}
+            import time as _time
 
             async def _traced_async_step(*args, **kwargs):
                 ret = await _orig_async_step(*args, **kwargs)
                 _state["i"] += 1
                 # Log all ranks (not just rank 0) so pool-wide concurrency can be
-                # summed across DP replicas (TP-lead ranks) — this distinguishes
-                # "few requests per replica" from "requests funneled to one replica".
+                # summed across DP replicas (TP-lead ranks). Also report decode
+                # step RATE (engine steps/sec over the interval) so we can compare
+                # per-token decode latency at a given concurrency between modes —
+                # the missing piece once concurrency turned out similar.
                 if _state["i"] % _every == 0:
                     ctx = _eng.context
+                    now = _time.monotonic()
+                    if _state["t_last"] is not None:
+                        dt = now - _state["t_last"]
+                        steps = _state["i"] - _state["step_last"]
+                        sps = steps / dt if dt > 0 else 0.0
+                    else:
+                        sps = 0.0
+                    _state["t_last"] = now
+                    _state["step_last"] = _state["i"]
                     try:
                         active = ctx.total_request_count - ctx.paused_request_count
                         print(
@@ -224,6 +236,7 @@ class MegatronGenerationMixin:
                             f"waiting={len(_eng.waiting_request_ids)} "
                             f"total_reqs={ctx.total_request_count} "
                             f"active_tokens={ctx.active_token_count} "
+                            f"steps_per_s={sps:.1f} "
                             f"finished={_eng.finished_request_count}",
                             flush=True,
                         )
