@@ -1,15 +1,13 @@
 defaults: async_non_colocated_nanov3.yaml
 
 # Debug overlay to profile generation concurrency during validation (non-colocated
-# dedicated inference pool). Identical validation workload to
-# gentrace_colocated_nanov3.yaml so the two are directly comparable. Validates
-# once at start; kill after the first validation. Run with NRL_GEN_TRACE=1.
+# dedicated inference pool). Same full 1000-prompt validate-at-start workload as
+# gentrace_colocated_nanov3.yaml so the two are directly comparable. Kill once the
+# [NRL-GEN-TRACE] concurrency lines stabilize. Run with NRL_GEN_TRACE=1.
 
 grpo:
   val_at_start: true
-  val_period: 1000000        # only validate at start
-  max_val_samples: 256       # same as colo overlay: 256 prompts x 4 gens
-  val_batch_size: 256
+  val_period: 1000000        # only validate at start (we kill before a 2nd)
 
 logger:
   wandb:
