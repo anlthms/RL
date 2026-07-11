@@ -1,0 +1,18 @@
+defaults: async_colocated_singlemodel_nanov3.yaml
+
+# Debug overlay to profile generation concurrency during validation (colocated
+# single dual-mode model). Validates once at start with a small, fixed workload
+# so the run reaches validation quickly; kill after the first validation. Run
+# with NRL_GEN_TRACE=1 to emit [NRL-GEN-TRACE] per-step concurrency lines.
+# Keep max_new_tokens at the production value (inherited) so KV-per-sequence —
+# and therefore the concurrency ceiling — matches the real run.
+
+grpo:
+  val_at_start: true
+  val_period: 1000000        # only validate at start
+  max_val_samples: 256       # 256 prompts x 4 gens = 1024 sequences (vs 4000)
+  val_batch_size: 256
+
+logger:
+  wandb:
+    name: gentrace_colocated

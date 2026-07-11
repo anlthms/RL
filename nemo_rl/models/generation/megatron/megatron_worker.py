@@ -193,6 +193,43 @@ class MegatronGenerationMixin:
             text_generation_controller, self.inference_context
         )
 
+        # Opt-in generation-concurrency trace (NRL_GEN_TRACE=1). Wraps the engine's
+        # per-step coroutine to emit a compact line every NRL_GEN_TRACE_EVERY steps
+        # (rank 0 only) reporting in-flight concurrency: active decoding requests
+        # (total - paused), paused/waiting counts, and active token count. Used to
+        # compare why colocated validation generation runs at lower effective
+        # concurrency than non-colocated. No effect unless the env var is set; the
+        # engine (a Megatron submodule we do not edit) is patched from here.
+        if os.environ.get("NRL_GEN_TRACE", "0") == "1":
+            _eng = self.dynamic_inference_engine
+            _orig_async_step = _eng.async_step
+            _every = max(1, int(os.environ.get("NRL_GEN_TRACE_EVERY", "25")))
+            _rank = self.rank
+            _state = {"i": 0}
+
+            async def _traced_async_step(*args, **kwargs):
+                ret = await _orig_async_step(*args, **kwargs)
+                _state["i"] += 1
+                if _rank == 0 and _state["i"] % _every == 0:
+                    ctx = _eng.context
+                    try:
+                        active = ctx.total_request_count - ctx.paused_request_count
+                        print(
+                            f"[NRL-GEN-TRACE] rank={_rank} step={_state['i']} "
+                            f"decode_only={ctx.is_decode_only()} "
+                            f"active_reqs={active} paused={ctx.paused_request_count} "
+                            f"waiting={len(_eng.waiting_request_ids)} "
+                            f"total_reqs={ctx.total_request_count} "
+                            f"active_tokens={ctx.active_token_count} "
+                            f"finished={_eng.finished_request_count}",
+                            flush=True,
+                        )
+                    except Exception as _e:  # pragma: no cover - trace only
+                        print(f"[NRL-GEN-TRACE] read error: {_e}", flush=True)
+                return ret
+
+            _eng.async_step = _traced_async_step
+
         self._inference_engine_initialized = True
         self._inference_engine_asleep = True
         # [NRL-COLO-BACKEND] per-rank confirmation that this worker's rollouts are
