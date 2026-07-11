@@ -289,3 +289,66 @@ missing AutoMapping registration.
 
 **Overall:** decode-parity thesis proven and sustained; training correct on the sampled points.
 Remaining open item is a longer apples-to-apples reward comparison vs non-colo baseline a28k1rl8.
+
+### E2b — generation-concurrency profiling (why non-colo validation is faster)
+
+- Instrumented the Megatron DynamicInferenceEngine (opt-in NRL_GEN_TRACE, patched from
+  megatron_worker.py — submodule not edited) to log per-step in-flight concurrency
+  (active/paused/waiting requests, active tokens).
+- Two matched validate-at-start runs, identical 256-prompt val workload (1024 seqs),
+  same max_new_tokens=32768 so the KV/concurrency ceiling matches production:
+  - non-colo: job 4607214 (nemotron_sw_pre)
+  - colo single-model: job 4607216 (nemotron_sw_post)
+- Hypothesis: colo shows lower steady-state active_reqs (KV headroom / single serving
+  coordinator) → fewer sequences decode in parallel → longer validation wall-clock at
+  equal per-token speed. Kill each once [NRL-GEN-TRACE] stabilizes during validation.
+
+#### E2b colo result (job 4607216)
+- 8319 trace lines during validation: active_reqs ~29-64 per replica (rank 0),
+  **paused=0 and waiting=0 on EVERY line**. The colocated engine is NEVER KV-limited
+  during validation — it is request-starved (~30-60 concurrent seqs), not capacity-bound.
+- So colo validation slowness is NOT decode speed, NOT KV/memory — it is low effective
+  generation concurrency (few sequences in flight).
+- Job died near 4h wall from NeMo-Gym HTTP ClientOSError (validation genuinely ~43min).
+- Next: non-colo comparison (per-rank trace) to see if it packs more per replica or
+  spreads across more replicas. non-colo resubmitted on nemotron_sw_post.
+
+#### E2b non-colo result (job 4653968)
+- All-rank trace: 11 distinct gen ranks actively decoding CONCURRENTLY
+  (ranks 0,1,2,3,4,5,8,11,12,13,14), each ~13-46 active_reqs, paused=0/waiting=0.
+- So non-colo runs validation across MANY DP replicas in parallel (pool-wide
+  concurrency = sum over replicas ≈ few hundred sequences in flight).
+- Contrast with colo rank-0 ~30-64. Decisive test (job 4656156, all-rank colo trace):
+  does colo spread across ranks too, or funnel to one replica?
+
+#### E2b colo per-rank result (job 4656156) + reframe
+- Colo ALSO spreads across ~11 ranks (0,2,4,7,9,12,16,18,20,24,31), ~20-67 active_reqs each,
+  paused=0/waiting=0. So concurrency is SIMILAR to non-colo — funnel hypothesis REFUTED.
+- Colo rank0 (from 4607216): 166,360 engine steps but only 308 finished over ~43min, rarely
+  idle (active_reqs ~30-64 steady). => sequences run to ~20-32k tokens; engine decodes
+  continuously but completes ~8x slower per replica than non-colo (~55 vs ~7 finished/min/replica).
+- => The gap is per-GPU DECODE RATE at a given concurrency, not KV, not batch size, not idle.
+- Added steps_per_s to trace (commit) to measure tokens/s/replica = active_reqs * steps_per_s.
+  Rerunning both to steady state: non-colo + colo.
+
+#### E2b decode-rate measurement (steps_per_s trace)
+- NON-COLO (job 4658796): validation window steady state = active_reqs ~41, steps_per_s ~90/s,
+  val time 472s. => ~41 x 90 ≈ 3700 decode-tokens/s/replica (~1850 tok/s/GPU).
+- Iterating faster per user guidance: all jobs on nemotron_sw_post; measuring colo decode rate
+  on a 2-node (single TP2xEP4 replica) run (job 4674235) since per-replica rate is pool-independent.
+  Kill early once steps_per_s stabilizes.
+
+#### E2b ROOT CAUSE (decode step-rate, 2-node fast iteration on post)
+- COLO (2-node, 1 replica, job 4674235): active_reqs ~110, steps_per_s ~12.9 => ~1458 tok/s/replica
+  = ~730 tok/s/GPU.
+- NON-COLO (job 4658796): active_reqs ~41, steps_per_s ~90 => ~3690 tok/s/replica = ~1845 tok/s/GPU.
+- Colo runs a BIGGER decode batch (110 vs 41) yet gets <half the per-GPU throughput => colo decode
+  step is intrinsically ~2.5x less efficient per GPU. Both use CUDA graphs (colo buckets to 276,
+  non-colo to 348), so it's not graphs-off. Not concurrency, KV, memory, or idle (all ruled out).
+- CONCLUSION: non-colo validation is faster because the DEDICATED inference model decodes ~2.5x
+  more efficiently per GPU than the colocated engine (which wraps the TRAINING model: DDP/Float16
+  wrappers, optimizer attached-but-offloaded, training memory layout). Combined with a warm
+  dedicated pool, this yields the ~5x validation wall-clock gap (472s non-colo vs ~2600s colo).
+- Note: colo's single-model decode hit 7685 tok/s/GPU at HIGH rollout concurrency (E1b) but
+  degrades at validation's lower per-replica batch — the per-step overhead dominates there.
+- Deeper micro-cause (DDP-wrapper overhead vs graph/kernel differences) would need nsys profiling.
