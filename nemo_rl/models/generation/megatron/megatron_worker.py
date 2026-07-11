@@ -30,7 +30,10 @@ from megatron.core.inference.config import (
 from megatron.core.inference.engines.dynamic_engine import EngineState
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.transformer.enums import InferenceCudaGraphScope
-from megatron.core.transformer.utils import toggle_cuda_graphs
+from megatron.core.transformer.utils import (
+    toggle_cuda_graphs,
+    transition_moe_cudagraphs,
+)
 from megatron.core.utils import unwrap_model
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -421,6 +424,14 @@ class MegatronGenerationMixin:
                 "cuda_graph_impl"
             ]
             if cuda_graph_impl != "none":
+                # Undo the inference MoE full-scope transition before returning the
+                # model to training (mirror rl_utils.py 'partial' teardown), so the
+                # training-phase forward uses the training-appropriate scope.
+                if getattr(lang_module.config, "num_moe_experts", None):
+                    try:
+                        transition_moe_cudagraphs(lang_module, "partial")
+                    except AssertionError:
+                        pass
                 toggle_cuda_graphs(lang_module, set_to="none")
                 # The generation controller toggles decode expert padding per
                 # decode step from rank-local state (using_cuda_graph_this_step),
@@ -490,7 +501,33 @@ class MegatronGenerationMixin:
 
         cuda_graph_impl = mcore_generation_config["cuda_graph_impl"]
         if cuda_graph_impl != "none":
+            # Mirror Megatron's rl_utils inference setup (megatron/rl/rl_utils.py):
+            # an empty cuda_graph_modules preserves full-layer capture, and MoE
+            # layers must be transitioned to 'full' scope so the expert dispatch is
+            # graph-captured. Without this, toggle_cuda_graphs alone leaves MoE
+            # experts running EAGER (partial scope), which costs ~7x decode latency
+            # at low batch — the colocated-validation slowdown. Non-colocated dodges
+            # this because its dedicated inference model is BUILT with
+            # cuda_graph_impl='local' (full managers created at __init__); the
+            # colocated model is the reused training model (built 'none', toggled).
+            lang_module.config.cuda_graph_modules = []
             toggle_cuda_graphs(lang_module, set_to=cuda_graph_impl)
+            if getattr(lang_module.config, "num_moe_experts", None):
+                try:
+                    transition_moe_cudagraphs(lang_module, "full")
+                    print(
+                        f"[Rank {self.rank}] transitioned MoE cudagraphs -> full "
+                        "(expert dispatch graph-captured)",
+                        flush=True,
+                    )
+                except AssertionError as e:
+                    # Full-scope requires the full cudagraph_manager to exist on each
+                    # MoE layer (created at __init__ when built with cuda_graph_impl
+                    # ='local'). If the reused training model lacks it, surface it.
+                    print(
+                        f"[Rank {self.rank}] MoE full-scope transition unavailable: {e}",
+                        flush=True,
+                    )
 
         # tags=["weights"] means we are inside refit_policy_generation between
         # suspend_for_refit and the weight transfer — the engine was intentionally
