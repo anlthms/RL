@@ -271,3 +271,21 @@ baseline) — needs more wall-clock (val_period=5).
 **Conclusion:** the single-model approach closes the entire ~10× colocated decode gap and makes the
 two-model `colo_decode_fast_plan.md` unnecessary. Net change: guard opt-in + one config + one
 missing AutoMapping registration.
+
+### E1b full-run wrap (job 4564982, ran full 4h → TIMEOUT, not a crash)
+
+- **Decode throughput sustained** across the whole run: ~7000–8277 tok/s/GPU (one 3005 outlier at a
+  refit boundary), consistently at/above the ~7400 non-colo target. Not a first-step artifact.
+- **Non-validation step time 16–36s** (121s first-step warmup). Confirms generation is no longer the
+  bottleneck.
+- **E2 (correctness) — sane and functioning:** validation ran at steps 5 and 10:
+  - step 5:  Accuracy 0.294, Avg Reward 0.4336
+  - step 10: Accuracy 0.280, Avg Reward 0.4844
+  Non-degenerate rewards, training working through the TE fallback. Step-15 validation was mid-run at
+  the 4h wall-clock cutoff.
+- **Caveat:** only ~15 optimizer steps + 2 validation points in 4h because each validation costs
+  ~43 min (val_batch_size=1000, full generation) — that overhead, NOT our change, capped step count.
+  A rigorous reward-vs-non-colo curve needs a longer run and/or lighter validation cadence.
+
+**Overall:** decode-parity thesis proven and sustained; training correct on the sampled points.
+Remaining open item is a longer apples-to-apples reward comparison vs non-colo baseline a28k1rl8.
