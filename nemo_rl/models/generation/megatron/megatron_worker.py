@@ -210,7 +210,10 @@ class MegatronGenerationMixin:
             async def _traced_async_step(*args, **kwargs):
                 ret = await _orig_async_step(*args, **kwargs)
                 _state["i"] += 1
-                if _rank == 0 and _state["i"] % _every == 0:
+                # Log all ranks (not just rank 0) so pool-wide concurrency can be
+                # summed across DP replicas (TP-lead ranks) — this distinguishes
+                # "few requests per replica" from "requests funneled to one replica".
+                if _state["i"] % _every == 0:
                     ctx = _eng.context
                     try:
                         active = ctx.total_request_count - ctx.paused_request_count
