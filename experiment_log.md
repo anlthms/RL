@@ -352,3 +352,31 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
 - Note: colo's single-model decode hit 7685 tok/s/GPU at HIGH rollout concurrency (E1b) but
   degrades at validation's lower per-replica batch — the per-step overhead dominates there.
 - Deeper micro-cause (DDP-wrapper overhead vs graph/kernel differences) would need nsys profiling.
+
+#### E2b DECISIVE (matched-batch, job 4692029) — user hypothesis CONFIRMED
+- Colo capped to batch~48 (waiting=313 confirms cap): steps_per_s ~12.3.
+- Non-colo at batch~41: steps_per_s ~88.
+- => At MATCHED batch, colo decode step is ~7x slower. NOT a batch confound. The colocated
+  (shared training-model) engine has a fixed ~77ms/step vs non-colo dedicated ~11.7ms/step.
+- Reconciles E1b parity: colo's per-step is FLAT ~13 steps/s from batch 40 to 200, so colo only
+  reaches ~7685 tok/s/GPU by running HUGE batch (~1200/replica during rollouts); at validation's
+  low batch (~40-113) the fixed per-step cost dominates => ~5x slower validation.
+- A fixed batch-independent ~7x per-step overhead is the classic signature of eager execution
+  (CUDA-graph replay not effective) — matches commit db62bdd0 "graphs-off = ~10x decode penalty".
+  Investigating whether colo decode replays CUDA graphs.
+
+#### E2b MECHANISM + fix framing
+- Engine-level cuda-graph config is IDENTICAL (cuda_graph_impl=local, scope=block, num_cuda_graphs=-1)
+  in both. So the 7x is NOT graphs-off at the config level.
+- The difference is the model BUILD: colo REUSES the training model (built cuda_graph_impl='none',
+  DDP/Float16-wrapped, then graphs toggled on at gen via toggle_cuda_graphs); non-colo builds a
+  DEDICATED inference model (cuda_graph_impl='local' at build, no DDP/optimizer). => reused training
+  model has a fixed ~7x per-step decode overhead (eager-like), likely because toggled-on graphs on a
+  training-built/DDP-wrapped module are less effective than build-time inference graphs.
+- User's hypothesis CONFIRMED: the shared training-model engine decodes intrinsically slower.
+- Nuance: penalty is FIXED per-step, so it only hurts at LOW batch (validation ~40); at high rollout
+  batch (~1200) the single model still reaches ~7685 tok/s/GPU (E1b). So it is validation-specific.
+- Fix options: (a) cheapest — reduce validation cost / raise concurrency (no model change);
+  (b) investigate making the single model's toggled graphs as effective as build-time (would fix ALL
+  low-batch decode, keep single-model design); (c) dedicated inference model for generation (user's
+  suggestion; robust but reintroduces two-model complexity).
