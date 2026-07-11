@@ -192,6 +192,33 @@ class MegatronGenerationMixin:
             inference_wrapped_model=self.inference_wrapped_model,
             tokenizer=self.megatron_tokenizer,
         )
+
+        # CRITICAL ORDERING: the DynamicInferenceEngine constructor runs
+        # create_cuda_graphs(), which CAPTURES the decode graphs. For a MoE model
+        # those graphs must be captured with the MoE layers in 'full' scope, or the
+        # expert dispatch is baked into the graph as eager (partial scope) and decode
+        # stays ~7x slower at low batch (the colocated-validation slowdown). Doing
+        # the toggle+transition in prepare_for_generation is too late — capture has
+        # already happened. So set full scope HERE, right before construction.
+        # Mirrors megatron/rl/rl_utils.py inference setup.
+        cg_impl = mcore_generation_config.get("cuda_graph_impl", "none")
+        if cg_impl != "none":
+            lang_module = unwrap_model(self.model)
+            lang_module.config.cuda_graph_modules = []
+            toggle_cuda_graphs(lang_module, set_to=cg_impl)
+            if getattr(lang_module.config, "num_moe_experts", None):
+                try:
+                    transition_moe_cudagraphs(lang_module, "full")
+                    print(
+                        f"[Rank {self.rank}] MoE cudagraphs -> full BEFORE capture",
+                        flush=True,
+                    )
+                except AssertionError as e:
+                    print(
+                        f"[Rank {self.rank}] MoE full-scope unavailable pre-capture: {e}",
+                        flush=True,
+                    )
+
         self.dynamic_inference_engine = DynamicInferenceEngine(
             text_generation_controller, self.inference_context
         )
