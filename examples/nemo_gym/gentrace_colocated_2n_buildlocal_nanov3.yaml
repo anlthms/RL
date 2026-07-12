@@ -14,6 +14,10 @@ defaults: gentrace_colocated_2n_cap48_nanov3.yaml
 policy:
   megatron_cfg:
     cuda_graph_impl: "local"
+    # Required companion: cuda_graph_impl='local' rejects inference scope 'none'
+    # (ALLOWED_INFERENCE_SCOPES). Match the inference model's 'block' scope so the
+    # build passes and the per-layer graph managers are created for block capture.
+    inference_cuda_graph_scope: "block"
 
 logger:
   wandb:
