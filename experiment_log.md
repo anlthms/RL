@@ -433,3 +433,9 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
   comparison needs the fixed val-split (offline validation). Offline harness now runs validation
   correctly (3 bugs fixed) BUT is reaped on the 8-node allocation (idle training GPUs, 34% waste) —
   needs a small dedicated-inference allocation to run without the reaper.
+
+## E3 offline validation — HARNESS WORKING (colocated single-pool, 2-node)
+- Fixed: offline val runs on colocated single pool (no idle GPUs -> no reaper; no coordinator hang).
+- Proof: non-colo step_5 checkpoint -> val accuracy=0.261, val time ~44min (slow colo decode, fine).
+- Running full sweep: run_offline_validation.sh over each arm's checkpoints (parallel 2-node jobs).
+  Reward = "Accuracy" from each offval_<arm>_step<N> job's ray-driver.log.
