@@ -30,7 +30,17 @@ export JOB_NAME="async_${MODE}"
 # its addition to uv.lock. Installed on every node before Ray starts (compute
 # nodes may lack egress, so the wheel is pre-staged on lustre). Harmless for
 # non-colocated (persist mode never touches it).
-export SETUP_COMMAND="uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
+MODEL_PATH="/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
+WORKER_PY="/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python"
+# SETUP_COMMAND runs once per node, single-threaded, BEFORE Ray workers start
+# (ray.sub). Pre-warming the trust_remote_code dynamic modules here (into the same
+# per-node HF_MODULES_CACHE the workers use) fully materializes them before any
+# concurrent worker import, eliminating the half-written-module race that caused
+# intermittent "NemotronHConfig has no attribute" AutoTokenizer failures. HF's
+# module copy is not atomic, so a lock inside the workers would still allow torn
+# reads; doing it once, before there is any concurrency, is the robust fix.
+export SETUP_COMMAND="uv pip install --python ${WORKER_PY} --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl && \
+HF_MODULES_CACHE=/tmp/hf_modules_${MODE} ${WORKER_PY} -c \"from transformers import AutoConfig, AutoTokenizer; m='${MODEL_PATH}'; AutoConfig.from_pretrained(m, trust_remote_code=True); AutoTokenizer.from_pretrained(m, trust_remote_code=True); print('[prewarm] HF trust_remote_code dynamic modules materialized')\""
 
 # HF_MODULES_CACHE is per-node-local: trust_remote_code dynamic modules are
 # tiny and rewriting them in a shared cache races across concurrent jobs

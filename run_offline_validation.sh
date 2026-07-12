@@ -33,7 +33,13 @@ for N in $steps; do
 
   export NUM_ACTOR_NODES=2
   export JOB_NAME="offval_${ARM}_step${N}"
-  export SETUP_COMMAND="uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
+  # Pre-warm trust_remote_code dynamic modules once per node (single-threaded,
+  # before Ray workers) into the same HF_MODULES_CACHE the workers use, so no
+  # worker imports a half-written module (NemotronHConfig race).
+  WORKER_PY="/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python"
+  MODEL_PATH="/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
+  export SETUP_COMMAND="uv pip install --python ${WORKER_PY} --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl && \
+HF_MODULES_CACHE=/tmp/hf_modules_offval_${ARM}_${N} ${WORKER_PY} -c \"from transformers import AutoConfig, AutoTokenizer; m='${MODEL_PATH}'; AutoConfig.from_pretrained(m, trust_remote_code=True); AutoTokenizer.from_pretrained(m, trust_remote_code=True); print('[prewarm] HF dynamic modules materialized')\""
   export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \
 TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
 HF_MODULES_CACHE=/tmp/hf_modules_offval_${ARM}_${N} \

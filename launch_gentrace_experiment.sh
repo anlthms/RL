@@ -26,7 +26,12 @@ export JOB_NAME="gentrace_${MODE}"
 
 # Same torch_memory_saver wheel preinstall as the production launcher (needed by
 # the colocated kv_cache offload path; harmless for non-colocated persist mode).
-export SETUP_COMMAND="uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
+# Also pre-warm trust_remote_code dynamic modules once per node before Ray workers
+# (avoids the half-written NemotronHConfig race). See launch_colo_experiment.sh.
+WORKER_PY="/opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python"
+MODEL_PATH="/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
+export SETUP_COMMAND="uv pip install --python ${WORKER_PY} --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl && \
+HF_MODULES_CACHE=/tmp/hf_modules_gentrace_${MODE} ${WORKER_PY} -c \"from transformers import AutoConfig, AutoTokenizer; m='${MODEL_PATH}'; AutoConfig.from_pretrained(m, trust_remote_code=True); AutoTokenizer.from_pretrained(m, trust_remote_code=True); print('[prewarm] HF dynamic modules materialized')\""
 
 # NRL_GEN_TRACE=1 activates the opt-in per-step concurrency trace wired into the
 # Megatron DynamicInferenceEngine from megatron_worker.py.
