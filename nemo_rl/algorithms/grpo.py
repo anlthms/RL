@@ -3695,18 +3695,26 @@ def async_grpo_train(
             traceback.print_exc()
             return
 
-    # Start collection only after generation is ready.
-    trajectory_collector.set_weight_version.remote(weight_version)
-    collection_task = trajectory_collector.start_collection.remote(dataloader)
-    print("📦 Started continuous background trajectory collection")
+    # Offline-validation mode validates the loaded checkpoint and exits; it must
+    # NOT start the background trajectory collector (it competes with validation
+    # generation and, empirically, caused a distributed recvBytes failure during
+    # the val forward that val_at_start's try/except silently swallowed).
+    validate_only = master_config.grpo.get("validate_only", False)
+
+    # Start collection only after generation is ready (skipped in validate_only).
+    if not validate_only:
+        trajectory_collector.set_weight_version.remote(weight_version)
+        collection_task = trajectory_collector.start_collection.remote(dataloader)
+        print("📦 Started continuous background trajectory collection")
 
     print("✅ Policy generation setup complete, proceeding to validation...")
 
     # Run validation at start if configured
     if val_at_start and step == 0:
         print("\n🔍 Running initial validation...")
-        # Pause trajectory collection during initial validation
-        trajectory_collector.pause.remote()
+        if not validate_only:
+            # Pause trajectory collection during initial validation.
+            trajectory_collector.pause.remote()
 
         try:
             val_metrics, validation_timings = validate(
@@ -3723,22 +3731,28 @@ def async_grpo_train(
                 policy_generation.finish_generation()
             logger.log_metrics(val_metrics, step, prefix="validation")
             logger.log_metrics(validation_timings, step, prefix="timing/validation")
-            print("✅ Initial validation completed successfully")
+            print(
+                f"✅ Initial validation completed successfully | "
+                f"accuracy={val_metrics.get('accuracy')}"
+            )
         except Exception as e:
             print(f"❌ Initial validation failed: {e}")
             import traceback
 
             traceback.print_exc()
-            # Continue anyway since validation is optional
+            # In validate_only mode a failed validation is fatal (no reward to
+            # record); otherwise continue since validation is optional in training.
+            if validate_only:
+                raise
         finally:
-            # Resume trajectory collection after initial validation
-            trajectory_collector.resume.remote()
+            if not validate_only:
+                # Resume trajectory collection after initial validation.
+                trajectory_collector.resume.remote()
 
-    # Offline-validation mode: validate the loaded checkpoint (via val_at_start
-    # above) and exit before any training / buffer wait. Used by the offline
-    # reward-curve harness that validates saved checkpoints out of the critical
-    # path. No effect during normal training (flag defaults to False).
-    if master_config.grpo.get("validate_only", False):
+    # Offline-validation mode: validation (above) is done; exit before any
+    # training / buffer wait. Used by the offline reward-curve harness that
+    # validates saved checkpoints out of the critical path.
+    if validate_only:
         print("✅ validate_only: validation done, exiting before training.")
         return
 
