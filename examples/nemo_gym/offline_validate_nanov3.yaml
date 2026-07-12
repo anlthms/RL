@@ -1,0 +1,27 @@
+defaults: async_non_colocated_nanov3.yaml
+
+# Offline validation of a saved training checkpoint. Uses the DEDICATED
+# non-colocated inference model (fast, full-speed decode) regardless of which
+# training arm produced the checkpoint, so the reward comparison is apples-to-
+# apples and not slowed by the colocated low-batch decode penalty.
+#
+# The driver (run_offline_validation.sh) sets checkpointing.checkpoint_dir to a
+# view whose only step_* dir is the checkpoint being validated; grpo setup()
+# resumes from it, validate() (via val_at_start) computes the val-split reward,
+# and validate_only exits before any training. Validation efficiency does not
+# matter here (the point is the reward, not throughput).
+
+grpo:
+  val_at_start: true
+  val_at_end: false
+  val_period: 0
+  validate_only: true
+
+checkpointing:
+  enabled: true          # needed so setup() resumes weights from checkpoint_dir
+  save_period: 1000000   # never saves (validate_only exits before training)
+  metric_name: null
+
+logger:
+  wandb:
+    name: offline_validate
