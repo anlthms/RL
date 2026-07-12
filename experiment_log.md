@@ -403,3 +403,15 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
 - DECISION: for fast low-batch (validation) decode, generation needs a dedicated inference-optimized
   model instance (the two-model design). The single dual-mode model stays fine for HIGH-batch rollout
   decode (7685 tok/s/GPU) but cannot match non-colo at low batch. User's original instinct confirmed.
+
+## E3 — fair colo-vs-noncolo training comparison via OFFLINE validation
+- Validation moved off the critical path (val_period=0) so the colo low-batch decode penalty no
+  longer contaminates the comparison. Both arms: save every 5 steps (weights only, keep all),
+  metric_name=null, fresh start (checkpoint dirs did not exist).
+- Runs (nemotron_sw_post, 4h each, fresh from SFT ckpt):
+  - non-colo: job 4734442 (noval_non_colocated) -> ckpts .../checkpoints/noval_non_colocated
+  - colo single-model: job 4734444 (noval_colocated_singlemodel) -> .../noval_colocated_singlemodel
+- Offline validation (to build after runs): load each saved checkpoint into a Megatron DEDICATED
+  inference model, run grpo validate() on the val-split, record (step, reward). Plot reward vs step
+  and reward vs training wall-clock for both arms. Use the same fast backend for both for fairness.
+- Expectation: both arms now reach ~30 optimizer steps/4h (no validation stalls).
