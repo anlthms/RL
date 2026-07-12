@@ -31,6 +31,7 @@ for N in $steps; do
   rm -rf "$VIEW"; mkdir -p "$VIEW"
   ln -s "$CKPT_DIR/step_${N}" "$VIEW/step_${N}"
 
+  export NUM_ACTOR_NODES=2
   export JOB_NAME="offval_${ARM}_step${N}"
   export SETUP_COMMAND="uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
   export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \

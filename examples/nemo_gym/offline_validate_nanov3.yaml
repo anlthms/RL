@@ -1,15 +1,21 @@
-defaults: async_non_colocated_nanov3.yaml
+defaults: async_colocated_singlemodel_nanov3.yaml
 
-# Offline validation of a saved training checkpoint. Uses the DEDICATED
-# non-colocated inference model (fast, full-speed decode) regardless of which
-# training arm produced the checkpoint, so the reward comparison is apples-to-
-# apples and not slowed by the colocated low-batch decode penalty.
+# Offline validation of a saved training checkpoint, as a standalone Slurm job
+# reading the checkpoint from the shared filesystem.
 #
-# The driver (run_offline_validation.sh) sets checkpointing.checkpoint_dir to a
-# view whose only step_* dir is the checkpoint being validated; grpo setup()
-# resumes from it, validate() (via val_at_start) computes the val-split reward,
-# and validate_only exits before any training. Validation efficiency does not
-# matter here (the point is the reward, not throughput).
+# Based on the COLOCATED single-model path (not non-colocated) for two reasons:
+#   1. No idle GPUs. A single colocated pool keeps every allocated GPU busy during
+#      validation, so the OccupiedIdleGPUsJobReaper does not kill it (the non-colo
+#      split leaves the training-side GPUs idle -> reaped for "waste").
+#   2. It actually works. Colocated validation runs on the persistent colocated
+#      engine (proven: the E1b run validated at steps 5/10). The non-colo async
+#      path hung here because its coordinator expects the training collector to
+#      drive it, which validate_only disables.
+# Decode is slow colocated, but that is fine for offline validation (we only want
+# the reward). The driver sets checkpointing.checkpoint_dir per checkpoint.
+
+cluster:
+  num_nodes: 2          # 1 TP2xEP4 replica; run with NUM_ACTOR_NODES=2
 
 grpo:
   val_at_start: true
@@ -18,7 +24,7 @@ grpo:
   validate_only: true
 
 checkpointing:
-  enabled: true          # needed so setup() resumes weights from checkpoint_dir
+  enabled: true          # resume weights from checkpoint_dir (set by driver)
   save_period: 1000000   # never saves (validate_only exits before training)
   metric_name: null
 
