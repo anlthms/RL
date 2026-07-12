@@ -415,3 +415,21 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
   inference model, run grpo validate() on the val-split, record (step, reward). Plot reward vs step
   and reward vs training wall-clock for both arms. Use the same fast backend for both for fairness.
 - Expectation: both arms now reach ~30 optimizer steps/4h (no validation stalls).
+
+## E3 RESULT — colo-vs-noncolo throughput (validation OFF, both to ~4h)
+- NON-COLO (job 4737847): 39 optimizer steps, ran full 4h (TIMEOUT). Dedicated inference keeps the
+  replay buffer fed; training never starves. Checkpoints step_5..35.
+- COLO single-model (job 4736532): 19 optimizer steps, then FAILED — killed by
+  OccupiedIdleGPUsJobReaper (idle GPUs). Root cause visible in log: replay buffer STARVES
+  ("Insufficient valid groups: have 3/12, need 16. Waiting for buffer to fill"), giving ~1860-2254s
+  (~30-37min) buffer-wait "steps". Colo generation can't produce trajectories fast enough to feed
+  training -> training stalls -> GPUs idle -> reaper kills it. Checkpoints step_5,10,15,19.
+- => Even with validation removed, NON-COLOCATED sustains ~2x the training throughput (39 vs 19
+  steps) because dedicated inference keeps the buffer full; the colocated single model's slower
+  generation starves training. This is the decode slowness (diagnosed in E2b) manifesting at the
+  training level as buffer starvation. Non-colo is the more efficient arm here.
+- CAVEAT on reward: train-batch reward is curriculum-confounded (difficulty rises with step, reward
+  drifts down), so raw train reward is NOT comparable across steps between arms. A fair reward
+  comparison needs the fixed val-split (offline validation). Offline harness now runs validation
+  correctly (3 bugs fixed) BUT is reaped on the 8-node allocation (idle training GPUs, 34% waste) —
+  needs a small dedicated-inference allocation to run without the reaper.
