@@ -221,6 +221,9 @@ class GRPOConfig(TypedDict):
     # Whether to run validation on the last training step. Setting this to True ensures the
     # final checkpoint has validation metrics, which is required for get_best_checkpoint_path().
     val_at_end: bool
+    # When True, run validation (via val_at_start) on the loaded checkpoint and
+    # exit before training. Used by the offline checkpoint-reward-curve harness.
+    validate_only: NotRequired[bool]
     max_val_samples: int | None  # None for NeMo-Gym compatibility
     skip_reference_policy_logprobs_calculation: NotRequired[bool]
     seed: int
@@ -3730,6 +3733,14 @@ def async_grpo_train(
         finally:
             # Resume trajectory collection after initial validation
             trajectory_collector.resume.remote()
+
+    # Offline-validation mode: validate the loaded checkpoint (via val_at_start
+    # above) and exit before any training / buffer wait. Used by the offline
+    # reward-curve harness that validates saved checkpoints out of the critical
+    # path. No effect during normal training (flag defaults to False).
+    if master_config["grpo"].get("validate_only", False):
+        print("✅ validate_only: validation done, exiting before training.")
+        return
 
     print("✅ All setup complete, starting buffer wait...")
     # Clear logger metrics at start of training
