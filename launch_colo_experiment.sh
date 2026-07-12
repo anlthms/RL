@@ -6,10 +6,16 @@
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_colo_experiment.sh {colocated|non_colocated}
 set -eu
 
-MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated|colocated_singlemodel"}
+MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated|colocated_singlemodel|noval_colocated_singlemodel|noval_non_colocated"}
 case "$MODE" in
-  colocated|non_colocated|colocated_singlemodel) ;;
-  *) echo "invalid mode: $MODE (expected colocated, non_colocated, or colocated_singlemodel)" >&2; exit 1 ;;
+  colocated|non_colocated|colocated_singlemodel)
+    CONFIG="examples/nemo_gym/async_${MODE}_nanov3.yaml" ;;
+  # No-mid-validation training arms for the offline-validation comparison.
+  noval_colocated_singlemodel)
+    CONFIG="examples/nemo_gym/noval_colocated_singlemodel_nanov3.yaml" ;;
+  noval_non_colocated)
+    CONFIG="examples/nemo_gym/noval_non_colocated_nanov3.yaml" ;;
+  *) echo "invalid mode: $MODE" >&2; exit 1 ;;
 esac
 
 cd "$(dirname "$0")"
@@ -37,7 +43,7 @@ NETRC=/home/anthomas/.netrc \
 NRL_MEGATRON_CHECKPOINT_DIR=/lustre/fsw/portfolios/nemotron/users/anthomas/megatron_ckpt_cache \
 NEMO_GYM_VENV_DIR=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/gym_venvs \
 uv run examples/nemo_gym/run_grpo_nemo_gym.py \
-  --config examples/nemo_gym/async_${MODE}_nanov3.yaml \
+  --config ${CONFIG} \
   policy.generation.backend=megatron"
 
 bash submit_nemorl.sh

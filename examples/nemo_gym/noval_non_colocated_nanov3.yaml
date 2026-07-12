@@ -11,7 +11,7 @@ grpo:
 
 checkpointing:
   enabled: true
-  save_period: 1
+  save_period: 5
   keep_top_k: 1000000
   metric_name: null
   save_optimizer: false
