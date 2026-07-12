@@ -1,0 +1,23 @@
+defaults: async_colocated_singlemodel_nanov3.yaml
+
+# Colocated training run with NO mid-training validation (validation is moved
+# offline, run separately on saved checkpoints). This removes the low-batch
+# colocated-decode penalty from the critical path so the colo-vs-non-colo
+# training comparison is fair. Save every step (weights only) to get a dense
+# reward-vs-step curve when we validate the checkpoints offline afterwards.
+
+grpo:
+  val_period: 0          # no periodic validation
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  enabled: true
+  save_period: 1         # every step -> dense offline reward curve
+  keep_top_k: 1000000    # keep all checkpoints
+  metric_name: null      # no val-based top-k ranking (nothing to rank on)
+  save_optimizer: false  # offline validation needs weights only; halves disk + save time
+
+logger:
+  wandb:
+    name: noval_colocated_singlemodel

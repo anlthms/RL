@@ -1,0 +1,21 @@
+defaults: async_non_colocated_nanov3.yaml
+
+# Non-colocated training run with NO mid-training validation (moved offline).
+# Identical validation/checkpointing policy to noval_colocated_singlemodel so the
+# two arms are directly comparable; the only difference is colocated vs not.
+
+grpo:
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+
+checkpointing:
+  enabled: true
+  save_period: 1
+  keep_top_k: 1000000
+  metric_name: null
+  save_optimizer: false
+
+logger:
+  wandb:
+    name: noval_non_colocated
