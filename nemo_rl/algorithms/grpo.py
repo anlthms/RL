@@ -149,6 +149,16 @@ class AsyncGRPOConfig(TypedDict):
     in_flight_weight_updates: NotRequired[bool]
     # Recomputes the KV cache after the in-flight weight updates.
     recompute_kv_cache_after_weight_updates: NotRequired[bool]
+    # Rollout scheduling mode:
+    #   "target_window" (default): the collector generates per-target batches gated
+    #       on training steps [N+1..N+max_trajectory_age_steps]; training samples
+    #       batches whose target matches the current step exactly.
+    #   "continuous": the collector keeps the generation engine saturated with
+    #       untargeted rollouts; training samples any complete groups within
+    #       max_trajectory_age_steps, freshest-first (ReplayBufferNew). Designed
+    #       for colocated mode, where generation only runs between training steps
+    #       and target gating starves the engine.
+    rollout_scheduler: NotRequired[str]
 
 
 class AdvEstimatorConfig(TypedDict):
@@ -3506,7 +3516,11 @@ def async_grpo_train(
             )
 
     # Import async utilities only when needed
-    from nemo_rl.algorithms.async_utils import AsyncTrajectoryCollector, ReplayBuffer
+    from nemo_rl.algorithms.async_utils import (
+        AsyncTrajectoryCollector,
+        ReplayBuffer,
+        ReplayBufferNew,
+    )
 
     timer = Timer()
     timeout = TimeoutChecker(
@@ -3536,6 +3550,21 @@ def async_grpo_train(
     assert (not colocated_inference) or (
         isinstance(policy_generation, MegatronGeneration)
     ), "Colocated async GRPO is unsupported for the desired generation backend."
+
+    # Rollout scheduling mode (see AsyncGRPOConfig.rollout_scheduler). Absent key
+    # means the default target_window behavior.
+    rollout_scheduler = master_config.grpo["async_grpo"].get("rollout_scheduler")
+    if rollout_scheduler not in (None, "target_window", "continuous"):
+        raise ValueError(
+            "grpo.async_grpo.rollout_scheduler must be 'target_window' or "
+            f"'continuous', got {rollout_scheduler!r}"
+        )
+    continuous_scheduler = rollout_scheduler == "continuous"
+    if continuous_scheduler:
+        print(
+            "🔄 Using continuous rollout scheduler (staleness-window buffer, "
+            "no target gating)"
+        )
 
     # Initialize advantage estimator
     adv_estimator = _create_advantage_estimator(master_config)
@@ -3588,9 +3617,17 @@ def async_grpo_train(
         num_prompts_per_step * max_trajectory_age_steps * late_arrival_slack
     )
 
-    replay_buffer = ReplayBuffer.options(runtime_env=_replay_runtime_env).remote(
-        max_size=optimal_buffer_size
-    )
+    if continuous_scheduler:
+        replay_buffer = ReplayBufferNew.options(
+            runtime_env=_replay_runtime_env
+        ).remote(
+            max_size=optimal_buffer_size,
+            max_staleness=max_trajectory_age_steps,
+        )
+    else:
+        replay_buffer = ReplayBuffer.options(runtime_env=_replay_runtime_env).remote(
+            max_size=optimal_buffer_size
+        )
 
     last_checkpoint_path = checkpointer.get_latest_checkpoint_path()
     if last_checkpoint_path is not None:
@@ -3770,11 +3807,17 @@ def async_grpo_train(
     wait_iterations = 0
     while True:
         buffer_size_current = ray.get(replay_buffer.size.remote())
-        current_step_ready = ray.get(
-            replay_buffer.has_complete_batch.remote(
-                step, num_prompts_per_step, max_trajectory_age_steps
+        if continuous_scheduler:
+            # No target gating: ready as soon as enough complete groups exist.
+            current_step_ready = ray.get(
+                replay_buffer.ready.remote(num_prompts_per_step, weight_version)
             )
-        )
+        else:
+            current_step_ready = ray.get(
+                replay_buffer.has_complete_batch.remote(
+                    step, num_prompts_per_step, max_trajectory_age_steps
+                )
+            )
 
         print(
             f"  Wait iteration {wait_iterations}: buffer_size={buffer_size_current}, "
@@ -3784,16 +3827,20 @@ def async_grpo_train(
         if current_step_ready:
             break
 
-        trajectories_needed = ray.get(
-            replay_buffer.get_trajectories_needed.remote(
-                step, num_prompts_per_step, max_trajectory_age_steps
+        if not continuous_scheduler:
+            trajectories_needed = ray.get(
+                replay_buffer.get_trajectories_needed.remote(
+                    step, num_prompts_per_step, max_trajectory_age_steps
+                )
             )
-        )
-        if buffer_size_current >= min_trajectories_needed and trajectories_needed > 0:
-            print(
-                f"  ⏳ Gap-filling in progress: need {trajectories_needed} more "
-                f"trajectories for step {step}"
-            )
+            if (
+                buffer_size_current >= min_trajectories_needed
+                and trajectories_needed > 0
+            ):
+                print(
+                    f"  ⏳ Gap-filling in progress: need {trajectories_needed} more "
+                    f"trajectories for step {step}"
+                )
 
         wait_iterations += 1
         time.sleep(1.0)
@@ -3829,6 +3876,24 @@ def async_grpo_train(
                     num_prompt_groups_needed = master_config.grpo[
                         "num_prompts_per_step"
                     ]
+
+                    if continuous_scheduler:
+                        # Generation phase: engine + collector are live; this
+                        # wait IS the colocated generation phase. Switch to
+                        # training only once enough complete groups exist.
+                        gen_phase_wait_s = 0.0
+                        while not ray.get(
+                            replay_buffer.ready.remote(
+                                num_prompt_groups_needed, weight_version
+                            )
+                        ):
+                            time.sleep(1.0)
+                            gen_phase_wait_s += 1.0
+                        print(
+                            f"🟢 Generation phase complete after {gen_phase_wait_s:.0f}s "
+                            f"of post-training rollout time"
+                        )
+
                     sample_result = ray.get(
                         replay_buffer.sample.remote(
                             num_prompt_groups=num_prompt_groups_needed,
@@ -3842,6 +3907,17 @@ def async_grpo_train(
                         or len(sample_result["trajectories"])
                         != num_prompt_groups_needed
                     ):
+                        # Continuous scheduler invariant: ready() applied the
+                        # same eviction as sample() at the same weight version,
+                        # and the buffer only grows in between — a miss here is
+                        # a scheduler bug, and retrying would wait forever once
+                        # the engine is paused for training.
+                        assert not continuous_scheduler, (
+                            "continuous scheduler invariant violated: buffer "
+                            f"lost groups between ready() and sample() "
+                            f"(needed {num_prompt_groups_needed}, got "
+                            f"{None if sample_result is None else len(sample_result['trajectories'])})"
+                        )
                         print(
                             "⏳ Buffer empty or not enough groups to form a full step, waiting..."
                         )

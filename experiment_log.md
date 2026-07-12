@@ -439,3 +439,26 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
 - Proof: non-colo step_5 checkpoint -> val accuracy=0.261, val time ~44min (slow colo decode, fine).
 - Running full sweep: run_offline_validation.sh over each arm's checkpoints (parallel 2-node jobs).
   Reward = "Accuracy" from each offval_<arm>_step<N> job's ray-driver.log.
+
+## E3 offline validation — SWEEP COMPLETE (recorded 2026-07-12)
+Accuracy on the fixed val-split per checkpoint (jobs 4839163-4839178, 4828869; ~50 min each,
+2-node colocated single-pool harness):
+- non-colo (noval_non_colocated): step5 0.274, step10 0.253, step15 0.257, step20 0.230,
+  step25 0.229, step30 0.194, step35 0.185
+- colo target-window (noval_colocated_singlemodel): step5 0.274 (earlier harness proof run gave
+  0.261 on the same ckpt — rerun variance ~0.01), step10 0.259, step19 0.252
+  (step15 offval job failed at startup; rerun was cancelled, can be resubmitted if needed)
+- NOTE: val accuracy DECLINES with training steps in BOTH arms (non-colo 0.274 -> 0.185 by step 35).
+  Colo at step 19 (0.252) is ABOVE non-colo at step 20 (0.230). At matched step count the colo arm's
+  training quality is no worse (slightly better) — the E3 deficit was throughput only. The decline
+  itself is a training-recipe question (out of scope for the scheduler work).
+
+## E4 — continuous rollout scheduler (colo single-model), implementation
+- Implements colo_ideal_workflow_plan.md on branch async_colo1:
+  - grpo.async_grpo.rollout_scheduler: "target_window" (default) | "continuous"
+  - ReplayBufferNew: ready() switch probe + staleness-aware load_state_dict; exported
+  - collector: continuous spawn (no target gating, no self-pause), semaphore-throttled
+  - driver: generation-phase ready() wait -> guaranteed sample (assert; training never
+    waits on the buffer after the engine pause)
+- Configs: noval_colocated_continuous_nanov3.yaml (E4 arm),
+  smoke_colocated_continuous_nanov3.yaml (2-node smoke).

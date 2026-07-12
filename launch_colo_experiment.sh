@@ -6,7 +6,7 @@
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_colo_experiment.sh {colocated|non_colocated}
 set -eu
 
-MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated|colocated_singlemodel|noval_colocated_singlemodel|noval_non_colocated"}
+MODE=${1:?"usage: bash launch_colo_experiment.sh colocated|non_colocated|colocated_singlemodel|noval_colocated_singlemodel|noval_non_colocated|noval_colocated_continuous|smoke_colocated_continuous"}
 case "$MODE" in
   colocated|non_colocated|colocated_singlemodel)
     CONFIG="examples/nemo_gym/async_${MODE}_nanov3.yaml" ;;
@@ -15,6 +15,12 @@ case "$MODE" in
     CONFIG="examples/nemo_gym/noval_colocated_singlemodel_nanov3.yaml" ;;
   noval_non_colocated)
     CONFIG="examples/nemo_gym/noval_non_colocated_nanov3.yaml" ;;
+  # E4: colocated single-model arm with the continuous rollout scheduler.
+  noval_colocated_continuous)
+    CONFIG="examples/nemo_gym/noval_colocated_continuous_nanov3.yaml" ;;
+  # Smoke-scale validation of the continuous scheduler (run with NUM_ACTOR_NODES=2).
+  smoke_colocated_continuous)
+    CONFIG="examples/nemo_gym/smoke_colocated_continuous_nanov3.yaml" ;;
   *) echo "invalid mode: $MODE" >&2; exit 1 ;;
 esac
 

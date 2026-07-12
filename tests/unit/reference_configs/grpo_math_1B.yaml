@@ -51,6 +51,10 @@ grpo:
     max_trajectory_age_steps: 1
     in_flight_weight_updates: false # Set to true to enable in-flight weight updates
     recompute_kv_cache_after_weight_updates: false # Set to true to recompute kv cache after in-flight-weight-updates
+    # Rollout scheduling: "target_window" gates generation on per-step targets;
+    # "continuous" keeps the engine saturated and samples freshest-first within
+    # max_trajectory_age_steps (recommended for colocated async).
+    rollout_scheduler: "target_window"
 
 # Reward-zeroing penalties applied to NeMo-Gym rollout results.
 reward_penalties:

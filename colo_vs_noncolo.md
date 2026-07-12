@@ -137,6 +137,16 @@ on Slurm account `nemotron_sw_post`; driver logs at `<jobid>-logs/ray-driver.log
   buffer`): its slower generation can't feed training fast enough → training stalls → GPUs idle. So
   the E2b decode slowness manifests at the training level as buffer starvation. **Non-colocated is the
   more efficient arm here** (~2x optimizer steps).
+- **2026-07-12 re-analysis: this conclusion is an artifact of the async scheduler, not of colocated
+  capacity.** In job 4736532, training cost only ~15s/step; the rest was buffer waits (68% of
+  wall-clock), arriving as one ~31-37 min full-rollout-latency stall every 4-5 steps
+  (= the `max_trajectory_age_steps=4` window), with sampled trajectories pinned at the maximum age
+  4.0. The collector self-paused once per step after spawning its 4-target window (in-flight cap =
+  `num_prompts × max_age` = 64 = window capacity), so during each stall the in-flight pool only
+  drained — engine concurrency decayed to a straggler tail, which is the "idle GPUs" the reaper
+  killed. At E1b decode parity (7685 tok/s/GPU), colo's 32 GPUs could produce a batch in ~185s of
+  saturated generation (~60 steps/4h achievable vs 19 observed). See "Ideal colocated execution
+  model" below for the intended workflow.
 
 ### 4. Offline validation harness
 - Train-batch reward is **curriculum-confounded** (difficulty rises with step), so a fair reward
@@ -147,6 +157,78 @@ on Slurm account `nemotron_sw_post`; driver logs at `<jobid>-logs/ray-driver.log
   training collector. Slow (~44 min/ckpt) but that is irrelevant offline.
 - Reward-vs-step curve (offline val accuracy on the fixed val-split, both arms) is the clean
   efficiency metric; results in `experiment_log.md` (first point: non-colo step_5 accuracy=0.261).
+
+## Ideal colocated execution model (design target, 2026-07-12)
+
+The E3 numbers above measured a particular scheduler, not colocation itself. This section pins down
+the execution model that colocated async GRPO *should* implement, so future experiments test the
+right thing.
+
+### The two-phase loop
+
+**Generation phase — keep every GPU busy.**
+All GPUs generate. The engine is kept saturated: the moment one rollout finishes, another starts.
+There is no target-step gating, no lookahead window that exhausts, and no collector self-pause —
+the only reason a GPU idles during generation is that the phase is about to end. Completed
+per-prompt groups accumulate in the replay buffer.
+
+**Switch to training — triggered from the generation side.**
+The phase ends when the buffer holds enough *complete* groups for a training step
+(`num_prompts_per_step`). Rollouts still in mid-flight are **paused in place**: the engine suspend
+retains every in-flight request and its progress (this part already works — the Megatron dynamic
+engine reaches a barrier-synchronized PAUSED state and keeps its requests; see the Phase A note in
+`AsyncTrajectoryCollector.prepare_for_refit`). Generation buffers (KV cache etc.) are offloaded so
+training has the full HBM.
+
+**Training phase — never waits.**
+Training consumes only groups that are already complete. By construction it never blocks on the
+buffer: nothing is generating during training, so **any buffer wait in training mode is a scheduler
+bug, not a tuning problem** — it would wait forever. If the buffer holds more than one complete
+batch, multiple optimizer steps may run back-to-back before switching.
+
+**Switch back to generation.**
+Weights are updated (with the single dual-mode model there is no transfer — the trained weights are
+the inference weights), the engine resumes, and the paused rollouts continue **from the exact token
+where they stopped**, now decoding with the new weights.
+
+### Correctness: rollouts spanning multiple weight versions
+
+A resumed rollout has a prefix sampled under version N and a continuation sampled under N+1 (or
+later). This is fine: each token's generation logprob is recorded at sampling time, so the
+behavior-policy logprobs are exact per token even for mixed-version sequences, and the token-level
+importance-sampling correction (`loss_fn.use_importance_sampling_correction=true`) needs no special
+casing. Continuing on the pre-update KV cache is the standard Magistral-style approximation;
+AREAL-style cache recompute is available via `recompute_kv_cache_after_weight_updates` if it ever
+matters.
+
+### Where the current implementation diverges (all observed in job 4736532)
+
+1. **The switch is driven from the wrong side.** Training polls `ReplayBuffer.sample()` and
+   busy-waits until a batch appears; the generation phase is whatever time training happens to
+   spend waiting. In the E3 colo run that was 68% of wall-clock.
+2. **Exact-target gating starves the engine.** `sample()` requires all groups to carry
+   `target_weight_version == current step`, and the collector only generates for targets
+   `[N+1 .. N+4]`. Once the window is spawned it pauses itself ("all target weights already exist…
+   waiting for weight update" — 19 times in the log). The current step's target is outside the
+   window, so a died straggler leaves it permanently incomplete → training waits forever (the
+   deadlock; job 4736532 escaped it only because its stragglers survived).
+3. **The in-flight cap equals the window** (`num_prompts × max_age` = 64), so during each stall the
+   pool of active rollouts only drains. Concurrency saw-tooths from 64 groups to a 1-2 group
+   straggler tail — the idle GPUs that got the job reaped.
+4. **Net effect:** one full-rollout-latency stall (~31-37 min) every `max_age` steps, all training
+   data at maximum staleness (avg age 4.0), 19 steps vs the ~60 achievable at measured decode parity.
+
+### Implementation deltas
+
+- Move the phase-switch trigger into the generation side: switch when the count of complete groups
+  reaches `num_prompts_per_step`, not when training's poll loop succeeds.
+- Drop exact-target matching: sample any complete groups within the staleness bound
+  (freshest-first). `ReplayBufferNew` in `nemo_rl/algorithms/async_utils/replay_buffer.py` is the
+  in-repo WIP for exactly this — its docstring notes that target gating "causes generation pauses".
+- Decouple the in-flight cap from the age window so the engine stays saturated for the whole
+  generation phase; refill rollout slots as they complete.
+- Tag trajectories for staleness accounting in a way that tolerates multi-version rollouts (e.g.,
+  version at completion, or conservatively the oldest segment's version).
 
 ## References:
 

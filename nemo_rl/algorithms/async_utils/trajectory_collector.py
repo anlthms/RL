@@ -100,8 +100,21 @@ class AsyncTrajectoryCollector:
         self._inflight_threads: set[_threading.Thread] = set()
         self._threads_lock: _threading.Lock = _threading.Lock()
 
+        # Rollout scheduling mode (see AsyncGRPOConfig.rollout_scheduler).
+        # "continuous": no target gating — spawn a rollout whenever an in-flight
+        # slot frees up, so the engine stays saturated for the whole generation
+        # phase. "target_window" (default): per-target batches gated on
+        # [N+1..N+max_age].
+        self._continuous = (
+            self.master_config.grpo.get("async_grpo", {}).get("rollout_scheduler")
+            == "continuous"
+        )
+
         # Limit in-flight generator requests to num_prompts_per_step * max_trajectory_age_steps
         # This value limits the parallelism of the generation requests.
+        # In continuous mode this is a plain concurrency cap whose slots refill as
+        # rollouts finish; in target_window mode it coincides with the target
+        # window capacity.
         max_inflight = (
             int(self.master_config.grpo["num_prompts_per_step"])
             * int(self.master_config.grpo["async_grpo"]["max_trajectory_age_steps"])
@@ -263,8 +276,15 @@ class AsyncTrajectoryCollector:
                     self._refit_pause_cleared.wait()
                     print("▶️ Refit completed, resuming collection")
 
-                # Check if generation limits require pausing collection
-                if self._should_pause_for_generation_limits() and self.running:
+                # Check if generation limits require pausing collection.
+                # Continuous mode never self-pauses: the in-flight semaphore (in
+                # _process_batch_continuous) and buffer max_size are the only
+                # throttles, so a freed slot is immediately refilled.
+                if (
+                    not self._continuous
+                    and self._should_pause_for_generation_limits()
+                    and self.running
+                ):
                     # Only log warning once per weight version
                     if self._last_limit_warning_version != self.current_weight_version:
                         async_cfg = self.master_config.grpo.get("async_grpo", {})
@@ -303,8 +323,70 @@ class AsyncTrajectoryCollector:
             self.running = False
             print("🛑 Trajectory collection stopped")
 
+    def _process_batch_continuous(self, batch: BatchedDataDict[DatumSpec]) -> None:
+        """Spawn one rollout worker per prompt, throttled only by the in-flight semaphore.
+
+        No target reservation: trajectories are tagged with the weight version
+        that spawned them (both as trajectory version and, for debugging, as
+        target). The staleness-window buffer ignores targets when sampling.
+        Backpressure: the semaphore caps in-flight groups; a full buffer makes
+        workers back off inside _run_prompt_group_worker.
+        """
+        num_generations = self.master_config.grpo["num_generations_per_prompt"]
+        for prompt_idx in range(batch.size):
+            if not self.running:
+                return
+
+            # Don't submit new requests into a suspended engine; after the pause
+            # clears, pick up the (possibly bumped) weight version.
+            if not self._refit_pause_cleared.is_set() and self.running:
+                self._refit_pause_cleared.wait()
+
+            generation_weight_version = self.current_weight_version
+            single_prompt_batch = batch.slice(prompt_idx, prompt_idx + 1)
+            repeated_batch = single_prompt_batch.repeat_interleave(num_generations)
+
+            worker = _threading.Thread(
+                target=self._run_prompt_group_worker,
+                args=(
+                    repeated_batch,
+                    generation_weight_version,
+                    generation_weight_version,  # target == spawn version (unused for sampling)
+                    prompt_idx,
+                ),
+                daemon=True,
+            )
+            self._inflight_sema.acquire()
+            try:
+                with self._threads_lock:
+                    self._inflight_threads.add(worker)
+                with self._counter_lock:
+                    self._spawned_per_target[generation_weight_version] = (
+                        self._spawned_per_target.get(generation_weight_version, 0) + 1
+                    )
+                worker.start()
+            except Exception:
+                with self._threads_lock:
+                    self._inflight_threads.discard(worker)
+                with self._counter_lock:
+                    updated = (
+                        self._spawned_per_target.get(generation_weight_version, 0) - 1
+                    )
+                    if updated > 0:
+                        self._spawned_per_target[generation_weight_version] = updated
+                    else:
+                        self._spawned_per_target.pop(generation_weight_version, None)
+                self._inflight_sema.release()
+                raise
+
+        self._cleanup_finished_threads()
+
     def _process_batch(self, batch: BatchedDataDict[DatumSpec]) -> None:
         """Process a single batch and generate for one target weight."""
+        if self._continuous:
+            self._process_batch_continuous(batch)
+            return
+
         target_weight: Optional[int] = None
         try:
             generation_weight_version = self.current_weight_version

@@ -551,14 +551,9 @@ class ReplayBuffer(ReplayBufferImpl):
     pass
 
 
-# WIP: DO NOT USE - This class is WIP and may be changed without notice, please DO NOT USE it.
-# Will be replaced by TQReplayBuffer once TQ is ready.
-@ray.remote  # pragma: no cover
-class ReplayBufferNew(ReplayBufferImpl):
-    """Staleness-window replay buffer.
-
-    -- WIP: DO NOT USE --
-    This class is WIP and may be changed without notice, please DO NOT USE it.
+# Split out of the @ray.remote actor so the logic is directly unit-testable.
+class ReplayBufferNewImpl(ReplayBufferImpl):
+    """Staleness-window replay buffer (used by the "continuous" rollout scheduler).
 
     Differences from ReplayBuffer:
     - _evict(): Stale rows (trainer_version - weight_version > max_staleness) are evicted
@@ -566,13 +561,15 @@ class ReplayBufferNew(ReplayBufferImpl):
     - sample(): selects trajectories in freshest-first order (default) or FIFO order,
       controlled by the sample_freshest_first flag, from whatever remains in the buffer
       after eviction.
+    - ready(): non-consuming probe used by the driver to decide when to switch from
+      generation to training. Because it applies the same eviction as sample() and the
+      weight version cannot change between the two calls, ready() == True guarantees
+      the subsequent sample() succeeds.
+    - No target gating: target_weight_versions are stored (for debugging) but never
+      used for sampling. Target gating pauses generation on specific trainer steps;
+      this buffer intentionally avoids that (see grpo.async_grpo.rollout_scheduler).
 
-    TODO: remove when cleaning up
-    - max_age_steps won't be used in ReplayBufferNew;
-    - self.target_weight_versions won't be used in ReplayBufferNew and will be removed
-      when cleaning up. target_weight_versions gates generation on specific trainer steps,
-      which causes generation pauses; ReplayBufferNew intentionally avoids this.
-    - add this class to nemo_rl/algorithms/async_utils/__init__.py
+    TODO: may be replaced by TQReplayBuffer once TQ is ready.
     """
 
     def __init__(
@@ -592,7 +589,81 @@ class ReplayBufferNew(ReplayBufferImpl):
         """
         min_valid = current_weight_version - self.max_staleness
         stale = [i for i, v in enumerate(self.trajectory_versions) if v < min_valid]
+        if stale:
+            print(
+                f"🗑️ Evicting {len(stale)} stale trajectories "
+                f"(version < {min_valid}, current={current_weight_version})"
+            )
         self._remove_indices(stale)
+
+    def ready(self, num_prompt_groups: int, current_weight_version: int) -> bool:
+        """Return whether sample() would succeed, without consuming anything.
+
+        Applies the same staleness eviction as sample(), so a True result stays
+        valid until the weight version changes (the buffer can only grow in
+        between).
+        """
+        with self._lock:
+            self._evict(current_weight_version)
+            return len(self.trajectories) >= num_prompt_groups
+
+    def load_state_dict(
+        self,
+        state: dict[str, Any],
+        num_prompts_per_step: int | None = None,
+        current_training_step: int | None = None,
+        max_age_steps: int | None = None,
+    ) -> None:
+        """Restore buffer state from a checkpoint.
+
+        Unlike the target-window buffer there is no per-target bookkeeping to
+        repair: restore the rows, evict anything stale for the resumed step, and
+        truncate to max_size. ``num_prompts_per_step`` / ``max_age_steps`` are
+        accepted for signature compatibility but unused (staleness is governed
+        by ``self.max_staleness``).
+        """
+        with self._lock:
+            required_keys = {
+                "trajectories",
+                "trajectory_versions",
+                "target_weight_versions",
+            }
+            missing_keys = required_keys - set(state)
+            if missing_keys:
+                raise ValueError(f"Checkpoint missing required keys: {missing_keys}")
+
+            trajectories = list(state["trajectories"])
+            trajectory_versions = list(state["trajectory_versions"])
+            target_weight_versions = list(state["target_weight_versions"])
+            if not (
+                len(trajectories)
+                == len(trajectory_versions)
+                == len(target_weight_versions)
+            ):
+                raise ValueError(
+                    "Checkpoint has inconsistent replay buffer lengths: "
+                    f"trajectories={len(trajectories)}, "
+                    f"trajectory_versions={len(trajectory_versions)}, "
+                    f"target_weight_versions={len(target_weight_versions)}"
+                )
+
+            self.trajectories = trajectories
+            self.trajectory_versions = trajectory_versions
+            self.target_weight_versions = target_weight_versions
+            self.last_target_weight_already_generated = state.get(
+                "last_target_weight_already_generated", -1
+            )
+
+            if current_training_step is not None:
+                self._evict(current_training_step)
+            # current_training_step=None keeps the newest rows on overflow (the
+            # target-prioritized variant is meaningless without target gating).
+            self._truncate_to_max_size(None)
+
+            print(
+                f"ReplayBufferNew restored: {len(self.trajectories)} trajectories "
+                f"(max_staleness={self.max_staleness})"
+            )
 
     def sample(
         self,
@@ -637,7 +708,18 @@ class ReplayBufferNew(ReplayBufferImpl):
             sampled_items = [self.trajectories[i] for i in selected]
             self._remove_indices(selected)
 
+            print(
+                f"✅ Sampled {len(selected)} groups (freshest_first="
+                f"{self.sample_freshest_first}), versions={Counter(sampled_weights)}, "
+                f"avg age {avg_trajectory_age:.2f}, {len(self.trajectories)} left"
+            )
+
             return {
                 "trajectories": sampled_items,
                 "avg_trajectory_age": avg_trajectory_age,
             }
+
+
+@ray.remote  # pragma: no cover
+class ReplayBufferNew(ReplayBufferNewImpl):
+    pass

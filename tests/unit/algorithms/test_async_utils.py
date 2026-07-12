@@ -36,6 +36,7 @@ from nemo_rl.algorithms.async_utils import (
 from nemo_rl.algorithms.async_utils.replay_buffer import (
     ReplayBufferImpl,
     ReplayBufferNew,
+    ReplayBufferNewImpl,
 )
 from nemo_rl.algorithms.grpo import (
     MasterConfig,
@@ -1819,3 +1820,82 @@ class TestPromptExtraction:
         )
         assert torch.equal(message_log[1]["token_loss_mask"], torch.tensor([0, 0]))
         assert torch.equal(message_log[2]["token_loss_mask"], torch.tensor([1, 1]))
+
+
+class TestReplayBufferNewImplContinuousScheduler:
+    """Impl-level tests for the continuous-scheduler additions to ReplayBufferNew.
+
+    Run on the local implementation class (no Ray actor) so coverage attributes
+    correctly and the ready()/sample() interplay can be tested synchronously.
+    """
+
+    def _make_traj(self, label: str) -> dict:
+        return {"batch": {"data": label}, "rollout_metrics": {}}
+
+    def _fill(self, buf, versions: list[int]):
+        for i, v in enumerate(versions):
+            assert (
+                buf.add(self._make_traj(f"t{i}_v{v}"), v, v) == "success"
+            )
+
+    def test_ready_false_when_short(self):
+        buf = ReplayBufferNewImpl(max_size=10, max_staleness=4)
+        self._fill(buf, [0, 0, 0])
+        assert not buf.ready(4, current_weight_version=0)
+        assert buf.ready(3, current_weight_version=0)
+
+    def test_ready_applies_staleness_eviction(self):
+        buf = ReplayBufferNewImpl(max_size=10, max_staleness=1)
+        # At trainer version 3, version-0 rows (age 3) are stale.
+        self._fill(buf, [0, 0, 3])
+        assert not buf.ready(2, current_weight_version=3)
+        assert buf.size() == 1  # stale rows evicted by the probe
+
+    def test_ready_then_sample_guarantee(self):
+        """ready() == True at version V guarantees sample() at V succeeds."""
+        buf = ReplayBufferNewImpl(max_size=10, max_staleness=2)
+        self._fill(buf, [1, 2, 2, 3])
+        assert buf.ready(4, current_weight_version=3)
+        result = buf.sample(
+            num_prompt_groups=4, current_weight_version=3, max_age_steps=0
+        )
+        assert result is not None
+        assert len(result["trajectories"]) == 4
+
+    def test_load_state_dict_restores_and_evicts(self):
+        buf = ReplayBufferNewImpl(max_size=10, max_staleness=1)
+        state = {
+            "trajectories": [self._make_traj(f"t{i}") for i in range(4)],
+            "trajectory_versions": [0, 1, 4, 5],
+            "target_weight_versions": [0, 1, 4, 5],
+            "last_target_weight_already_generated": 3,
+        }
+        buf.load_state_dict(state, current_training_step=5)
+        # Versions 0 and 1 are stale at step 5 (age > 1); 4 and 5 survive.
+        assert buf.size() == 2
+        assert buf.trajectory_versions == [4, 5]
+
+    def test_load_state_dict_truncates_keeping_newest(self):
+        buf = ReplayBufferNewImpl(max_size=2, max_staleness=10)
+        state = {
+            "trajectories": [self._make_traj(f"t{i}") for i in range(4)],
+            "trajectory_versions": [1, 2, 3, 4],
+            "target_weight_versions": [1, 2, 3, 4],
+            "last_target_weight_already_generated": 0,
+        }
+        buf.load_state_dict(state, current_training_step=4)
+        assert buf.size() == 2
+        assert buf.trajectory_versions == [3, 4]
+
+    def test_load_state_dict_validates_shape(self):
+        buf = ReplayBufferNewImpl(max_size=10, max_staleness=1)
+        with pytest.raises(ValueError, match="missing required keys"):
+            buf.load_state_dict({"trajectories": []})
+        with pytest.raises(ValueError, match="inconsistent"):
+            buf.load_state_dict(
+                {
+                    "trajectories": [self._make_traj("a")],
+                    "trajectory_versions": [0, 1],
+                    "target_weight_versions": [0],
+                }
+            )

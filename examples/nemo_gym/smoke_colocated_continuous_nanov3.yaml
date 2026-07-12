@@ -1,0 +1,43 @@
+defaults: async_colocated_singlemodel_nanov3.yaml
+
+# Smoke-scale config for the CONTINUOUS rollout scheduler on the single-model
+# colocated path (the E4 configuration, scaled down). Goal: several fast
+# alternation cycles (generate -> pause -> train -> resume) in minutes to
+# validate the scheduler mechanics before the full 4h run:
+#   - driver uses ReplayBufferNew (staleness window, freshest-first)
+#   - collector spawns continuously (no target gating, no self-pause)
+#   - post-pause sample always succeeds first try (assert holds)
+#   - checkpoint save/restore path works with the new buffer
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 4
+  val_at_start: false
+  val_period: 0
+  val_at_end: false
+  max_num_steps: 6
+  async_grpo:
+    rollout_scheduler: "continuous"
+
+policy:
+  train_global_batch_size: 8  # = prompts x generations
+  # Not lower: with too little room past the prompt the dynamic engine returns
+  # empty completions and crashes on request_log_probs[-1] (RL.old issue #6).
+  max_total_sequence_length: 16384
+
+logger:
+  wandb_enabled: false
+  wandb:
+    # Also keys checkpointing.checkpoint_dir (${logger.wandb.name}) — must not
+    # collide with the real runs' checkpoint dirs.
+    name: smoke_colocated_continuous
+
+checkpointing:
+  enabled: true
+  save_period: 3
+  keep_top_k: 2
+  metric_name: null
+  save_optimizer: false
+
+cluster:
+  num_nodes: 2  # matches NUM_ACTOR_NODES=2; 1 TP2xEP4 replica (same as offline_validate)

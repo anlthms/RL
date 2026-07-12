@@ -1,0 +1,15 @@
+defaults: noval_colocated_singlemodel_nanov3.yaml
+
+# E4: colocated single-model run with the CONTINUOUS rollout scheduler
+# (see colo_ideal_workflow_plan.md). Differences vs the target-window E3 run:
+# no per-target generation gating, staleness-window replay buffer sampled
+# freshest-first, training switch triggered by complete-group count, training
+# never waits on the buffer after the engine pause.
+
+grpo:
+  async_grpo:
+    rollout_scheduler: "continuous"
+
+logger:
+  wandb:
+    name: noval_colocated_continuous
