@@ -3738,7 +3738,7 @@ def async_grpo_train(
     # above) and exit before any training / buffer wait. Used by the offline
     # reward-curve harness that validates saved checkpoints out of the critical
     # path. No effect during normal training (flag defaults to False).
-    if master_config["grpo"].get("validate_only", False):
+    if master_config.grpo.get("validate_only", False):
         print("✅ validate_only: validation done, exiting before training.")
         return
 
