@@ -3709,8 +3709,10 @@ def async_grpo_train(
 
     print("✅ Policy generation setup complete, proceeding to validation...")
 
-    # Run validation at start if configured
-    if val_at_start and step == 0:
+    # Run validation at start if configured. In validate_only mode we always
+    # validate regardless of `step` — the offline harness resumes a saved
+    # checkpoint (step != 0), and the `step == 0` guard would otherwise skip it.
+    if (val_at_start and step == 0) or validate_only:
         print("\n🔍 Running initial validation...")
         if not validate_only:
             # Pause trajectory collection during initial validation.
