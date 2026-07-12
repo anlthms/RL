@@ -380,3 +380,26 @@ Remaining open item is a longer apples-to-apples reward comparison vs non-colo b
   (b) investigate making the single model's toggled graphs as effective as build-time (would fix ALL
   low-batch decode, keep single-model design); (c) dedicated inference model for generation (user's
   suggestion; robust but reintroduces two-model complexity).
+
+#### E2b CONCLUSION — single-model decode fix is NOT viable; dedicated inference model required
+- The transition_moe_cudagraphs('full') fix was a NO-OP: nano-v3 is Nemotron-H (Mamba hybrid),
+  its layers are not MoETransformerLayer. Untested, not the mechanism for this arch.
+- Real mechanism: per-layer CUDA-graph managers (create_mcore_cudagraph_manager) are created at
+  BUILD only when cuda_graph_impl=='local'. Colo builds 'none' (training) => managers never form
+  properly => runtime toggle_cuda_graphs('local') has nothing proper to restore => weak/slow graphs.
+- Tried building the shared model with cuda_graph_impl='local'. Hit a CASCADE of irreconcilable
+  training-vs-inference build conflicts:
+    1. cuda_graph_impl='local' rejects inference_cuda_graph_scope='none' (needs 'block').
+    2. With 'local'+'block', activation_checkpointing/full-recompute is rejected
+       ("full recompute is only supported with full iteration CUDA graph").
+  But the colo TRAINING model REQUIRES activation_checkpointing=True (backward OOM on 49k packed
+  microbatches) and cuda_graph_impl=none (graphs interfere with training backward). These are
+  MUTUALLY EXCLUSIVE with the inference graph build (local/block/no-recompute).
+- => You cannot build ONE model satisfying both training and inference CUDA-graph requirements.
+  The runtime toggle can flip cuda_graph_impl but cannot reconcile the build-time incompatibilities
+  (manager creation gated on 'local'; recompute vs graphs).
+- Non-colo ALREADY proves the fix: its DEDICATED inference model is built local/block/no-recompute
+  and decodes at ~88 steps/s (vs colo ~13). So the dedicated inference model IS the fix.
+- DECISION: for fast low-batch (validation) decode, generation needs a dedicated inference-optimized
+  model instance (the two-model design). The single dual-mode model stays fine for HIGH-batch rollout
+  decode (7685 tok/s/GPU) but cannot match non-colo at low batch. User's original instinct confirmed.
