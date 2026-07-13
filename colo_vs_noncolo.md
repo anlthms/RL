@@ -92,7 +92,7 @@ Use the mean total reward on the validation set as a metric to compare the two r
 
 ![][image1]  
 
-### Colocated: TODO
+### Colocated: see "E4 comparison result" below (continuous scheduler, offline validation)
 
 ## Findings (2026-07, colocated single-model campaign)
 
@@ -229,6 +229,40 @@ matters.
   generation phase; refill rollout slots as they complete.
 - Tag trajectories for staleness accounting in a way that tolerates multi-version rollouts (e.g.,
   version at completion, or conservatively the oldest segment's version).
+
+## E4 comparison result (2026-07-12, continuous scheduler implemented and run)
+
+The ideal execution model above was implemented (opt-in `grpo.async_grpo.rollout_scheduler:
+continuous`, commit bffaca4c) and run through the full E3 protocol (job 4881517, 8 nodes, fresh SFT
+start, validation offline). Offline val accuracy on the fixed val-split:
+
+| step | non-colo | colo target-window (E3) | colo continuous (E4) |
+| :---- | :---- | :---- | :---- |
+| 5 | 0.274 | 0.274 | 0.272 |
+| 10 | 0.253 | 0.259 | 0.275 |
+| 15 | 0.257 | (offval job failed) | 0.252 |
+| 17 (E4 final) | — | — | **0.281** |
+| 19/20 | 0.230 (s20) | 0.252 (s19) | — |
+| 25 / 30 / 35 | 0.229 / 0.194 / 0.185 | — | — |
+
+Findings:
+
+1. **The E3 failure modes are gone.** E4: zero buffer-starvation events, zero collector
+   self-pauses, mean trajectory age 2.85 (vs pinned 4.0), no reaper kill, clean designed exit at
+   the 3h40m checkpoint deadline with 17 optimizer steps (E3 colo: 19 steps, reaped mid-stall).
+2. **Per-step reward quality is equivalent across all three arms** (~0.25–0.28 at matched
+   steps). Colocated training does not degrade the model relative to non-colocated.
+3. **Duration-matched (this doc's stated metric), colo-continuous ends higher: 0.281 vs
+   non-colo's 0.185** — but read with care: val accuracy *declines* with optimizer steps in this
+   recipe for every arm (non-colo 0.274 → 0.185 over steps 5→35), so at equal wall-clock the arm
+   that takes fewer steps ends higher. That is a recipe-level pathology (training is
+   anti-correlated with the fixed val-split metric), not evidence of more learning per GPU-hour.
+   Fixing/understanding the decline is a prerequisite for a meaningful efficiency verdict.
+4. **Throughput is still capped for colo** (~4.6–5.0 steps/h vs non-colo 9.75): the residual
+   ceiling is the in-flight cap (`num_prompts × max_age` = 64 rollout groups) × ~30 min rollout
+   latency, which bounds completions per engine-hour identically in both colo schedulers; 34
+   groups were also lost to staleness eviction. Next lever (E5): decouple and raise the in-flight
+   cap (and possibly `max_trajectory_age_steps`), watching KV headroom and eviction rate.
 
 ## References:
 
