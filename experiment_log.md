@@ -462,3 +462,38 @@ Accuracy on the fixed val-split per checkpoint (jobs 4839163-4839178, 4828869; ~
     waits on the buffer after the engine pause)
 - Configs: noval_colocated_continuous_nanov3.yaml (E4 arm),
   smoke_colocated_continuous_nanov3.yaml (2-node smoke).
+
+## E4 smoke (job 4877314, 2 nodes, smoke_colocated_continuous_nanov3.yaml) — PASSED
+- 6/6 steps completed, checkpoints step_3 + step_6 saved (replay buffer state incl.).
+- 0 STALLING / 0 "Insufficient valid groups" / 0 invariant violations / 0 collector self-pauses.
+- Every step: explicit generation phase (0-673s at this tiny 2-prompt scale), then post-pause
+  sample succeeded FIRST TRY (ages 0,1,2,3,4,2; step 6 mixed versions {4,2} freshest-first).
+- sacct FAILED = known Ray teardown noise (same finalize stack as E1b/E3), not a run failure.
+- Impl unit tests: 8/8 passed in-container (session/run_buffer_tests.py; pytest packaging in the
+  baked venv is broken, so tests also live in tests/unit/algorithms/test_async_utils.py for CI).
+- Code committed: bffaca4c on async_colo1.
+
+## E4 mid-run note (step 10, ~89 min stepping)
+- Avg 531s/step over first 10 (fast: 53-331s; two ~2000s generation phases at steps 6 and 9).
+- NO starvation/self-pause (unlike E3): the wave now comes from completion-time clustering — the
+  initial ~64-group cohort (in-flight cap) finishes together after ~30min rollout latency. Engine
+  stays fed (slots respawn immediately), ages 2.2-3.9 (not pinned at 4.0).
+- Binding constraint = in-flight cap (num_prompts x max_age = 64 groups) x rollout latency, which
+  caps completions/engine-hour for BOTH arms; colo pays more because engine-live < 100% of wall.
+  E5 lever: decouple/raise the in-flight cap (watch KV headroom + staleness evictions).
+
+## E4 RESULT — continuous scheduler colo run (job 4881517, noval_colocated_continuous)
+- **17 optimizer steps in the 3h40m effective window** (driver's checkpoint_must_save_by stopped
+  training cleanly at step 17 and saved). Step times: 118 92 53 75 327 | 2067 166 117 1967 331 |
+  151 478 1576 317 263 | 635 1329 (avg 592s). Checkpoints: step_5,10,15,17.
+- **Robustness goals MET**: 0 starvation lines, 0 invariant violations, 0 collector self-pauses,
+  NO reaper kill (E3 colo was reaped), clean designed exit. Mean trajectory age 2.85 (E3: pinned 4.0).
+- **Throughput ~parity with E3-colo** (4.6 vs 5.0 steps/h), still ~half of non-colo (9.75/h):
+  the residual ceiling is the in-flight cap (num_prompts x max_age = 64 groups) x ~30min rollout
+  latency, identical in both schedulers, which bounds completions per engine-hour; colo pays it
+  at <100% engine-live wall fraction. Waves persist (softer: 2067/1967/1576s walls damping as the
+  cohort de-phases). 34 groups (~2 steps worth) evicted as stale — long-flight rollouts crossing
+  >max_age weight bumps.
+- **E5 lever (not yet run)**: raise the in-flight cap (and/or max_trajectory_age_steps, which sets
+  both cap and staleness window) so completions/engine-hour scales; watch KV headroom + evictions.
+- Offline validation sweep submitted: jobs 4907347-50 (steps 5,10,15,17, arm=continuous).
