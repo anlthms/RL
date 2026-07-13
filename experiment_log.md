@@ -497,3 +497,31 @@ Accuracy on the fixed val-split per checkpoint (jobs 4839163-4839178, 4828869; ~
 - **E5 lever (not yet run)**: raise the in-flight cap (and/or max_trajectory_age_steps, which sets
   both cap and staleness window) so completions/engine-hour scales; watch KV headroom + evictions.
 - Offline validation sweep submitted: jobs 4907347-50 (steps 5,10,15,17, arm=continuous).
+
+## E4 offline validation RESULT (jobs 4907347-50, all COMPLETED, ~50min each)
+Val accuracy on the fixed val-split, colo CONTINUOUS arm: step5 0.272, step10 0.275,
+step15 0.252, step17 (final) 0.281.
+
+Full comparison (accuracy by checkpoint step):
+| step | non-colo | colo target-window (E3) | colo continuous (E4) |
+|-----:|---------:|------------------------:|---------------------:|
+|  5   | 0.274    | 0.274                   | 0.272 |
+| 10   | 0.253    | 0.259                   | 0.275 |
+| 15   | 0.257    | (job failed)            | 0.252 |
+| 17   | —        | —                       | 0.281 |
+| 19/20| 0.230 (s20) | 0.252 (s19)          | —     |
+| 25-35| 0.229/0.194/0.185 | —              | —     |
+
+Readout:
+1. **Per-step quality is equal across arms** (~0.25-0.28 at matched steps) — colocated training
+   (either scheduler) does NOT degrade reward quality vs non-colo.
+2. **Duration-matched (the campaign's stated metric): colo-continuous ends at 0.281 vs non-colo
+   0.185** — but only because val accuracy DECLINES with optimizer steps in this recipe
+   (non-colo: 0.274 -> 0.185 over steps 5->35), so the arm that trains less ends higher. This is
+   a recipe-level pathology (curriculum/objective mismatch with the fixed val-split), not evidence
+   that colo "learns faster per GPU-hour".
+3. Fresher data (age 2.85 vs 4.0) did not hurt and may explain colo-continuous's slight edge at
+   step 10 (0.275 vs 0.253) — within noise (rerun variance ~0.01 observed on identical ckpt).
+4. Throughput remains the real gap (non-colo 9.75 steps/h vs colo ~4.6-5.0): E5 = raise the
+   in-flight cap. The reward-decline question is orthogonal and worth its own investigation
+   before more throughput tuning — steps are currently anti-correlated with the target metric.
