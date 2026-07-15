@@ -1,0 +1,18 @@
+defaults: actually_run_nanov3.yaml
+
+policy:
+
+  generation:
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: 4
+        num_nodes: null
+
+env:
+  nemo_gym:
+    skip_venv_if_present: true
+
+logger:
+  wandb:
+    name: async_colocated
