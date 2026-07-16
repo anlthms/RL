@@ -31,14 +31,13 @@ export JOB_NAME="async_${MODE}$([[ "${SMOKE}" == 1 ]] && echo _smoke)"
 # Resolve on the host (the container runs as root, so not inside COMMAND).
 USER_NAME="$(whoami)"
 
-# Common overrides (identical across modes). refit_backend=nccl is a no-op for
-# colocated; moe_pad_experts is inference-only and drops no tokens.
+# Common overrides. refit_backend=nccl is a no-op for colocated.
 overrides="policy.generation.backend=megatron"
 overrides+=" cluster.num_nodes=${NUM_ACTOR_NODES}"
 overrides+=" policy.generation.mcore_generation_config.refit_backend=nccl"
-overrides+=" ++policy.megatron_cfg.moe_pad_experts_for_cuda_graph_inference=true"
 
-# Only mode-specific knob.
+# Mode-specific knobs. Colocated needs no extra overrides: it builds one
+# inference_optimized dual-mode model (see async_colocated_nanov3.yaml).
 if [[ "${MODE}" == non_colocated ]]; then
   overrides+=" policy.generation.colocated.resources.num_nodes=${NUM_GEN_NODES}"
 fi

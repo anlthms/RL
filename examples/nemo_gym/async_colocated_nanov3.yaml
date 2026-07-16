@@ -1,5 +1,10 @@
 defaults: actually_run_nanov3.yaml
 
+# Colocated async GRPO with a single dual-mode model, built as
+# transformer_impl=inference_optimized: fast decode kernels under InferenceMode,
+# trainable TE fallback for training. One model trains and generates fast -- no
+# second model, no weight sync, no moe_pad_experts hack.
+
 policy:
 
   generation:
@@ -8,6 +13,21 @@ policy:
       resources:
         gpus_per_node: 4
         num_nodes: null
+
+  megatron_cfg:
+    transformer_impl: "inference_optimized"
+    allow_inference_optimized_training: true
+    # Inference kernels (mirror the dedicated non-colocated model).
+    inference_moe_token_dispatcher_type: "nccl"
+    inference_grouped_gemm_backend: "vllm"
+    # InferenceTopKRouter requires num_groups=None (nano-v3 n_group=1 is equivalent).
+    moe_router_num_groups: null
+    moe_router_group_topk: null
+    # Forbidden with inference_optimized (nccl dispatcher is dropless).
+    moe_pad_experts_for_cuda_graph_inference: false
+    # Recompute the training forward to fit alongside the resident KV cache;
+    # else train() OOMs.
+    activation_checkpointing: true
 
 env:
   nemo_gym:
