@@ -197,6 +197,50 @@ class MegatronGenerationMixin:
         self._inference_engine_asleep = True
         print(f"[Rank {self.rank}] Initialized persistent inference engine")
 
+        # Opt-in generation trace (NRL_GEN_TRACE=1): wrap the engine's per-step
+        # coroutine to log in-flight concurrency (active/paused/waiting requests,
+        # active tokens) and decode step-rate every NRL_GEN_TRACE_EVERY steps, on
+        # all ranks. Lets us separate concurrency from per-step decode latency when
+        # comparing colocated vs non-colocated generation speed. No-op unless set.
+        if os.environ.get("NRL_GEN_TRACE", "0") == "1":
+            _eng = self.dynamic_inference_engine
+            _orig_async_step = _eng.async_step
+            _every = max(1, int(os.environ.get("NRL_GEN_TRACE_EVERY", "25")))
+            _rank = self.rank
+            _state = {"i": 0, "t_last": None, "step_last": 0}
+
+            async def _traced_async_step(*args, **kwargs):
+                ret = await _orig_async_step(*args, **kwargs)
+                _state["i"] += 1
+                if _state["i"] % _every == 0:
+                    ctx = _eng.context
+                    now = time.monotonic()
+                    if _state["t_last"] is not None:
+                        dt = now - _state["t_last"]
+                        sps = (_state["i"] - _state["step_last"]) / dt if dt > 0 else 0.0
+                    else:
+                        sps = 0.0
+                    _state["t_last"] = now
+                    _state["step_last"] = _state["i"]
+                    try:
+                        active = ctx.total_request_count - ctx.paused_request_count
+                        print(
+                            f"[NRL-GEN-TRACE] rank={_rank} step={_state['i']} "
+                            f"decode_only={ctx.is_decode_only()} "
+                            f"active_reqs={active} paused={ctx.paused_request_count} "
+                            f"waiting={len(_eng.waiting_request_ids)} "
+                            f"total_reqs={ctx.total_request_count} "
+                            f"active_tokens={ctx.active_token_count} "
+                            f"steps_per_s={sps:.1f} "
+                            f"finished={_eng.finished_request_count}",
+                            flush=True,
+                        )
+                    except Exception as _e:  # pragma: no cover - trace only
+                        print(f"[NRL-GEN-TRACE] read error: {_e}", flush=True)
+                return ret
+
+            _eng.async_step = _traced_async_step
+
     async def _start_inference_coordinator(self):
         """Start the inference coordinator and engine loop."""
         self.coordinator_addr = await self.dynamic_inference_engine.start_listening_to_data_parallel_coordinator(
