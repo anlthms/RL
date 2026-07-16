@@ -36,13 +36,10 @@ overrides="policy.generation.backend=megatron"
 overrides+=" cluster.num_nodes=${NUM_ACTOR_NODES}"
 overrides+=" policy.generation.mcore_generation_config.refit_backend=nccl"
 
-# Mode-specific knobs.
+# Mode-specific knobs. Colocated needs no extra overrides: it builds one
+# inference_optimized dual-mode model (see async_colocated_nanov3.yaml).
 if [[ "${MODE}" == non_colocated ]]; then
   overrides+=" policy.generation.colocated.resources.num_nodes=${NUM_GEN_NODES}"
-else
-  # Colocated toggles cuda_graph_impl=local on the training model; EP>1 needs
-  # this flag. Non-colo's inference_optimized model forbids it.
-  overrides+=" ++policy.megatron_cfg.moe_pad_experts_for_cuda_graph_inference=true"
 fi
 
 # Scale-down: one step, no checkpoint, shorter seq (the OOM lever), smaller batch.

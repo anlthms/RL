@@ -314,14 +314,24 @@ class MegatronPolicyWorkerImpl(
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Step 3: Setup model configuration
-        # Training workers cannot use inference_optimized transformer spec.
-        if init_optimizer:
+        # inference_optimized layers are dual-mode (trainable TE fallback when
+        # InferenceMode is off), so one model trains and generates fast. Opt-in only.
+        if init_optimizer and not config["megatron_cfg"].get(
+            "allow_inference_optimized_training"
+        ):
             assert (
                 config["megatron_cfg"].get("transformer_impl") != "inference_optimized"
             ), (
                 "transformer_impl=inference_optimized must not be set on training workers. "
-                "Use policy.generation.mcore_generation_config.transformer_impl=inference_optimized instead."
+                "Use policy.generation.mcore_generation_config.transformer_impl=inference_optimized instead, "
+                "or set megatron_cfg.allow_inference_optimized_training=true to train a single dual-mode model."
             )
+        if config["megatron_cfg"].get("transformer_impl") == "inference_optimized":
+            # The Megatron->HF exporter's registry omits InferenceColumnParallelLinear
+            # (shared_experts.linear_fc1); the dual-mode model is the export source.
+            from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+            AutoMapping.register_module_type("InferenceColumnParallelLinear", "column")
         runtime_config = validate_and_set_config(
             config,
             self.rank,
