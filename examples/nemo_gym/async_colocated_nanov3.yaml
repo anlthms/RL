@@ -1,15 +1,7 @@
 defaults: actually_run_nanov3.yaml
 
-# Colocated async GRPO with one dual-mode inference_optimized model: fast decode
-# kernels under InferenceMode, trainable TE fallback for training. One model trains
-# and generates -- no second model, no weight sync.
-#
-# Graphed decode (cuda_graph_impl=local + inference_cuda_graph_scope=block) makes MoE
-# decode fast enough to overlap training, at non-colocated parity. It forbids full
-# recompute, so activation_checkpointing is off and training memory is freed by
-# offloading the KV cache during the pause (kv_cache_management_mode=offload).
-# Multi-step stability also needs the DP overlaps off (see below) and a sync at the
-# engine suspend/resume boundary (megatron_worker.py _sleep/_wake).
+# Colocated async GRPO: one dual-mode inference_optimized model (fast graphed decode
+# + trainable TE fallback). Graphed decode requires kv persist, NOT offload (see below).
 
 policy:
 
@@ -20,10 +12,11 @@ policy:
         gpus_per_node: 4
         num_nodes: null
     mcore_generation_config:
-      # Offload the KV cache to CPU during the training pause so the training
-      # forward fits without activation_checkpointing (which cuda_graph_impl=local
-      # forbids). Uses mcore's torch_memory_saver (launcher SETUP_COMMAND).
-      kv_cache_management_mode: "offload"
+      # persist, NOT offload: decode graphs capture KV-buffer pointers; offload relocates
+      # the buffer -> illegal-access/NCCL deadlock (colo_cudagraph_desync_rootcause.md).
+      kv_cache_management_mode: "persist"
+      # Resident during training, so keep small; 40GB fits seq 16384 (raise seq -> lower this).
+      buffer_size_gb: 40
 
   megatron_cfg:
     transformer_impl: "inference_optimized"
@@ -31,21 +24,17 @@ policy:
     # Inference kernels (mirror the dedicated non-colocated model).
     inference_moe_token_dispatcher_type: "nccl"
     inference_grouped_gemm_backend: "vllm"
-    # InferenceTopKRouter requires num_groups=None (nano-v3 n_group=1 is equivalent).
+    # InferenceTopKRouter needs num_groups=None (nano-v3 n_group=1 is equivalent).
     moe_router_num_groups: null
     moe_router_group_topk: null
-    # Forbidden with inference_optimized (nccl dispatcher is dropless).
+    # Forbidden with inference_optimized (dropless nccl dispatcher).
     moe_pad_experts_for_cuda_graph_inference: false
-    # Graph the decode block (fast MoE decode); forbids full recompute, so
-    # activation_checkpointing is off and KV is offloaded above instead.
+    # Graph the decode block (fast MoE decode); forbids recompute -> act_ckpt off.
     cuda_graph_impl: "local"
     inference_cuda_graph_scope: "block"
     activation_checkpointing: false
     distributed_data_parallel_config:
-      # Colocated-only: the async replay buffer gives DP ranks unequal microbatch
-      # counts, so overlapped grad-reduce/param-gather (async side-streams) desync
-      # the DATA_PARALLEL grad-sync. Synchronous DP collectives stay in lockstep;
-      # overlap saves little here since generation dominates.
+      # Synchronous DP collectives (overlap saves little; generation dominates).
       overlap_grad_reduce: false
       overlap_param_gather: false
 
