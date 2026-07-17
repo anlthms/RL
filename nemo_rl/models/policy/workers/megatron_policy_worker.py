@@ -570,6 +570,18 @@ class MegatronPolicyWorkerImpl(
         )
         num_global_batches = int(total_dataset_size.item()) // gbs
 
+        # Opt-in diagnostic: log per-DP-rank microbatch counts (NRL_TRAIN_BALANCE=1)
+        # to spot the DP imbalance that desyncs overlapped grad-reduce.
+        _balance_trace = os.environ.get("NRL_TRAIN_BALANCE", "0") == "1"
+        if _balance_trace:
+            print(
+                f"[TRAIN-BALANCE] global_rank={torch.distributed.get_rank()} "
+                f"dp_rank={parallel_state.get_data_parallel_rank()}/{self.dp_size} "
+                f"local_data_size={data.size} gbs={gbs} local_gbs={local_gbs} "
+                f"num_global_batches={num_global_batches}",
+                flush=True,
+            )
+
         if eval_mode:
             ctx: AbstractContextManager[Any] = torch.no_grad()
             self.model.eval()
@@ -629,6 +641,15 @@ class MegatronPolicyWorkerImpl(
                 )
                 # Track total microbatches for MoE aux-loss averaging
                 total_num_microbatches += int(num_microbatches)
+
+                if _balance_trace:
+                    print(
+                        f"[TRAIN-BALANCE] global_rank={torch.distributed.get_rank()} "
+                        f"dp_rank={parallel_state.get_data_parallel_rank()} "
+                        f"gb_idx={gb_idx} num_microbatches={int(num_microbatches)} "
+                        f"local_batch_seqs={batch.size if hasattr(batch, 'size') else 'NA'}",
+                        flush=True,
+                    )
 
                 loss_post_processor = LossPostProcessor(
                     loss_fn=loss_fn,

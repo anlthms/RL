@@ -267,6 +267,10 @@ class MegatronGenerationMixin:
             self._sleep_engine(), self._inference_loop
         )
         future.result()
+        # Drain the graph-captured decode collectives before the barrier so they
+        # don't interleave with the eager training collectives on the shared
+        # communicator (which desyncs it after a few cycles).
+        torch.cuda.synchronize()
         torch.distributed.barrier()
         self._inference_engine_asleep = True
         print(f"[Rank {self.rank}] paused inference engine")
@@ -288,6 +292,9 @@ class MegatronGenerationMixin:
             self._wake_engine(), self._inference_loop
         )
         future.result()
+        # Symmetric drain: retire training-phase collectives before decode graph
+        # replays resume on the shared NCCL communicator.
+        torch.cuda.synchronize()
         torch.distributed.barrier()
         self._inference_engine_asleep = False
         print(f"[Rank {self.rank}] resumed inference engine")
