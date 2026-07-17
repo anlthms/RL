@@ -45,6 +45,17 @@ from nemo_rl.models.generation.megatron.utils import (
 )
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 
+# Opt-in per-rank phase tracer (NRL_COLL_TRACE=1), matching megatron_policy_worker:
+# brackets the gen<->train suspend/resume barriers so a rank stuck at the _wake
+# default-group barrier (while peers lag in the DP grad-sync) is visible in logs.
+_COLL_TRACE = os.environ.get("NRL_COLL_TRACE", "0") == "1"
+
+
+def _coll_trace(phase: str) -> None:
+    if not _COLL_TRACE:
+        return
+    print(f"[COLL-TRACE] gr={torch.distributed.get_rank()} phase={phase}", flush=True)
+
 
 class MegatronGenerationMixin:
     """Engine lifecycle, coordinator, HTTP server, and finish-generation machinery.
@@ -271,7 +282,9 @@ class MegatronGenerationMixin:
         # don't interleave with the eager training collectives on the shared
         # communicator (which desyncs it after a few cycles).
         torch.cuda.synchronize()
+        _coll_trace("sleep_barrier_pre")
         torch.distributed.barrier()
+        _coll_trace("sleep_barrier_post")
         self._inference_engine_asleep = True
         print(f"[Rank {self.rank}] paused inference engine")
 
@@ -295,7 +308,9 @@ class MegatronGenerationMixin:
         # Symmetric drain: retire training-phase collectives before decode graph
         # replays resume on the shared NCCL communicator.
         torch.cuda.synchronize()
+        _coll_trace("wake_barrier_pre")
         torch.distributed.barrier()
+        _coll_trace("wake_barrier_post")
         self._inference_engine_asleep = False
         print(f"[Rank {self.rank}] resumed inference engine")
 

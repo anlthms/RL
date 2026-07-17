@@ -71,12 +71,29 @@ overrides+=" ${EXTRA_OVERRIDES:-}"
 # NCCL_GRAPH_MIXING_SUPPORT=1 lets NCCL safely mix graph-captured decode collectives
 # with eager training collectives on the shared colocated communicator.
 # NCCL_DEBUG (default empty) can be set to WARN to surface a hanging collective.
+# NRL_COLL_TRACE=1 enables the per-rank training-phase tracer; when set it also turns
+# on PyTorch's NCCL flight recorder (TORCH_NCCL_*) so a watchdog timeout dumps each
+# rank's in-flight collective (op/group/seq/state) to NCCL_TRACE_DIR for post-mortem.
+NRL_COLL_TRACE=${NRL_COLL_TRACE:-0}
+if [[ "${NRL_COLL_TRACE}" == 1 ]]; then
+  NCCL_TRACE_DIR="${NCCL_TRACE_DIR:-$(pwd)/nccl_traces}"
+  mkdir -p "${NCCL_TRACE_DIR}"
+  _FR_BUF=${TORCH_NCCL_TRACE_BUFFER_SIZE:-20000}
+  _FR_DUMP=1
+  _FR_FILE="${NCCL_TRACE_DIR}/trace_rank_"
+else
+  _FR_BUF=0; _FR_DUMP=0; _FR_FILE=/tmp/nccl_trace_rank_
+fi
 export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \
 TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
 NETRC=/home/${USER_NAME}/.netrc \
 NRL_GEN_TRACE=${NRL_GEN_TRACE:-0} \
 NRL_GEN_TRACE_EVERY=${NRL_GEN_TRACE_EVERY:-20} \
 NRL_TRAIN_BALANCE=${NRL_TRAIN_BALANCE:-0} \
+NRL_COLL_TRACE=${NRL_COLL_TRACE} \
+TORCH_NCCL_TRACE_BUFFER_SIZE=${_FR_BUF} \
+TORCH_NCCL_DUMP_ON_TIMEOUT=${_FR_DUMP} \
+TORCH_NCCL_DEBUG_INFO_TEMP_FILE=${_FR_FILE} \
 NCCL_GRAPH_MIXING_SUPPORT=${NCCL_GRAPH_MIXING_SUPPORT:-1} \
 NCCL_DEBUG=${NCCL_DEBUG:-} \
 NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-} \

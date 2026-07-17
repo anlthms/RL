@@ -96,6 +96,28 @@ from nemo_rl.utils.r3_trace import maybe_r3_trace_stage
 
 TokenizerType = TypeVar("TokenizerType", bound=PreTrainedTokenizerBase)
 
+# Opt-in per-rank phase tracer (NRL_COLL_TRACE=1) to localize the graphed-colo
+# multi-step DP/EP deadlock: prints a monotonic per-rank sequence at each
+# collective-bearing training phase so divergent ranks are visible in the logs.
+_COLL_TRACE = os.environ.get("NRL_COLL_TRACE", "0") == "1"
+_COLL_SEQ = [0]
+
+
+def _coll_trace(phase: str, **kw: Any) -> None:
+    if not _COLL_TRACE:
+        return
+    _COLL_SEQ[0] += 1
+    try:
+        dp = parallel_state.get_data_parallel_rank()
+    except Exception:
+        dp = -1
+    extra = " ".join(f"{k}={v}" for k, v in kw.items())
+    print(
+        f"[COLL-TRACE] seq={_COLL_SEQ[0]} gr={torch.distributed.get_rank()} "
+        f"dp={dp} phase={phase} {extra}",
+        flush=True,
+    )
+
 
 def _should_use_router_replay(
     *,
@@ -694,6 +716,7 @@ class MegatronPolicyWorkerImpl(
                         stage="train",
                         require=True,
                     )
+                    _coll_trace("fb_start", gb=gb_idx, nmb=int(num_microbatches))
                     with maybe_r3_trace_stage("train", enabled=use_router_replay):
                         losses_reduced = megatron_forward_backward(
                             model=self.model,
@@ -717,6 +740,8 @@ class MegatronPolicyWorkerImpl(
                             router_replay_train=not eval_mode,
                         )
 
+                _coll_trace("fb_end", gb=gb_idx)
+
                 # Clear mtp_grad_scale_func after the forward-backward pass so
                 # it doesn't get serialized in the run_config.yaml when saving
                 self._set_mtp_grad_scale_func(None)
@@ -729,6 +754,7 @@ class MegatronPolicyWorkerImpl(
                     torch.cuda.empty_cache()
 
                 # Update parameters.
+                _coll_trace("opt_start", gb=gb_idx)
                 if not eval_mode:
                     update_successful, grad_norm, num_zeros_in_grad = (
                         self.optimizer.step()
@@ -736,6 +762,7 @@ class MegatronPolicyWorkerImpl(
                 else:
                     update_successful, grad_norm, num_zeros_in_grad = (True, 0.0, 0.0)
 
+                _coll_trace("opt_end", gb=gb_idx)
                 pg_collection = get_pg_collection(self.model)
 
                 # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
@@ -817,11 +844,13 @@ class MegatronPolicyWorkerImpl(
             self.scheduler.step(increment=gbs)
 
         # Aggregate metrics across all microbatches
+        _coll_trace("dp_agg_start", total_nmb=total_num_microbatches)
         mb_metrics, global_loss = aggregate_training_statistics(
             all_mb_metrics=all_mb_metrics,
             losses=losses,
             data_parallel_group=parallel_state.get_data_parallel_group(),
         )
+        _coll_trace("dp_agg_end")
 
         metrics = {
             "global_loss": global_loss.cpu(),
