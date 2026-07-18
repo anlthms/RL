@@ -132,6 +132,95 @@ def test_ep_consensus_interval_must_be_positive():
         worker._initialize_inference_engine({"ep_consensus_interval": 0})
 
 
+def test_sleep_engine_quiesces_inference_after_suspension(monkeypatch):
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    events = []
+
+    class FakeEngine:
+        async def wait_until(self, state):
+            events.append(("wait", state))
+
+    worker = object.__new__(megatron_worker.MegatronGenerationMixin)
+    worker.dynamic_inference_engine = FakeEngine()
+    worker._record_ep_trace = lambda *args, **kwargs: None
+    worker._synchronize_cuda_device = lambda phase: events.append(("sync", phase))
+
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+
+    asyncio.run(worker._sleep_engine())
+
+    assert events == [
+        ("wait", megatron_worker.EngineState.PAUSED),
+        ("wait", megatron_worker.EngineState.SUSPENDED),
+        ("sync", "inference_quiesce"),
+    ]
+
+
+def test_wake_fences_training_before_resuming_inference(monkeypatch):
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    events = []
+
+    class FakeFuture:
+        def result(self):
+            events.append("wake_complete")
+
+    def fake_run_coroutine_threadsafe(coroutine, loop):
+        del loop
+        coroutine.close()
+        events.append("wake_submitted")
+        return FakeFuture()
+
+    worker = object.__new__(megatron_worker.MegatronGenerationMixin)
+    worker.rank = 3
+    worker._inference_engine_asleep = True
+    worker._inference_loop = object()
+    worker._synchronize_cuda_device = lambda phase: events.append(("sync", phase))
+
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: events.append("barrier"))
+    monkeypatch.setattr(
+        asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe
+    )
+
+    worker._wake()
+
+    assert events == [
+        ("sync", "training_quiesce"),
+        "barrier",
+        "wake_submitted",
+        "wake_complete",
+    ]
+    assert not worker._inference_engine_asleep
+
+
+def test_cuda_quiescence_targets_local_rank(monkeypatch):
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    traces = []
+    synchronized_devices = []
+    worker = object.__new__(megatron_worker.MegatronGenerationMixin)
+    worker._record_ep_trace = lambda event, **kwargs: traces.append((event, kwargs))
+
+    monkeypatch.setenv("LOCAL_RANK", "5")
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 5)
+    monkeypatch.setattr(
+        torch.cuda,
+        "synchronize",
+        lambda *, device: synchronized_devices.append(device),
+    )
+
+    worker._synchronize_cuda_device("inference_quiesce")
+
+    assert synchronized_devices == [5]
+    assert [event for event, _ in traces] == [
+        "inference_quiesce_enter",
+        "inference_quiesce_exit",
+    ]
+    assert all(trace["local_rank"] == 5 for _, trace in traces)
+    assert all(trace["current_device"] == 5 for _, trace in traces)
+
+
 class _FakeTrainableModel:
     def __init__(self):
         self.train_called = False

@@ -448,6 +448,19 @@ class MegatronGenerationMixin:
 
         self._inference_engine_asleep = False
 
+    def _synchronize_cuda_device(self, phase: str) -> None:
+        """Quiesce this worker's GPU and trace which thread acknowledged it."""
+        local_rank = int(os.environ["LOCAL_RANK"])
+        trace_fields = {
+            "thread_id": threading.get_ident(),
+            "thread_name": threading.current_thread().name,
+            "local_rank": local_rank,
+            "current_device": torch.cuda.current_device(),
+        }
+        self._record_ep_trace(f"{phase}_enter", emit=True, **trace_fields)
+        torch.cuda.synchronize(device=local_rank)
+        self._record_ep_trace(f"{phase}_exit", emit=True, **trace_fields)
+
     def _sleep(self) -> None:
         """Pause + suspend the engine. No-op if already asleep."""
         if self._inference_engine_asleep:
@@ -471,10 +484,9 @@ class MegatronGenerationMixin:
             if dump_timer is not None:
                 dump_timer.cancel()
         self._record_ep_trace("sleep_engine_complete", emit=True)
-        # Drain the graph-captured decode collectives before the barrier so they
-        # don't interleave with the eager training collectives on the shared
-        # communicator (which desyncs it after a few cycles).
-        torch.cuda.synchronize()
+        # _sleep_engine acknowledges suspension only after its CUDA device is
+        # quiescent. The barrier turns those per-rank acknowledgements into a
+        # global fence before training reuses the shared communicator.
         _coll_trace("sleep_barrier_pre")
         torch.distributed.barrier()
         _coll_trace("sleep_barrier_post")
@@ -497,21 +509,23 @@ class MegatronGenerationMixin:
         self._record_ep_trace("wait_suspended_enter", emit=True)
         await self.dynamic_inference_engine.wait_until(EngineState.SUSPENDED)
         self._record_ep_trace("wait_suspended_exit", emit=True)
+        self._synchronize_cuda_device("inference_quiesce")
 
     def _wake(self) -> None:
         """Resume + unpause the engine. No-op if already awake."""
         if not self._inference_engine_asleep:
             return
+        # Retire training work on every rank before any rank may resume decode
+        # collectives on the shared communicator. This fence must precede the
+        # resume signal; placing it after _wake_engine permits overlap.
+        self._synchronize_cuda_device("training_quiesce")
+        _coll_trace("wake_barrier_pre")
+        torch.distributed.barrier()
+        _coll_trace("wake_barrier_post")
         future = asyncio.run_coroutine_threadsafe(
             self._wake_engine(), self._inference_loop
         )
         future.result()
-        # Symmetric drain: retire training-phase collectives before decode graph
-        # replays resume on the shared NCCL communicator.
-        torch.cuda.synchronize()
-        _coll_trace("wake_barrier_pre")
-        torch.distributed.barrier()
-        _coll_trace("wake_barrier_post")
         self._inference_engine_asleep = False
         print(f"[Rank {self.rank}] resumed inference engine")
 
