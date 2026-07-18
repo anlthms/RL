@@ -65,6 +65,11 @@ class MCoreGenerationSpecificArgs(TypedDict):
 
     logging_step_interval: NotRequired[int]
 
+    # Dynamic-engine EP pause-consensus controls. Megatron defaults to enabled
+    # consensus every 20 loop iterations when these optional fields are absent.
+    disable_ep_consensus: NotRequired[bool]
+    ep_consensus_interval: NotRequired[int]
+
 
 class MCoreGenerationConfig(GenerationConfig):
     """Generation config for Megatron Inference."""

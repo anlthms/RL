@@ -346,6 +346,8 @@ policy:
       use_cuda_graphs_for_non_decode_steps: true  # Enable CUDA graphs for prefill/context processing
       enable_chunked_prefill: true  # Split long prefills into chunks for better memory management
       enable_prefix_caching: false  # Reuse KV blocks across requests sharing a prompt prefix.
+      disable_ep_consensus: false  # Skip EP pause/work consensus and use local state plus dummy forwards instead.
+      ep_consensus_interval: 20  # Busy-loop iterations between EP consensus checks; use 1 to diagnose pause races.
       max_tokens: 16384 # Maximum number of tokens to use in a single step. Analogous to vllm's max_num_batched_tokens
       kv_cache_management_mode: "persist"  # KV cache lifecycle across suspend/resume. Options: "persist", "offload". To select "recompute", set grpo.async_grpo.recompute_kv_cache_after_weight_updates=true.
       materialize_only_last_token_logits: true

@@ -68,6 +68,8 @@ overrides+=" ${EXTRA_OVERRIDES:-}"
 
 # NRL_MEGATRON_CHECKPOINT_DIR caches the one-time HF -> Megatron conversion (shared by both modes).
 # NRL_GEN_TRACE=1 (opt-in) enables the per-step generation-concurrency/decode-rate trace.
+# NRL_EP_TRACE=1 records the Megatron dynamic-engine pause/EP-consensus transition
+# and dumps a bounded per-rank event ring when an engine pause stalls.
 # NCCL_GRAPH_MIXING_SUPPORT=1 lets NCCL safely mix graph-captured decode collectives
 # with eager training collectives on the shared colocated communicator.
 # NCCL_DEBUG (default empty) can be set to WARN to surface a hanging collective.
@@ -89,6 +91,9 @@ TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
 NETRC=/home/${USER_NAME}/.netrc \
 NRL_GEN_TRACE=${NRL_GEN_TRACE:-0} \
 NRL_GEN_TRACE_EVERY=${NRL_GEN_TRACE_EVERY:-20} \
+NRL_EP_TRACE=${NRL_EP_TRACE:-0} \
+NRL_EP_TRACE_BUFFER_SIZE=${NRL_EP_TRACE_BUFFER_SIZE:-128} \
+NRL_EP_TRACE_DUMP_AFTER_S=${NRL_EP_TRACE_DUMP_AFTER_S:-30} \
 NRL_TRAIN_BALANCE=${NRL_TRAIN_BALANCE:-0} \
 NRL_COLL_TRACE=${NRL_COLL_TRACE} \
 TORCH_NCCL_TRACE_BUFFER_SIZE=${_FR_BUF} \

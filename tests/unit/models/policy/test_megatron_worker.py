@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ast
+import asyncio
 import os
 import tempfile
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -43,6 +46,90 @@ from nemo_rl.utils.checkpoint import CheckpointManager
 from tests.unit.test_utils import SimpleLossFn
 
 pytestmark = pytest.mark.mcore
+
+
+def test_ep_pause_trace_wraps_engine_without_collectives(monkeypatch, capsys):
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    class FakeContext:
+        step_count = 7
+
+        def get_active_request_count(self) -> int:
+            return 2
+
+    class FakeController:
+        def dummy_forward(self) -> str:
+            return "dummy"
+
+    class FakeEngine:
+        def __init__(self):
+            self.state = megatron_worker.EngineState.RUNNING
+            self.context = FakeContext()
+            self.controller = FakeController()
+            self.waiting_request_ids = [1]
+            self._last_ep_consensus = (3, False)
+            self._ep_consensus_loop_counter = 19
+            self.ep_rank = 2
+            self.disable_ep_consensus = False
+            self.ep_consensus_interval = 20
+
+        def schedule_requests(self) -> int:
+            self.state = megatron_worker.EngineState.PAUSING
+            return 1
+
+        async def _ep_establish_consensus(
+            self, local_work: int, signal_consensus: bool
+        ) -> tuple[int, bool]:
+            return local_work, signal_consensus
+
+        async def _world_barrier(self) -> str:
+            return "barrier"
+
+        async def async_step(self) -> str:
+            self.context.step_count += 1
+            return "step"
+
+    monkeypatch.setattr(megatron_worker, "_EP_TRACE", True)
+    worker = object.__new__(megatron_worker.MegatronGenerationMixin)
+    worker.rank = 6
+    worker.dynamic_inference_engine = FakeEngine()
+    worker._ep_trace_events = deque(maxlen=128)
+    worker._ep_trace_lock = threading.Lock()
+
+    worker._install_ep_pause_trace()
+    assert worker.dynamic_inference_engine.schedule_requests() == 1
+    assert asyncio.run(
+        worker.dynamic_inference_engine._ep_establish_consensus(3, True)
+    ) == (3, True)
+    assert asyncio.run(worker.dynamic_inference_engine.async_step()) == "step"
+    assert worker.dynamic_inference_engine.controller.dummy_forward() == "dummy"
+    assert asyncio.run(worker.dynamic_inference_engine._world_barrier()) == "barrier"
+
+    events = {snapshot["event"] for snapshot in worker._ep_trace_events}
+    assert {
+        "trace_installed",
+        "schedule_requests",
+        "ep_consensus_enter",
+        "ep_consensus_exit",
+        "async_step_enter",
+        "async_step_exit",
+        "dummy_forward_enter",
+        "dummy_forward_exit",
+        "world_barrier_enter",
+        "world_barrier_exit",
+    } <= events
+    assert "reason=entered_pausing" in capsys.readouterr().out
+
+
+def test_ep_consensus_interval_must_be_positive():
+    from nemo_rl.models.generation.megatron.megatron_worker import (
+        MegatronGenerationMixin,
+    )
+
+    worker = object.__new__(MegatronGenerationMixin)
+    worker._inference_engine_initialized = False
+    with pytest.raises(ValueError, match="ep_consensus_interval must be at least 1"):
+        worker._initialize_inference_engine({"ep_consensus_interval": 0})
 
 
 class _FakeTrainableModel:

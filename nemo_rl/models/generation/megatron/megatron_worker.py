@@ -18,7 +18,9 @@ import os
 import threading
 import time
 import warnings
-from typing import AsyncGenerator, Optional
+from collections import deque
+from functools import wraps
+from typing import Any, AsyncGenerator, Optional
 
 import requests
 import torch
@@ -49,6 +51,16 @@ from nemo_rl.utils.nsys import wrap_with_nvtx_name
 # brackets the gen<->train suspend/resume barriers so a rank stuck at the _wake
 # default-group barrier (while peers lag in the DP grad-sync) is visible in logs.
 _COLL_TRACE = os.environ.get("NRL_COLL_TRACE", "0") == "1"
+
+# Opt-in dynamic-engine pause tracer. Unlike NRL_COLL_TRACE, this records the
+# engine's CPU-side pause/EP-consensus state without issuing any collectives.
+_EP_TRACE = os.environ.get("NRL_EP_TRACE", "0") == "1"
+_EP_TRACE_BUFFER_SIZE = max(
+    16, int(os.environ.get("NRL_EP_TRACE_BUFFER_SIZE", "128"))
+)
+_EP_TRACE_DUMP_AFTER_S = max(
+    0.0, float(os.environ.get("NRL_EP_TRACE_DUMP_AFTER_S", "30"))
+)
 
 
 def _coll_trace(phase: str) -> None:
@@ -83,12 +95,170 @@ class MegatronGenerationMixin:
         )
         self._inference_loop = None
         self._inference_thread = None
+        self._ep_trace_events: deque[dict[str, Any]] = deque(
+            maxlen=_EP_TRACE_BUFFER_SIZE
+        )
+        self._ep_trace_lock = threading.Lock()
+
+    def _record_ep_trace(self, event: str, *, emit: bool = False, **extra: Any) -> None:
+        """Record one dynamic-engine state snapshot without adding collectives."""
+        if not _EP_TRACE or self.dynamic_inference_engine is None:
+            return
+
+        engine = self.dynamic_inference_engine
+        try:
+            local_pending = engine.context.get_active_request_count() + len(
+                engine.waiting_request_ids
+            )
+        except (AttributeError, RuntimeError):  # pragma: no cover - trace best effort
+            local_pending = -1
+
+        global_work, all_pausing = getattr(
+            engine, "_last_ep_consensus", (None, None)
+        )
+        state = getattr(engine, "state", None)
+        snapshot = {
+            "wall_ns": time.time_ns(),
+            "t_ns": time.monotonic_ns(),
+            "event": event,
+            "gr": self.rank,
+            "ep": getattr(engine, "ep_rank", -1),
+            "state": getattr(state, "name", str(state)),
+            "local_pending": local_pending,
+            "global_work": global_work,
+            "all_pausing": all_pausing,
+            "consensus_counter": getattr(
+                engine, "_ep_consensus_loop_counter", -1
+            ),
+            "step_count": getattr(engine.context, "step_count", -1),
+            **extra,
+        }
+        with self._ep_trace_lock:
+            self._ep_trace_events.append(snapshot)
+
+        if emit:
+            fields = " ".join(f"{key}={value}" for key, value in snapshot.items())
+            print(f"[NRL-EP-TRACE] {fields}", flush=True)
+
+    def _dump_ep_trace(self, reason: str, *, limit: Optional[int] = None) -> None:
+        """Print some or all of the bounded per-rank trace ring."""
+        if not _EP_TRACE:
+            return
+        with self._ep_trace_lock:
+            snapshots = list(self._ep_trace_events)
+        if limit is not None:
+            snapshots = snapshots[-limit:]
+        print(
+            f"[NRL-EP-TRACE-DUMP] gr={self.rank} reason={reason} "
+            f"events={len(snapshots)}",
+            flush=True,
+        )
+        for snapshot in snapshots:
+            fields = " ".join(f"{key}={value}" for key, value in snapshot.items())
+            print(
+                f"[NRL-EP-TRACE-DUMP] reason={reason} {fields}",
+                flush=True,
+            )
+
+    def _install_ep_pause_trace(self) -> None:
+        """Instrument one engine instance without modifying vendored Megatron code."""
+        if not _EP_TRACE:
+            return
+
+        engine = self.dynamic_inference_engine
+
+        original_schedule_requests = engine.schedule_requests
+
+        @wraps(original_schedule_requests)
+        def traced_schedule_requests(*args: Any, **kwargs: Any) -> int:
+            state_before = engine.state
+            result = original_schedule_requests(*args, **kwargs)
+            state_after = engine.state
+            self._record_ep_trace(
+                "schedule_requests",
+                emit=state_after == EngineState.PAUSING,
+                messages=result,
+                state_before=getattr(state_before, "name", str(state_before)),
+                state_after=getattr(state_after, "name", str(state_after)),
+            )
+            if state_before != state_after and state_after == EngineState.PAUSING:
+                self._dump_ep_trace("entered_pausing", limit=12)
+            return result
+
+        engine.schedule_requests = traced_schedule_requests
+
+        original_establish_consensus = engine._ep_establish_consensus
+
+        @wraps(original_establish_consensus)
+        async def traced_establish_consensus(
+            local_work: int, signal_consensus: bool
+        ) -> tuple[int, bool]:
+            self._record_ep_trace(
+                "ep_consensus_enter",
+                emit=signal_consensus,
+                consensus_local_work=local_work,
+                signal_consensus=signal_consensus,
+            )
+            result = await original_establish_consensus(local_work, signal_consensus)
+            self._record_ep_trace(
+                "ep_consensus_exit",
+                emit=signal_consensus or result[1],
+                consensus_global_work=result[0],
+                consensus_all_pausing=result[1],
+            )
+            return result
+
+        engine._ep_establish_consensus = traced_establish_consensus
+
+        original_world_barrier = engine._world_barrier
+
+        @wraps(original_world_barrier)
+        async def traced_world_barrier(*args: Any, **kwargs: Any) -> Any:
+            self._record_ep_trace("world_barrier_enter", emit=True)
+            result = await original_world_barrier(*args, **kwargs)
+            self._record_ep_trace("world_barrier_exit", emit=True)
+            return result
+
+        engine._world_barrier = traced_world_barrier
+
+        original_async_step = engine.async_step
+
+        @wraps(original_async_step)
+        async def traced_async_step(*args: Any, **kwargs: Any) -> Any:
+            self._record_ep_trace("async_step_enter")
+            result = await original_async_step(*args, **kwargs)
+            self._record_ep_trace("async_step_exit")
+            return result
+
+        engine.async_step = traced_async_step
+
+        original_dummy_forward = engine.controller.dummy_forward
+
+        @wraps(original_dummy_forward)
+        def traced_dummy_forward(*args: Any, **kwargs: Any) -> Any:
+            self._record_ep_trace("dummy_forward_enter")
+            result = original_dummy_forward(*args, **kwargs)
+            self._record_ep_trace("dummy_forward_exit")
+            return result
+
+        engine.controller.dummy_forward = traced_dummy_forward
+        self._record_ep_trace(
+            "trace_installed",
+            emit=True,
+            disable_ep_consensus=engine.disable_ep_consensus,
+            ep_consensus_interval=engine.ep_consensus_interval,
+        )
 
     def _initialize_inference_engine(self, mcore_generation_config: dict) -> None:
         """Initialize the persistent inference engine and client."""
         # TODO: Switch to standardized Megatron API.
         if self._inference_engine_initialized:
             return
+        if (
+            "ep_consensus_interval" in mcore_generation_config
+            and mcore_generation_config["ep_consensus_interval"] < 1
+        ):
+            raise ValueError("ep_consensus_interval must be at least 1")
 
         from megatron.core.inference.config import MambaInferenceStateConfig
         from megatron.core.inference.contexts.dynamic_context import (
@@ -156,6 +326,11 @@ class MegatronGenerationMixin:
             torch.bfloat16,
         )
 
+        ep_consensus_config: dict[str, bool | int] = {}
+        for field in ("disable_ep_consensus", "ep_consensus_interval"):
+            if field in mcore_generation_config:
+                ep_consensus_config[field] = mcore_generation_config[field]
+
         inference_config = InferenceConfig(
             block_size_tokens=block_size_tokens,
             buffer_size_gb=buffer_size_gb,
@@ -183,6 +358,7 @@ class MegatronGenerationMixin:
             logging_step_interval=logging_step_interval,
             num_speculative_tokens=num_speculative_tokens,
             max_requests=max_requests,
+            **ep_consensus_config,
         )
 
         if "inference_cuda_graph_scope" in mcore_generation_config:
@@ -252,6 +428,8 @@ class MegatronGenerationMixin:
 
             _eng.async_step = _traced_async_step
 
+        self._install_ep_pause_trace()
+
     async def _start_inference_coordinator(self):
         """Start the inference coordinator and engine loop."""
         self.coordinator_addr = await self.dynamic_inference_engine.start_listening_to_data_parallel_coordinator(
@@ -274,10 +452,25 @@ class MegatronGenerationMixin:
         """Pause + suspend the engine. No-op if already asleep."""
         if self._inference_engine_asleep:
             return
+        self._record_ep_trace("sleep_submit", emit=True)
         future = asyncio.run_coroutine_threadsafe(
             self._sleep_engine(), self._inference_loop
         )
-        future.result()
+        dump_timer = None
+        if _EP_TRACE and _EP_TRACE_DUMP_AFTER_S > 0:
+            dump_timer = threading.Timer(
+                _EP_TRACE_DUMP_AFTER_S,
+                self._dump_ep_trace,
+                args=("sleep_wait_timeout",),
+            )
+            dump_timer.daemon = True
+            dump_timer.start()
+        try:
+            future.result()
+        finally:
+            if dump_timer is not None:
+                dump_timer.cancel()
+        self._record_ep_trace("sleep_engine_complete", emit=True)
         # Drain the graph-captured decode collectives before the barrier so they
         # don't interleave with the eager training collectives on the shared
         # communicator (which desyncs it after a few cycles).
@@ -290,12 +483,20 @@ class MegatronGenerationMixin:
 
     async def _sleep_engine(self):
         if torch.distributed.get_rank() == 0:
+            self._record_ep_trace("pause_signal_send", emit=True)
             self.inference_client.pause_engines()
+            self._record_ep_trace("pause_signal_sent", emit=True)
+        self._record_ep_trace("wait_paused_enter", emit=True)
         await self.dynamic_inference_engine.wait_until(EngineState.PAUSED)
+        self._record_ep_trace("wait_paused_exit", emit=True)
 
         if torch.distributed.get_rank() == 0:
+            self._record_ep_trace("suspend_signal_send", emit=True)
             self.inference_client.suspend_engines()
+            self._record_ep_trace("suspend_signal_sent", emit=True)
+        self._record_ep_trace("wait_suspended_enter", emit=True)
         await self.dynamic_inference_engine.wait_until(EngineState.SUSPENDED)
+        self._record_ep_trace("wait_suspended_exit", emit=True)
 
     def _wake(self) -> None:
         """Resume + unpause the engine. No-op if already awake."""
@@ -316,12 +517,20 @@ class MegatronGenerationMixin:
 
     async def _wake_engine(self):
         if torch.distributed.get_rank() == 0:
+            self._record_ep_trace("resume_signal_send", emit=True)
             self.inference_client.resume_engines()
+            self._record_ep_trace("resume_signal_sent", emit=True)
+        self._record_ep_trace("wait_resumed_enter", emit=True)
         await self.dynamic_inference_engine.wait_until(EngineState.RESUMED)
+        self._record_ep_trace("wait_resumed_exit", emit=True)
 
         if torch.distributed.get_rank() == 0:
+            self._record_ep_trace("unpause_signal_send", emit=True)
             self.inference_client.unpause_engines()
+            self._record_ep_trace("unpause_signal_sent", emit=True)
+        self._record_ep_trace("wait_running_enter", emit=True)
         await self.dynamic_inference_engine.wait_until(EngineState.RUNNING)
+        self._record_ep_trace("wait_running_exit", emit=True)
 
     def _start_inference_loop_thread(self):
         """Start a background thread with a persistent event loop for inference."""
