@@ -2080,6 +2080,24 @@ def refit_policy_generation(
         policy_generation.resume_after_refit()
 
 
+def _pause_colocated_generation_for_checkpoint(
+    trajectory_collector: Any, policy_generation: GenerationInterface
+) -> None:
+    """Quiesce colocated decode before distributed checkpoint collectives."""
+    print("Pausing colocated engine + collector for checkpointing...", flush=True)
+    ray.get(trajectory_collector.prepare_for_refit.remote())
+    policy_generation.finish_generation()
+
+
+def _resume_colocated_generation_after_checkpoint(
+    trajectory_collector: Any, policy_generation: GenerationInterface
+) -> None:
+    """Wake colocated decode only after every checkpoint collective is done."""
+    policy_generation.prepare_for_generation()
+    ray.get(trajectory_collector.resume_after_refit.remote())
+    print("Resumed colocated engine + collector after checkpointing", flush=True)
+
+
 def _log_mixed_rewards_and_advantages_information(
     logger: Logger,
     total_steps: int,
@@ -4108,16 +4126,25 @@ def async_grpo_train(
                         timer=timer,
                     )
 
+                is_last_step = step + 1 == master_config.grpo["max_num_steps"]
+                validation_due = (
+                    val_period > 0 and (step + 1) % val_period == 0
+                ) or (val_at_end and is_last_step)
+                checkpoint_due_by_step = master_config.checkpointing["enabled"] and (
+                    is_last_step
+                    or (step + 1) % master_config.checkpointing["save_period"] == 0
+                )
                 print("🔄 Synchronizing policy weights to trajectory collector…")
                 if colocated_inference:
                     # Colocated mode currently does not support weights refit.
-                    print("🔄 Resuming colocated engine after training step...")
                     with timer.time("weight_sync"):
                         policy.offload_before_refit()
-                    policy_generation.prepare_for_generation()
                     POLICY_GENERATION_STALE = False
                     weight_version += 1
                     trajectory_collector.set_weight_version.remote(weight_version)
+                    # Resume after training; checkpoint steps re-pause around the save below.
+                    print("Resuming colocated engine after training step...")
+                    policy_generation.prepare_for_generation()
                     trajectory_collector.resume_after_refit.remote()
                 elif NEED_REFIT:
                     # Measure pending-generation wait as exposed_generation time
@@ -4153,12 +4180,9 @@ def async_grpo_train(
 
                 # Validation
                 val_metrics, validation_timings = None, None
-                is_last_step = step + 1 == master_config.grpo["max_num_steps"]
 
                 # Run validation if it's a validation step or last step with val_at_end
-                if (val_period > 0 and (step + 1) % val_period == 0) or (
-                    val_at_end and is_last_step
-                ):
+                if validation_due:
                     # Pause trajectory collection during validation to reduce memory pressure
                     trajectory_collector.pause.remote()
 
@@ -4317,6 +4341,13 @@ def async_grpo_train(
                                 metric_name
                             ]
 
+                    # Checkpoint collectives run on the engine's GPUs; suspend decode
+                    # across the save so they don't race the engine's collectives.
+                    if colocated_inference:
+                        _pause_colocated_generation_for_checkpoint(
+                            trajectory_collector, policy_generation
+                        )
+
                     with timer.time("checkpointing"):
                         print(f"Saving checkpoint for step {step + 1}...")
                         checkpoint_path = checkpointer.init_tmp_checkpoint(
@@ -4355,6 +4386,11 @@ def async_grpo_train(
                             f"{len(replay_buffer_state['trajectories'])} trajectories"
                         )
                         checkpointer.finalize_checkpoint(checkpoint_path)
+
+                    if colocated_inference:
+                        _resume_colocated_generation_after_checkpoint(
+                            trajectory_collector, policy_generation
+                        )
 
             # Logging
             # Log training data (match sync GRPO logging payload for parity)
