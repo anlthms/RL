@@ -11,7 +11,12 @@ defaults: actually_run_nanov3.yaml
 # Multi-step stability also needs the DP overlaps off (see below) and a sync at the
 # engine suspend/resume boundary (megatron_worker.py _sleep/_wake).
 
+grpo:
+  # 2x global batch for colocated: restores non-colo's per-GPU batch and decode efficiency.
+  num_prompts_per_step: 128
+
 policy:
+  train_global_batch_size: 2048  # num_prompts_per_step * num_generations_per_prompt
 
   generation:
     colocated:

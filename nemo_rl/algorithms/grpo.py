@@ -4138,10 +4138,6 @@ def async_grpo_train(
                 validation_due = (
                     val_period > 0 and (step + 1) % val_period == 0
                 ) or (val_at_end and is_last_step)
-                checkpoint_due_by_step = master_config.checkpointing["enabled"] and (
-                    is_last_step
-                    or (step + 1) % master_config.checkpointing["save_period"] == 0
-                )
                 print("🔄 Synchronizing policy weights to trajectory collector…")
                 if colocated_inference:
                     # Colocated mode currently does not support weights refit.
