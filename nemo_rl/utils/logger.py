@@ -549,6 +549,10 @@ class RayGpuMonitorLogger:
                 # Collect metrics with timing information
                 metrics = self._collect_metrics()
                 if metrics:
+                    # Mean utilization over the whole GPU pool (one chart vs many).
+                    utils = [v for k, v in metrics.items() if k.endswith(".util")]
+                    if utils:
+                        metrics["mean_gpu_util"] = sum(utils) / len(utils)
                     with self.lock:
                         self.metrics_buffer.append(
                             {
