@@ -5,6 +5,7 @@
 #
 # Usage: SUBMIT_ACCOUNT=<account> bash launch_experiment.sh {colocated|non_colocated} [--smoke]
 # Env: NUM_ACTOR_NODES (default 8 full / 4 smoke); NUM_GEN_NODES (non-colo, default NUM_ACTOR_NODES/2).
+#      CMP=1 reproduces the colo-vs-non-colo comparison runs (see the CMP block below).
 set -eu
 
 cd "$(dirname "$0")"
@@ -61,6 +62,15 @@ if [[ "${SMOKE}" == 1 ]]; then
   overrides+=" policy.max_total_sequence_length=16384"
   overrides+=" grpo.num_prompts_per_step=8 policy.train_global_batch_size=128"
   overrides+=" logger.wandb.name=async_${MODE}_smoke${RUN_TAG:+_${RUN_TAG}}"
+fi
+
+# CMP=1: comparison-run preset -- validation off, checkpoint every 5 steps (weights
+# only), seq 16384. Do not combine with --smoke.
+if [[ "${CMP:-0}" == 1 && "${SMOKE}" == 0 ]]; then
+  overrides+=" policy.max_total_sequence_length=16384"
+  overrides+=" grpo.val_period=0 grpo.val_at_end=false grpo.val_at_start=false"
+  overrides+=" checkpointing.enabled=true checkpointing.save_period=5 checkpointing.save_optimizer=false"
+  overrides+=" logger.wandb.name=async_${MODE}_cmp_noval"
 fi
 
 # Ad-hoc extra Hydra overrides (space-separated), e.g. EXTRA_OVERRIDES="a=1 b=2".
