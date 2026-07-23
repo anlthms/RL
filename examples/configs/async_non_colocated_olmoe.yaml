@@ -1,0 +1,16 @@
+defaults: async_olmoe_base.yaml
+
+# Non-colocated: dedicated generation nodes (default 2 gen / 2 train at 4 nodes). The
+# launcher overrides resources.num_nodes with NUM_GEN_NODES to track the allocation.
+
+policy:
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 2
+
+logger:
+  wandb:
+    name: async_non_colocated_olmoe

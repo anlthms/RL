@@ -1,0 +1,23 @@
+defaults: async_olmoe_base.yaml
+
+# Colocated: one dual-mode model trains and generates on the shared GPUs. Generation
+# time-shares 2 of the 4 GPUs/node across all nodes (num_nodes: null).
+
+policy:
+  generation:
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: 2
+        num_nodes: null
+
+  megatron_cfg:
+    # Colocated async gives DP ranks unequal microbatch counts; overlapped
+    # grad-reduce/param-gather desync the DATA_PARALLEL collectives and hang.
+    distributed_data_parallel_config:
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+
+logger:
+  wandb:
+    name: async_colocated_olmoe

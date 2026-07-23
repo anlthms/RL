@@ -1,0 +1,43 @@
+defaults: grpo_math_1B_megatron.yaml
+
+# Small-MoE async-GRPO analog of nano-v3: OLMoE-1B-7B (64 experts / top-8) on the
+# simple math env with Megatron inference. Shared base for the colocated and
+# non-colocated variants (mirrors async_nanov3_base.yaml). The launcher supplies
+# only the dynamic bits (cluster shape, max_num_steps, checkpoint dir, wandb entity).
+
+grpo:
+  async_grpo:
+    enabled: true
+  max_num_steps: 30
+
+loss_fn:
+  use_importance_sampling_correction: true
+
+policy:
+  model_name: "allenai/OLMoE-1B-7B-0125-Instruct"
+
+  generation:
+    mcore_generation_config:
+      async_engine: true
+      transformer_impl: "inference_optimized"
+      # Placeholder key so the launcher's mode-specific refit override resolves
+      # (nccl for colocated / no-op, nvshmem for non-colocated).
+      refit_backend: "nccl"
+
+  megatron_cfg:
+    # MoE decode knobs: dropless nccl dispatcher + vllm grouped-gemm, no pad-experts.
+    inference_moe_token_dispatcher_type: "nccl"
+    inference_grouped_gemm_backend: "vllm"
+    moe_pad_experts_for_cuda_graph_inference: false
+
+checkpointing:
+  enabled: true
+
+logger:
+  wandb_enabled: true
+  wandb:
+    project: nemo-rl-megatron-backend
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4
