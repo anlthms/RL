@@ -5,8 +5,9 @@
 # one wandb run so all points share a single plot.
 #
 # Usage: SUBMIT_ACCOUNT=<acct> [MODEL=qwen3_1p7b|nanov3] bash validate_all_checkpoints.sh <checkpoint_dir> [colocated|non_colocated]
-# Env: FORMAT (pretrained_checkpoint format, default torch_dist), WANDB_NAME (plot run
-#      name), WANDB_PROJECT (mllm-rl-dev), WANDB_ENTITY (adlr), TIMEOUT_MIN (per ckpt, 40).
+# Env: FORMAT (pretrained_checkpoint format, default megatron_lm), SEQ_LEN (must match the
+#      checkpoint's training seq, default 16384), WANDB_NAME (plot run name), WANDB_PROJECT,
+#      WANDB_ENTITY (adlr), TIMEOUT_MIN (per ckpt, 40).
 set -eu
 cd "$(dirname "$0")"
 
@@ -15,6 +16,10 @@ MODE=${2:-colocated}
 [ -d "${CKPT_DIR}" ] || { echo "checkpoint dir not found: ${CKPT_DIR}" >&2; exit 1; }
 
 FORMAT="${FORMAT:-megatron_lm}"
+# Validate at the checkpoint's training seq: a mismatch changes the packed
+# iters/step, so the LR scheduler's warmup-in-samples disagrees with the saved
+# state and megatron's OptimizerParamScheduler load asserts.
+SEQ_LEN="${SEQ_LEN:-16384}"
 TIMEOUT_MIN="${TIMEOUT_MIN:-40}"
 WANDB_NAME="${WANDB_NAME:-offlineval_$(basename "${CKPT_DIR}")}"
 RESULTS="$(mktemp)"
@@ -28,8 +33,13 @@ for step in ${steps}; do
   [ -d "${weights}" ] || { echo "  step ${step}: no weights dir, skipping"; continue; }
   echo "=== offline-val step ${step} ==="
 
-  EXTRA_OVERRIDES="grpo.val_at_start=true grpo.max_num_steps=1 checkpointing.enabled=false \
+  # override_opt_param_scheduler skips the checkpoint-vs-config LR-scheduler check:
+  # this val-only run's warmup (clamped by max_num_steps=1) can't match the saved
+  # training warmup, and we don't restore the scheduler anyway.
+  EXTRA_OVERRIDES="policy.max_total_sequence_length=${SEQ_LEN} \
+grpo.val_at_start=true grpo.max_num_steps=1 checkpointing.enabled=false \
 logger.wandb_enabled=false \
++policy.megatron_cfg.scheduler.override_opt_param_scheduler=true \
 +checkpointing.pretrained_checkpoint.format=${FORMAT} \
 +checkpointing.pretrained_checkpoint.path=${weights}"
   out=$(EXTRA_OVERRIDES="${EXTRA_OVERRIDES}" RUN_TAG="oval_s${step}" bash launch_experiment.sh "${MODE}")
