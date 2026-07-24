@@ -910,6 +910,43 @@ class TestRayGpuMonitorLogger:
         assert monitor.metrics_buffer == []
         assert monitor.is_running is False
         assert monitor.collection_thread is None
+        assert monitor.gpu_utilization_sum == 0.0
+        assert monitor.gpu_utilization_count == 0
+        assert monitor.latest_gpu_utilization_step == 0
+
+    @patch("nemo_rl.utils.logger.ray")
+    def test_drain_gpu_utilization_time_average(self, mock_ray):
+        """Average all GPU samples in the window and reset the accumulator."""
+        mock_ray.is_initialized.return_value = True
+        monitor = RayGpuMonitorLogger(
+            collection_interval=10.0,
+            flush_interval=60.0,
+            metric_prefix="ray",
+            step_metric="ray/ray_step",
+            parent_logger=None,
+        )
+
+        monitor._accumulate_gpu_utilization(
+            {
+                "node.0.gpu.0.util": 0.0,
+                "node.0.gpu.1.util": 100.0,
+                "node.0.gpu.0.mem_gb": 80.0,
+            },
+            step=10,
+        )
+        monitor._accumulate_gpu_utilization(
+            {
+                "node.0.gpu.0.util": 50.0,
+                "node.0.gpu.1.util": 70.0,
+            },
+            step=20,
+        )
+
+        assert monitor.drain_gpu_utilization_time_average() == {
+            "cluster_gpu_utilization_time_avg": 55.0,
+            "ray/ray_step": 20,
+        }
+        assert monitor.drain_gpu_utilization_time_average() == {}
 
     @patch("nemo_rl.utils.logger.ray")
     @patch("nemo_rl.utils.logger.threading.Thread")
@@ -1349,6 +1386,10 @@ ray_node_gram_used{{GpuIndex="0",GpuDeviceName="NVIDIA Test GPU"}} {80.0 * 1024}
                 assert monitor.metrics_buffer[0]["metrics"] == {
                     "node.0.gpu.0.util": 75.5
                 }
+                assert monitor.drain_gpu_utilization_time_average() == {
+                    "cluster_gpu_utilization_time_avg": 75.5,
+                    "test/step": 10,
+                }
 
                 # Verify flush was called (flush_interval elapsed)
                 mock_flush.assert_called_once()
@@ -1634,6 +1675,59 @@ class TestLogger:
         mock_tb_instance.log_metrics.assert_called_once_with(
             metrics, step, "", None, False
         )
+
+    @patch("nemo_rl.utils.logger.WandbLogger")
+    @patch("nemo_rl.utils.logger.TensorboardLogger")
+    @patch("nemo_rl.utils.logger.RayGpuMonitorLogger")
+    def test_log_gpu_utilization_time_average_before_step_commit(
+        self,
+        mock_gpu_monitor,
+        mock_tb_logger,
+        mock_wandb_logger,
+        temp_dir,
+    ):
+        """Log the windowed GPU average before committing the training step."""
+        cfg = {
+            "wandb_enabled": True,
+            "tensorboard_enabled": True,
+            "mlflow_enabled": False,
+            "swanlab_enabled": False,
+            "monitor_gpus": True,
+            "gpu_monitoring": {
+                "collection_interval": 10.0,
+                "flush_interval": 10.0,
+            },
+            "wandb": {"project": "test-project"},
+            "tensorboard": {"log_dir": "test_logs"},
+            "log_dir": temp_dir,
+        }
+        logger = Logger(cfg)
+        mock_gpu_instance = mock_gpu_monitor.return_value
+        mock_gpu_instance.metric_prefix = "ray"
+        mock_gpu_instance.step_metric = "ray/ray_step"
+        gpu_metrics = {
+            "cluster_gpu_utilization_time_avg": 62.5,
+            "ray/ray_step": 120,
+        }
+        mock_gpu_instance.drain_gpu_utilization_time_average.return_value = (
+            gpu_metrics
+        )
+
+        step_metrics = {"total_step_time": 120.0}
+        logger.log_metrics(
+            step_metrics,
+            step=7,
+            prefix="timing/train",
+            step_finished=True,
+        )
+
+        mock_gpu_instance.drain_gpu_utilization_time_average.assert_called_once_with()
+        expected_calls = [
+            call(gpu_metrics, 7, "ray", "ray/ray_step", False),
+            call(step_metrics, 7, "timing/train", None, True),
+        ]
+        mock_wandb_logger.return_value.log_metrics.assert_has_calls(expected_calls)
+        mock_tb_logger.return_value.log_metrics.assert_has_calls(expected_calls)
 
     @patch("nemo_rl.utils.logger.WandbLogger")
     @patch("nemo_rl.utils.logger.TensorboardLogger")
