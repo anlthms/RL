@@ -1,28 +1,29 @@
 #!/bin/bash
-# Offline-validate every checkpoint of a previous run and plot reward-vs-step in a
-# single wandb run. Loops step_N/ under the checkpoint dir, runs one offline-val per
-# checkpoint (val_at_start, no training), collects accuracy, then logs the curve to
-# one wandb run so all points share a single plot.
+# Offline-validate every checkpoint of a run and plot reward-vs-step in one wandb
+# run. Loops step_N/ under the checkpoint dir, runs run_megatron_eval.py (inference
+# only -- no optimizer/scheduler) per checkpoint, collects accuracy, logs the curve.
 #
-# Usage: SUBMIT_ACCOUNT=<acct> [MODEL=qwen3_1p7b|nanov3] bash validate_all_checkpoints.sh <checkpoint_dir> [colocated|non_colocated]
-# Env: FORMAT (pretrained_checkpoint format, default megatron_lm), SEQ_LEN (must match the
-#      checkpoint's training seq, default 16384), WANDB_NAME (plot run name), WANDB_PROJECT,
-#      WANDB_ENTITY (adlr), TIMEOUT_MIN (per ckpt, 40).
+# Usage: SUBMIT_ACCOUNT=<acct> bash validate_all_checkpoints.sh <checkpoint_dir> [config_yaml]
+#   config_yaml: eval config (default examples/nemo_gym/async_non_colocated_nanov3.yaml).
+# Env: SEQ_LEN (checkpoint's training seq, default 16384), NUM_ACTOR_NODES (4), QOS
+#      (interactive), TIMEOUT_MIN (per ckpt, 40), WANDB_NAME/PROJECT, WANDB_ENTITY (adlr).
 set -eu
 cd "$(dirname "$0")"
 
-CKPT_DIR=${1:?"usage: bash validate_all_checkpoints.sh <checkpoint_dir> [mode]"}
-MODE=${2:-colocated}
+CKPT_DIR=${1:?"usage: bash validate_all_checkpoints.sh <checkpoint_dir> [config_yaml]"}
+CONFIG=${2:-examples/nemo_gym/async_non_colocated_nanov3.yaml}
 [ -d "${CKPT_DIR}" ] || { echo "checkpoint dir not found: ${CKPT_DIR}" >&2; exit 1; }
+[ -f "${CONFIG}" ] || { echo "config not found: ${CONFIG}" >&2; exit 1; }
 
-FORMAT="${FORMAT:-megatron_lm}"
-# Validate at the checkpoint's training seq: a mismatch changes the packed
-# iters/step, so the LR scheduler's warmup-in-samples disagrees with the saved
-# state and megatron's OptimizerParamScheduler load asserts.
 SEQ_LEN="${SEQ_LEN:-16384}"
 TIMEOUT_MIN="${TIMEOUT_MIN:-40}"
 WANDB_NAME="${WANDB_NAME:-offlineval_$(basename "${CKPT_DIR}")}"
 RESULTS="$(mktemp)"
+# Inference cluster: a dedicated non-colocated generation model; 4 nodes fits the
+# nano-v3 parallelism and the interactive QOS (fast alloc).
+export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-4}"
+export QOS="${QOS:-interactive}"
+USER_NAME="$(whoami)"
 
 # Validate each step_N checkpoint in ascending order.
 steps=$(ls -d "${CKPT_DIR}"/step_* 2>/dev/null | sed 's#.*/step_##' | sort -n)
@@ -33,20 +34,23 @@ for step in ${steps}; do
   [ -d "${weights}" ] || { echo "  step ${step}: no weights dir, skipping"; continue; }
   echo "=== offline-val step ${step} ==="
 
-  # override_opt_param_scheduler skips the checkpoint-vs-config LR-scheduler check:
-  # this val-only run's warmup (clamped by max_num_steps=1) can't match the saved
-  # training warmup, and we don't restore the scheduler anyway.
-  EXTRA_OVERRIDES="policy.max_total_sequence_length=${SEQ_LEN} \
-grpo.val_at_start=true grpo.max_num_steps=1 checkpointing.enabled=false \
-logger.wandb_enabled=false \
-+policy.megatron_cfg.scheduler.override_opt_param_scheduler=true \
-+checkpointing.pretrained_checkpoint.format=${FORMAT} \
-+checkpointing.pretrained_checkpoint.path=${weights}"
-  out=$(EXTRA_OVERRIDES="${EXTRA_OVERRIDES}" RUN_TAG="oval_s${step}" bash launch_experiment.sh "${MODE}")
+  export JOB_NAME="oval_s${step}"
+  export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \
+TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
+NETRC=/home/${USER_NAME}/.netrc \
+NRL_MEGATRON_CHECKPOINT_DIR=/lustre/fsw/portfolios/nemotron/users/${USER_NAME}/megatron_ckpt_cache \
+NEMO_GYM_VENV_DIR=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/${USER_NAME}/gym_venvs \
+uv run examples/run_megatron_eval.py \
+  --config ${CONFIG} --checkpoint ${weights} \
+  cluster.num_nodes=${NUM_ACTOR_NODES} policy.max_total_sequence_length=${SEQ_LEN} \
+  policy.generation.mcore_generation_config.refit_backend=nvshmem"
+  out=$(bash submit_nemorl.sh)
   JID=$(echo "${out}" | grep -oE "Submitted batch job [0-9]+" | grep -oE "[0-9]+" | tail -1)
   [ -n "${JID:-}" ] || { echo "  step ${step}: failed to submit"; continue; }
   L="${JID}-logs/ray-driver.log"
 
+  # run_megatron_eval self-completes after logging Accuracy; the scancel below is a
+  # safety net in case teardown wedges.
   acc=""; deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
   while [ "$(date +%s)" -lt "${deadline}" ]; do
     if [ -f "${L}" ]; then
