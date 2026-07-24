@@ -1,13 +1,14 @@
 defaults: grpo_math_1B_megatron.yaml
 
-# Small-MoE async-GRPO analog of nano-v3: OLMoE-1B-7B (64 experts / top-8) on the
-# simple math env with Megatron inference. Shared base for the colocated and
-# non-colocated variants (mirrors async_nanov3_base.yaml). The launcher supplies
-# only the dynamic bits (cluster shape, max_num_steps, checkpoint dir, wandb entity).
+# Small-MoE async-GRPO analog of nano-v3: OLMoE-1B-7B on the math env, Megatron
+# inference. Shared base for the colo/non-colo variants (mirrors async_nanov3_base.yaml).
 
 grpo:
   async_grpo:
     enabled: true
+    # Smooth async cadence (match nano); the math defaults (age=1, inflight=false) stall.
+    in_flight_weight_updates: true
+    max_trajectory_age_steps: 4
   max_num_steps: 30
 
 loss_fn:
@@ -19,22 +20,23 @@ policy:
   generation:
     mcore_generation_config:
       async_engine: true
-      transformer_impl: "inference_optimized"
-      # Placeholder key so the launcher's mode-specific refit override resolves
-      # (nccl for colocated / no-op, nvshmem for non-colocated).
-      refit_backend: "nccl"
-
+      # SwiGLU rejects inference_optimized; use TE + graphed decode (colo reuses the TE model).
+      transformer_impl: "transformer_engine"
+      refit_backend: "nccl"  # placeholder so the launcher's mode refit override resolves
   megatron_cfg:
-    # MoE decode knobs: dropless nccl dispatcher + vllm grouped-gemm, no pad-experts.
+    # Pad experts: the alltoall DtoH sync isn't CUDA-graph-capturable unpadded on the TE path.
+    moe_pad_experts_for_cuda_graph_inference: true
+    moe_router_dtype: "fp32"  # applied to every model; keep colo/non-colo consistent
+    # Inert on the TE path (only consumed under inference_optimized).
     inference_moe_token_dispatcher_type: "nccl"
     inference_grouped_gemm_backend: "vllm"
-    moe_pad_experts_for_cuda_graph_inference: false
 
 checkpointing:
   enabled: true
 
 logger:
   wandb_enabled: true
+  monitor_gpus: true  # ray/mean_gpu_util (math default is false)
   wandb:
     project: nemo-rl-megatron-backend
 
