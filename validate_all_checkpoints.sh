@@ -25,8 +25,13 @@ export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-4}"
 export QOS="${QOS:-interactive}"
 USER_NAME="$(whoami)"
 
-# Validate each step_N checkpoint in ascending order.
-steps=$(ls -d "${CKPT_DIR}"/step_* 2>/dev/null | sed 's#.*/step_##' | sort -n)
+# Validate each step_N checkpoint in ascending order. STEPS="5 10 15" restricts to
+# a subset (e.g. steps present in both runs for a matched colo-vs-non-colo curve).
+if [ -n "${STEPS:-}" ]; then
+  steps="${STEPS}"
+else
+  steps=$(ls -d "${CKPT_DIR}"/step_* 2>/dev/null | sed 's#.*/step_##' | sort -n)
+fi
 [ -n "${steps}" ] || { echo "no step_N checkpoints under ${CKPT_DIR}" >&2; exit 1; }
 
 for step in ${steps}; do
@@ -40,6 +45,7 @@ TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
 NETRC=/home/${USER_NAME}/.netrc \
 NRL_MEGATRON_CHECKPOINT_DIR=/lustre/fsw/portfolios/nemotron/users/${USER_NAME}/megatron_ckpt_cache \
 NEMO_GYM_VENV_DIR=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/${USER_NAME}/gym_venvs \
+HF_HOME=${HF_HOME:-/lustre/fsw/portfolios/nemotron/users/${USER_NAME}/hf_home} \
 uv run examples/run_megatron_eval.py \
   --config ${CONFIG} --checkpoint ${weights} \
   cluster.num_nodes=${NUM_ACTOR_NODES} policy.max_total_sequence_length=${SEQ_LEN} \
