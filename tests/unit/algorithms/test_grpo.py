@@ -33,6 +33,7 @@ from nemo_rl.algorithms.grpo import (
     _apply_message_level_advantage_penalties,
     _default_grpo_save_state,
     _pause_colocated_generation_for_checkpoint,
+    _prepare_colocated_generation_after_training,
     _raise_if_reward_penalties_enabled_without_nemo_gym,
     _resume_colocated_generation_after_checkpoint,
     _resolve_message_level_advantage_penalties,
@@ -107,6 +108,42 @@ def test_colocated_checkpoint_suspends_decode_collectives(monkeypatch):
         "engine_resume",
         "collector_resume",
     ]
+
+
+@pytest.mark.parametrize(
+    ("will_save_checkpoint", "validation_due", "expected_events"),
+    [
+        (False, False, ["engine_resume", "collector_resume"]),
+        (False, True, ["engine_resume", "collector_resume"]),
+        (True, False, []),
+        (True, True, ["engine_resume"]),
+    ],
+)
+def test_colocated_checkpoint_only_wakes_engine_for_validation(
+    will_save_checkpoint, validation_due, expected_events
+):
+    events = []
+
+    class RemoteMethod:
+        def remote(self):
+            events.append("collector_resume")
+
+    class Collector:
+        resume_after_refit = RemoteMethod()
+
+    policy_generation = MagicMock()
+    policy_generation.prepare_for_generation.side_effect = lambda: events.append(
+        "engine_resume"
+    )
+
+    _prepare_colocated_generation_after_training(
+        Collector(),
+        policy_generation,
+        will_save_checkpoint=will_save_checkpoint,
+        validation_due=validation_due,
+    )
+
+    assert events == expected_events
 
 
 @pytest.fixture
