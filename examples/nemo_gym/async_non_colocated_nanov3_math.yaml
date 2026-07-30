@@ -1,5 +1,0 @@
-# Non-colocated nano-v3 async megatron GRPO, math-only (no NeMo-Gym).
-# Launch: MATH=1 bash launch_experiment.sh non_colocated
-defaults:
-  - async_non_colocated_nanov3.yaml
-  - nanov3_math_override.yaml

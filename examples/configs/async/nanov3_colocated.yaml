@@ -1,4 +1,4 @@
-defaults: async_nanov3_base.yaml
+defaults: nanov3_base.yaml
 
 # Colocated async GRPO with one dual-mode inference_optimized model: fast decode
 # kernels under InferenceMode, trainable TE fallback for training. One model trains

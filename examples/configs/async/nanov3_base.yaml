@@ -1,4 +1,4 @@
-defaults: grpo_nanov3.yaml
+defaults: ../../nemo_gym/grpo_nanov3.yaml
 
 grpo:
   async_grpo:

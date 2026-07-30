@@ -46,7 +46,7 @@ apply_patch \
     "$SRC/RL/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/3rdparty/Megatron-LM/tmp.diff"
 
 # --- 6. Copy the run yaml and point checkpoint_dir under REPO_ROOT's parent --
-YAML_DST="examples/nemo_gym/async_nanov3_base.yaml"
+YAML_DST="examples/configs/async/nanov3_base.yaml"
 echo ">> Copying run yaml -> $YAML_DST"
 cp "$SRC/RL/examples/nemo_gym/actually_run_nanov3.yaml" "$YAML_DST"
 # Rewrite the checkpoint_dir prefix to the parent of REPO_ROOT, keeping the

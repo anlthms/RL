@@ -1,4 +1,4 @@
-defaults: async_nanov3_base.yaml
+defaults: nanov3_base.yaml
 
 policy:
 
