@@ -1157,6 +1157,47 @@ class TestAsyncTrajectoryCollector:
         ray.kill(buffer)
         ray.kill(mock_env)
 
+    def test_inflight_prompt_groups_leave_ray_actor_control_headroom(self):
+        """Generation fan-out stays below the Ray AsyncIO actor call limit."""
+        master_config = self.create_mock_config()
+        master_config.grpo["num_prompts_per_step"] = 20
+        master_config.grpo["num_generations_per_prompt"] = 16
+        master_config.grpo["async_grpo"]["max_trajectory_age_steps"] = 4
+        master_config.grpo["async_grpo"]["in_flight_weight_updates"] = True
+        master_config.policy["generation"] = {
+            "backend": "megatron",
+            "mcore_generation_config": {"async_engine": True},
+        }
+
+        collector_cls = AsyncTrajectoryCollector.__ray_metadata__.modified_class
+        collector = collector_cls(
+            policy_generation=MockGenerationInterface(),
+            tokenizer=mock.MagicMock(),
+            task_to_env={},
+            master_config=master_config,
+            replay_buffer=mock.MagicMock(),
+            start_step=0,
+        )
+
+        assert collector._max_inflight_prompt_groups == 60
+        assert collector._max_inflight_prompt_groups * 16 == 960
+
+        master_config.policy["generation"] = {"backend": "vllm"}
+        assert (
+            trajectory_collector_mod._get_max_inflight_prompt_groups(master_config)
+            == 80
+        )
+
+        master_config.policy["generation"] = {
+            "backend": "megatron",
+            "mcore_generation_config": {"async_engine": True},
+        }
+        master_config.grpo["async_grpo"]["in_flight_weight_updates"] = False
+        assert (
+            trajectory_collector_mod._get_max_inflight_prompt_groups(master_config)
+            == 80
+        )
+
     def test_async_trajectory_collector_weight_version_updates(self):
         """Test weight version updates in trajectory collector."""
         buffer = ReplayBuffer.remote(max_size=10)
