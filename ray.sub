@@ -402,7 +402,12 @@ count=0
 while [[ \$count -lt $num_retries ]]; do
   if [[ -n "$SETUP_COMMAND_FILE" ]] && [[ -f "$SETUP_COMMAND_FILE" ]]; then
     echo "[INFO] Running setup command from $SETUP_COMMAND_FILE..."
-    bash "$SETUP_COMMAND_FILE"
+    if ! bash "$SETUP_COMMAND_FILE"; then
+      count=\$((count+1))
+      echo "Setup command failed \$count/$num_retries times, restarting in 5 seconds..."
+      sleep 5
+      continue
+    fi
   fi
   bash /launch-head.sh
   count=\$((count+1))
@@ -509,7 +514,12 @@ count=0
 while [[ \$count -lt $num_retries ]]; do
   if [[ -n "$SETUP_COMMAND_FILE" ]] && [[ -f "$SETUP_COMMAND_FILE" ]]; then
     echo "[INFO] Running setup command from $SETUP_COMMAND_FILE..."
-    bash "$SETUP_COMMAND_FILE"
+    if ! bash "$SETUP_COMMAND_FILE"; then
+      count=\$((count+1))
+      echo "Setup command failed \$count/$num_retries times, restarting in 5 seconds..."
+      sleep 5
+      continue
+    fi
   fi
   bash /launch-worker.sh
   count=\$((count+1))
