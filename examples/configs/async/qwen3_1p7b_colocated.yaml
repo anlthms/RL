@@ -1,0 +1,41 @@
+defaults: qwen3_1p7b_base.yaml
+
+# Match the non-colocated arm's per-learner-GPU batch.
+grpo:
+  num_prompts_per_step: 16
+
+policy:
+  train_global_batch_size: 256
+  generation:
+    colocated:
+      enabled: true
+    mcore_generation_config:
+      # Offload the KV cache to CPU during the training pause, matching
+      # nanov3_colocated.yaml, so the training forward is not competing with
+      # a resident pool while activation_checkpointing is off. Graph-safe: any
+      # non-persist mode makes megatron_worker.py request static_kv_memory_pointers,
+      # which keeps the captured decode graphs' cache pointers valid across the
+      # offload/reload. mcore asserts torch_memory_saver is installed in that case,
+      # so the launcher installs it for this model (NEEDS_MEMORY_SAVER).
+      kv_cache_management_mode: "offload"
+  megatron_cfg:
+    # One dual-mode model that trains (TE fallback) and generates fast, mirroring
+    # nanov3_colocated.yaml. Without these the shared model would generate
+    # with training kernels. Requires RMSNorm and no bias_linear/qkv_bias, which
+    # transformer_config.py asserts and Qwen3 satisfies. The MoE-only knobs from
+    # the nano recipe do not apply to a dense model.
+    transformer_impl: "inference_optimized"
+    allow_inference_optimized_training: true
+    # Graphed decode. Forbids full recompute, hence activation_checkpointing off.
+    cuda_graph_impl: "local"
+    inference_cuda_graph_scope: "block"
+    activation_checkpointing: false
+    distributed_data_parallel_config:
+      # Colocated-only: the async replay buffer gives DP ranks unequal microbatch
+      # counts, so overlapped grad-reduce/param-gather desync the grad sync.
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+
+logger:
+  wandb:
+    name: async_colocated_qwen3_1p7b

@@ -1,0 +1,60 @@
+defaults: ../grpo_math_1B_megatron.yaml
+
+# Fixed-GPU baseline with equal per-learner-GPU batches across topologies.
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 16
+  max_num_steps: 55
+  val_period: 0
+  val_at_start: false
+  val_at_end: false
+  async_grpo:
+    enabled: true
+    in_flight_weight_updates: true
+    max_trajectory_age_steps: 4
+
+loss_fn:
+  use_importance_sampling_correction: true
+
+policy:
+  # Qwen3 satisfies Megatron's inference_optimized preconditions -- RMSNorm, no
+  # add_bias_linear, no add_qkv_bias (megatron/bridge/models/qwen/qwen3_bridge.py)
+  # -- which is what lets the colocated arm run one dual-mode model that both
+  # trains and decodes fast. The post-trained checkpoint (not -Base), so it
+  # carries the chat_template the gym path needs.
+  model_name: "Qwen/Qwen3-1.7B"
+  # 16384 matches the nano-v3 comparison point.
+  max_total_sequence_length: 16384
+  # Keep activation memory bounded at the longer sequence: more grad-accum steps
+  # rather than larger microbatches, as the nano-v3 recipe does.
+  train_micro_batch_size: 1
+  train_global_batch_size: 128
+  megatron_cfg:
+    env_vars:
+      # Size cross-world refit teams; MCore recommends two CTAs.
+      NVSHMEM_MAX_TEAMS: "512"
+      NVSHMEM_MAX_CTAS: "2"
+  generation:
+    backend: megatron
+    mcore_generation_config:
+      async_engine: true
+      refit_backend: nccl
+      # Only consumed when expose_http_server is on (the gym env layer). Qwen3
+      # emits <think> blocks, which the deepseek-r1 parser handles generically.
+      parsers:
+        - deepseek-r1-reasoning
+        - qwen3-coder-tool
+
+checkpointing:
+  enabled: false
+
+logger:
+  wandb_enabled: true
+  monitor_gpus: true
+  wandb:
+    project: nemo-rl-megatron-backend
+    name: async_qwen3_1p7b
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 2

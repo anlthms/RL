@@ -18,7 +18,7 @@
 # The experiment is three orthogonal axes; every combination has a config at
 # examples/configs/async/<model>_<env>_<topology>.yaml.
 #
-#   MODEL     nanov3                      which policy to train
+#   MODEL     nanov3 | qwen3_1p7b         which policy to train
 #   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
@@ -53,8 +53,8 @@ esac
 
 MODEL="${MODEL:-nanov3}"
 case "${MODEL}" in
-  nanov3) ;;
-  *) die "invalid MODEL: ${MODEL} (expected nanov3)" ;;
+  nanov3 | qwen3_1p7b) ;;
+  *) die "invalid MODEL: ${MODEL} (expected nanov3 or qwen3_1p7b)" ;;
 esac
 
 ENV="${ENV:-gym}"
@@ -75,6 +75,12 @@ case "${MODEL}" in
     CMP_SEQ=16384
     CMP_SAVE_PERIOD=5
     NEEDS_IMPORT_PREFLIGHT=0
+    ;;
+  qwen3_1p7b)
+    DEFAULT_NODES=2
+    CMP_SEQ=""
+    CMP_SAVE_PERIOD=10
+    NEEDS_IMPORT_PREFLIGHT=1
     ;;
 esac
 
