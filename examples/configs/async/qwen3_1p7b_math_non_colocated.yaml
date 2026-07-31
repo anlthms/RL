@@ -1,0 +1,6 @@
+# Qwen3-1.7B dense, built-in math env, non_colocated async GRPO (Megatron inference).
+# The 2-node fast analog of the nano-v3 colo-vs-non-colo comparison.
+# Launch: MODEL=qwen3_1p7b ENV=math bash launch_experiment.sh non_colocated
+defaults:
+  - qwen3_1p7b_non_colocated.yaml
+  - env_math.yaml

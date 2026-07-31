@@ -1,0 +1,13 @@
+defaults: qwen3_1p7b_base.yaml
+
+policy:
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 1
+
+logger:
+  wandb:
+    name: async_non_colocated_qwen3_1p7b
