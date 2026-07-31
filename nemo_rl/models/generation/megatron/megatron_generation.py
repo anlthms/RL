@@ -96,7 +96,9 @@ class MegatronGeneration(GenerationInterface):
         self.dp_openai_server_base_urls: list[Optional[str]] = []
 
         if policy is not None:
-            # Reuse the existing training policy.
+            # Reuse the training policy (colocated). Offload training buffers, start
+            # the engine + HTTP server, and collect server URLs so nemo_gym can build
+            # clients from dp_openai_server_base_urls. Later prepare calls are no-ops.
             self._policy = policy
             self._owns_policy = False
             if self.cfg["mcore_generation_config"]["expose_http_server"]:
