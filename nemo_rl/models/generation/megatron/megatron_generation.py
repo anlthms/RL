@@ -96,9 +96,19 @@ class MegatronGeneration(GenerationInterface):
         self.dp_openai_server_base_urls: list[Optional[str]] = []
 
         if policy is not None:
-            # Reuse the existing training policy.
+            # Reuse the training policy (colocated). Offload training buffers, start
+            # the engine + HTTP server, and collect server URLs so nemo_gym can build
+            # clients from dp_openai_server_base_urls. Later prepare calls are no-ops.
             self._policy = policy
             self._owns_policy = False
+            self._policy.offload_before_refit()
+            self.prepare_for_generation()
+            url_futures = self._policy.worker_group.run_all_workers_single_data(
+                "report_dp_openai_server_base_url"
+            )
+            self.dp_openai_server_base_urls = [
+                url for url in ray.get(url_futures) if url is not None
+            ]
             return
 
         # Stand up a dedicated inference-only policy.
