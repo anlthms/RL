@@ -34,21 +34,37 @@ from nemo_rl.utils.venvs import (
     create_local_venv_on_each_node,
 )
 
-WORKER_IMPORT_RETRIES = 3
+WORKER_IMPORT_RETRIES = 8
+WORKER_IMPORT_RETRY_DELAY_S = 1.5
 
 
 def _import_worker_class(ray_actor_class_fqn: str) -> Any:
-    """Import a worker class, restarting the initializer on import failure."""
+    """Import a worker class, retrying transient shared-filesystem misses.
+
+    On lustre a package directory can briefly resolve as an empty PEP-420
+    namespace, so an import raises ImportError for a name that does exist. The
+    miss clears on its own, so retry in-process after invalidating the finder
+    caches. Restarting the actor instead cannot work here: Ray replays
+    __init__ with the original arguments, and this initializer's ObjectRef
+    arguments are gone by then.
+    """
     module_name, class_name = ray_actor_class_fqn.rsplit(".", 1)
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError as error:
-        print(
-            f"Worker import failed; restarting initializer to retry: {error}",
-            flush=True,
-        )
-        os._exit(1)
-    return getattr(module, class_name)
+    for attempt in range(1, WORKER_IMPORT_RETRIES + 1):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as error:
+            if attempt == WORKER_IMPORT_RETRIES:
+                raise
+            print(
+                f"Worker import failed ({attempt}/{WORKER_IMPORT_RETRIES}), "
+                f"retrying: {error}",
+                flush=True,
+            )
+            importlib.invalidate_caches()
+            time.sleep(WORKER_IMPORT_RETRY_DELAY_S)
+        else:
+            return getattr(module, class_name)
+    raise AssertionError("unreachable")
 
 
 @dataclass
@@ -146,10 +162,7 @@ class MultiWorkerFuture:
 
 
 class RayWorkerBuilder:
-    @ray.remote(
-        max_restarts=WORKER_IMPORT_RETRIES,
-        max_task_retries=WORKER_IMPORT_RETRIES,
-    )
+    @ray.remote
     class IsolatedWorkerInitializer:
         def __init__(self, ray_actor_class_fqn: str, *init_args, **init_kwargs):
             self.ray_actor_class_fqn = ray_actor_class_fqn

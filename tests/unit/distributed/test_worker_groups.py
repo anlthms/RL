@@ -14,6 +14,7 @@
 
 import os
 import sys
+import types
 
 import pytest
 import ray
@@ -26,7 +27,6 @@ from nemo_rl.distributed.ray_actor_environment_registry import (
 )
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
 from nemo_rl.distributed.worker_groups import (
-    WORKER_IMPORT_RETRIES,
     RayWorkerBuilder,
     RayWorkerGroup,
     _import_worker_class,
@@ -294,25 +294,40 @@ def test_basic_worker_creation_and_method_calls(register_test_actor, virtual_clu
     worker_group.shutdown(force=True)
 
 
-def test_initializer_restarts_after_worker_import_failure(monkeypatch, capsys):
-    def fail_import(_module_name):
-        raise ImportError("transient import failure")
+def test_worker_import_retries_transient_failure(monkeypatch, capsys):
+    """A miss that clears on a later attempt resolves without failing the run."""
+    module = types.SimpleNamespace(Worker="worker-class")
+    attempts = []
 
-    def exit_process(status):
-        raise SystemExit(status)
+    def flaky_import(_module_name):
+        attempts.append(_module_name)
+        if len(attempts) < 3:
+            raise ImportError("transient import failure")
+        return module
+
+    monkeypatch.setattr(
+        "nemo_rl.distributed.worker_groups.importlib.import_module", flaky_import
+    )
+    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
+
+    assert _import_worker_class("example.Worker") == "worker-class"
+    assert len(attempts) == 3
+    assert "Worker import failed (1/" in capsys.readouterr().out
+
+
+def test_worker_import_raises_after_exhausting_retries(monkeypatch):
+    """A genuinely missing name still surfaces as ImportError, not a dead actor."""
+
+    def fail_import(_module_name):
+        raise ImportError("permanent import failure")
 
     monkeypatch.setattr(
         "nemo_rl.distributed.worker_groups.importlib.import_module", fail_import
     )
-    monkeypatch.setattr("nemo_rl.distributed.worker_groups.os._exit", exit_process)
+    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
 
-    with pytest.raises(SystemExit, match="1"):
+    with pytest.raises(ImportError, match="permanent import failure"):
         _import_worker_class("example.Worker")
-
-    assert "restarting initializer to retry" in capsys.readouterr().out
-    options = RayWorkerBuilder.IsolatedWorkerInitializer._default_options
-    assert options["max_restarts"] == WORKER_IMPORT_RETRIES
-    assert options["max_task_retries"] == WORKER_IMPORT_RETRIES
 
 
 def test_initializer_pool_is_per_node_single_node(worker_group_1d_sharding):
