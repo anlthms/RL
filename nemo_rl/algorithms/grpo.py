@@ -2080,6 +2080,40 @@ def refit_policy_generation(
         policy_generation.resume_after_refit()
 
 
+def _pause_colocated_generation_for_checkpoint(
+    trajectory_collector: Any, policy_generation: GenerationInterface
+) -> None:
+    """Quiesce colocated decode before distributed checkpoint collectives."""
+    print("Pausing colocated engine + collector for checkpointing...", flush=True)
+    ray.get(trajectory_collector.prepare_for_refit.remote())
+    policy_generation.finish_generation()
+
+
+def _resume_colocated_generation_after_checkpoint(
+    trajectory_collector: Any, policy_generation: GenerationInterface
+) -> None:
+    """Wake colocated decode only after every checkpoint collective is done."""
+    policy_generation.prepare_for_generation()
+    ray.get(trajectory_collector.resume_after_refit.remote())
+    print("Resumed colocated engine + collector after checkpointing", flush=True)
+
+
+def _prepare_colocated_generation_after_training(
+    trajectory_collector: Any,
+    policy_generation: GenerationInterface,
+    *,
+    will_save_checkpoint: bool,
+    validation_due: bool,
+) -> None:
+    """Wake only the colocated components needed before checkpointing."""
+    if will_save_checkpoint and not validation_due:
+        return
+
+    policy_generation.prepare_for_generation()
+    if not will_save_checkpoint:
+        trajectory_collector.resume_after_refit.remote()
+
+
 def _log_mixed_rewards_and_advantages_information(
     logger: Logger,
     total_steps: int,
@@ -4108,17 +4142,37 @@ def async_grpo_train(
                         timer=timer,
                     )
 
+                is_last_step = step + 1 == master_config.grpo["max_num_steps"]
+                validation_due = (val_period > 0 and (step + 1) % val_period == 0) or (
+                    val_at_end and is_last_step
+                )
+
+                # Compute the checkpoint decision once (check_save() latches) and
+                # reuse it below.
+                should_save_by_step = is_last_step or (
+                    (step + 1) % master_config.checkpointing["save_period"] == 0
+                )
+                should_save_by_timeout = timeout.check_save()
+                will_save_checkpoint = master_config.checkpointing["enabled"] and (
+                    should_save_by_step or should_save_by_timeout
+                )
+
                 print("🔄 Synchronizing policy weights to trajectory collector…")
                 if colocated_inference:
                     # Colocated mode currently does not support weights refit.
-                    print("🔄 Resuming colocated engine after training step...")
                     with timer.time("weight_sync"):
                         policy.offload_before_refit()
-                    policy_generation.prepare_for_generation()
                     POLICY_GENERATION_STALE = False
                     weight_version += 1
                     trajectory_collector.set_weight_version.remote(weight_version)
-                    trajectory_collector.resume_after_refit.remote()
+                    if not will_save_checkpoint:
+                        print("Resuming colocated engine after training step...")
+                    _prepare_colocated_generation_after_training(
+                        trajectory_collector,
+                        policy_generation,
+                        will_save_checkpoint=will_save_checkpoint,
+                        validation_due=validation_due,
+                    )
                 elif NEED_REFIT:
                     # Measure pending-generation wait as exposed_generation time
                     print("🔄 Coordinating with trajectory collector before refit...")
@@ -4153,12 +4207,9 @@ def async_grpo_train(
 
                 # Validation
                 val_metrics, validation_timings = None, None
-                is_last_step = step + 1 == master_config.grpo["max_num_steps"]
 
                 # Run validation if it's a validation step or last step with val_at_end
-                if (val_period > 0 and (step + 1) % val_period == 0) or (
-                    val_at_end and is_last_step
-                ):
+                if validation_due:
                     # Pause trajectory collection during validation to reduce memory pressure
                     trajectory_collector.pause.remote()
 
@@ -4181,7 +4232,7 @@ def async_grpo_train(
                         master_config=master_config,
                         logger=logger,
                     )
-                    if not colocated_inference:
+                    if not colocated_inference or will_save_checkpoint:
                         policy_generation.finish_generation()
                     logger.log_metrics(
                         validation_timings, step + 1, prefix="timing/validation"
@@ -4194,7 +4245,8 @@ def async_grpo_train(
                     gc.collect()
                     torch.cuda.empty_cache()
 
-                    # Resume trajectory collection after validation
+                    # Clear the validation-only pause. On colocated checkpoint
+                    # steps, the independent refit pause still blocks new rollouts.
                     trajectory_collector.resume.remote()
                 # Get flat advantages and token mask for masked metrics computation
                 flat_advantages = train_data["advantages"]
@@ -4269,17 +4321,8 @@ def async_grpo_train(
                 consumed_samples += master_config.grpo["num_prompts_per_step"]
                 timeout.mark_iteration()
 
-                should_save_by_step = (
-                    is_last_step
-                    or (step + 1) % master_config.checkpointing["save_period"] == 0
-                )
-                # +1 because step is 0-indexed
-                # Check if timeout-based checkpointing is enabled in config.
-                should_save_by_timeout = timeout.check_save()
-
-                if master_config.checkpointing["enabled"] and (
-                    should_save_by_step or should_save_by_timeout
-                ):
+                # Reuse the up-front checkpoint decision (check_save() already latched).
+                if will_save_checkpoint:
                     grpo_save_state["current_step"] = step + 1
                     grpo_save_state["total_valid_tokens"] = total_valid_tokens
                     if val_metrics is not None:
@@ -4316,6 +4359,13 @@ def async_grpo_train(
                             grpo_save_state[full_metric_name] = metrics_source[
                                 metric_name
                             ]
+
+                    # Checkpoint collectives run on the engine's GPUs; suspend decode
+                    # across the save so they don't race the engine's collectives.
+                    if colocated_inference:
+                        _pause_colocated_generation_for_checkpoint(
+                            trajectory_collector, policy_generation
+                        )
 
                     with timer.time("checkpointing"):
                         print(f"Saving checkpoint for step {step + 1}...")
@@ -4355,6 +4405,11 @@ def async_grpo_train(
                             f"{len(replay_buffer_state['trajectories'])} trajectories"
                         )
                         checkpointer.finalize_checkpoint(checkpoint_path)
+
+                    if colocated_inference:
+                        _resume_colocated_generation_after_checkpoint(
+                            trajectory_collector, policy_generation
+                        )
 
             # Logging
             # Log training data (match sync GRPO logging payload for parity)
