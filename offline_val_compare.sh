@@ -22,7 +22,11 @@
 #
 # Usage:
 #   SUBMIT_ACCOUNT=<acct> bash offline_val_compare.sh \
-#     <label>:<checkpoint_dir>:<samples_per_step> [more arms...]
+#     <label>:<checkpoint_dir>:<samples_per_step>[:<steps>] [more arms...]
+#
+# <steps> is an optional space-free list like "10,20,30,40" selecting which
+# checkpoints of that arm to score. Arms hit the same sample counts at different
+# steps, so matched points must be chosen per arm.
 #
 # Env: WANDB_NAME (default offlineval_compare), WANDB_PROJECT, WANDB_ENTITY,
 #      CONFIG (eval config; must match the env the checkpoints were trained on),
@@ -41,19 +45,23 @@ trap 'rm -rf "${WORK}"' EXIT
 MERGED="${WORK}/merged.tsv"
 : > "${MERGED}"
 
+arm_idx=0
 for spec in "$@"; do
-  label="${spec%%:*}"
-  rest="${spec#*:}"
-  ckpt_dir="${rest%%:*}"
-  samples_per_step="${rest##*:}"
-  [ -n "${label}" ] && [ -d "${ckpt_dir}" ] || { echo "bad arm spec: ${spec}" >&2; exit 1; }
+  IFS=':' read -r label ckpt_dir samples_per_step arm_steps <<EOF
+${spec}
+EOF
+  [ -n "${label}" ] && [ -d "${ckpt_dir:-}" ] || { echo "bad arm spec: ${spec}" >&2; exit 1; }
   case "${samples_per_step}" in
     ''|*[!0-9]*) echo "samples_per_step must be an integer: ${spec}" >&2; exit 1 ;;
   esac
 
   echo "########## offline validation: ${label} (${samples_per_step} samples/step) ##########"
-  arm_tsv="${WORK}/${label}.tsv"
-  SKIP_WANDB=1 RESULTS_TSV="${arm_tsv}" bash validate_all_checkpoints.sh "${ckpt_dir}" "${CONFIG}"
+  # Per-arm step list: arms reach the same sample counts at different steps, so a
+  # single global STEPS cannot select matched checkpoints across arms.
+  arm_idx=$((arm_idx + 1))
+  arm_tsv="${WORK}/${arm_idx}_${label}.tsv"
+  SKIP_WANDB=1 RESULTS_TSV="${arm_tsv}" STEPS="$(echo "${arm_steps:-${STEPS:-}}" | tr ',' ' ')" \
+    bash validate_all_checkpoints.sh "${ckpt_dir}" "${CONFIG}"
 
   [ -s "${arm_tsv}" ] || { echo "  no results for ${label}; it contributes no curve" >&2; continue; }
   while IFS=$'\t' read -r step acc; do
