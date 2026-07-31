@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
 
 import ray
@@ -30,6 +31,65 @@ from nemo_rl.models.policy import PolicyConfig
 
 if TYPE_CHECKING:
     from nemo_rl.models.policy.lm_policy import Policy
+
+# Parallelism that shards the weights. `mcore_generation_config` may override these
+# for a dedicated inference model, but a colocated run reuses the training shards.
+_WEIGHT_SHARDING_KEYS = (
+    "tensor_model_parallel_size",
+    "pipeline_model_parallel_size",
+    "expert_model_parallel_size",
+    "expert_tensor_parallel_size",
+)
+
+# Context parallelism shards activations, not weights, so a separate generation value
+# is meaningful in principle -- but the colocated engine takes its process groups from
+# the training model, so today it still cannot take effect.
+_ACTIVATION_SHARDING_KEYS = ("context_parallel_size",)
+
+
+def _mismatches(config: PolicyConfig, keys: tuple[str, ...]) -> list[str]:
+    """Describe every key whose generation value differs from the training one."""
+    train_cfg = config["megatron_cfg"]
+    gen_cfg = config["generation"]["mcore_generation_config"]
+    return [
+        f"{key}: megatron_cfg={train_cfg[key]} vs mcore_generation_config={gen_cfg[key]}"
+        for key in keys
+        if key in gen_cfg and key in train_cfg and gen_cfg[key] != train_cfg[key]
+    ]
+
+
+def _validate_colocated_parallelism(config: PolicyConfig) -> None:
+    """Reject a colocated config that asks generation to reshard the weights.
+
+    `mcore_generation_config` is merged into `megatron_cfg` only when
+    `MegatronGeneration` stands up its own inference `Policy`. A colocated run
+    reuses the training model as-is, so generation always inherits the training
+    parallelism and anything set here would be dropped without a trace.
+
+    Args:
+        config: The full `PolicyConfig`.
+
+    Raises:
+        ValueError: If a generation weight-sharding parallelism differs from the
+            training one.
+    """
+    mismatched = _mismatches(config, _WEIGHT_SHARDING_KEYS)
+    if mismatched:
+        raise ValueError(
+            "Colocated Megatron generation reuses the training model's weight shards, "
+            "so it cannot apply a separate generation parallelism: "
+            + "; ".join(mismatched)
+            + ". Match the training values, or use non-colocated generation to give "
+            "the inference model its own layout."
+        )
+
+    ignored = _mismatches(config, _ACTIVATION_SHARDING_KEYS)
+    if ignored:
+        warnings.warn(
+            "Colocated Megatron generation inherits the training process groups, so "
+            "these generation settings are ignored: " + "; ".join(ignored),
+            stacklevel=2,
+        )
 
 
 class MegatronGeneration(GenerationInterface):
@@ -99,6 +159,9 @@ class MegatronGeneration(GenerationInterface):
             # Reuse the training policy (colocated). Offload training buffers, start
             # the engine + HTTP server, and collect server URLs so nemo_gym can build
             # clients from dp_openai_server_base_urls. Later prepare calls are no-ops.
+            # This path returns before the `mcore_generation_config` merge below, so
+            # check first that no parallelism override was expected to take effect.
+            _validate_colocated_parallelism(config)
             self._policy = policy
             self._owns_policy = False
             if self.cfg["mcore_generation_config"]["expose_http_server"]:
