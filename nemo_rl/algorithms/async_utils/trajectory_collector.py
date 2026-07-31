@@ -37,6 +37,39 @@ from nemo_rl.models.generation.interfaces import GenerationInterface
 
 TokenizerType = PreTrainedTokenizerBase
 
+# Ray AsyncIO actors run at most 1,000 calls concurrently by default. Each
+# prompt-group thread fans out num_generations_per_prompt actor calls, so cap
+# prompt groups below that ceiling and leave room for lifecycle/training RPCs.
+RAY_ASYNC_ACTOR_DEFAULT_MAX_CONCURRENCY = 1000
+ASYNC_ACTOR_CONTROL_CALL_HEADROOM = 32
+
+
+def _get_max_inflight_prompt_groups(master_config: MasterConfig) -> int:
+    """Limit Megatron rollout fan-out so actor control calls cannot be starved."""
+    configured_max = (
+        int(master_config.grpo["num_prompts_per_step"])
+        * int(master_config.grpo["async_grpo"]["max_trajectory_age_steps"])
+    ) or 1
+    generation_config = master_config.policy.get("generation", {})
+    async_config = master_config.grpo["async_grpo"]
+    uses_native_inflight_megatron = (
+        generation_config.get("backend") == "megatron"
+        and generation_config.get("mcore_generation_config", {}).get(
+            "async_engine", False
+        )
+        and async_config.get("in_flight_weight_updates", False)
+        and not getattr(master_config, "env", {}).get("should_use_nemo_gym", False)
+    )
+    if not uses_native_inflight_megatron:
+        return configured_max
+
+    num_generations = max(1, int(master_config.grpo["num_generations_per_prompt"]))
+    actor_generation_capacity = (
+        RAY_ASYNC_ACTOR_DEFAULT_MAX_CONCURRENCY - ASYNC_ACTOR_CONTROL_CALL_HEADROOM
+    )
+    max_prompt_groups_for_actor = max(1, actor_generation_capacity // num_generations)
+    return min(configured_max, max_prompt_groups_for_actor)
+
 
 @ray.remote  # pragma: no cover
 class AsyncTrajectoryCollector:
@@ -100,13 +133,23 @@ class AsyncTrajectoryCollector:
         self._inflight_threads: set[_threading.Thread] = set()
         self._threads_lock: _threading.Lock = _threading.Lock()
 
-        # Limit in-flight generator requests to num_prompts_per_step * max_trajectory_age_steps
-        # This value limits the parallelism of the generation requests.
-        max_inflight = (
+        # Limit in-flight prompt groups by both trajectory demand and Ray actor
+        # capacity. A group fans out one actor call per generated sample.
+        configured_max_inflight = (
             int(self.master_config.grpo["num_prompts_per_step"])
             * int(self.master_config.grpo["async_grpo"]["max_trajectory_age_steps"])
         ) or 1
-        self._inflight_sema = _threading.Semaphore(max_inflight)
+        self._max_inflight_prompt_groups = _get_max_inflight_prompt_groups(
+            self.master_config
+        )
+        if self._max_inflight_prompt_groups < configured_max_inflight:
+            print(
+                "Capping in-flight prompt groups from "
+                f"{configured_max_inflight} to "
+                f"{self._max_inflight_prompt_groups} so generation RPCs leave "
+                "Ray actor capacity for lifecycle calls"
+            )
+        self._inflight_sema = _threading.Semaphore(self._max_inflight_prompt_groups)
 
         # Simple lock to prevent race conditions when checking/spawning workers
         self._generation_check_lock: _threading.Lock = _threading.Lock()
