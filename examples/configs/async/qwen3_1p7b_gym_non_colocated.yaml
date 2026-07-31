@@ -1,0 +1,7 @@
+# Qwen3-1.7B dense, NeMo-Gym env, non_colocated async GRPO (Megatron inference).
+# Model, sequence length (16384) and reasoning/tool parsers come from
+# qwen3_1p7b_base.yaml.
+# Launch: MODEL=qwen3_1p7b ENV=gym bash launch_experiment.sh non_colocated
+defaults:
+  - qwen3_1p7b_non_colocated.yaml
+  - env_gym.yaml

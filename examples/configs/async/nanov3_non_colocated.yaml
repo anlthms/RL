@@ -1,0 +1,18 @@
+defaults: nanov3_base.yaml
+
+policy:
+
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 4
+
+env:
+  nemo_gym:
+    skip_venv_if_present: true
+
+logger:
+  wandb:
+    name: async_non_colocated
