@@ -215,6 +215,14 @@ class MegatronGenerationMixin:
 
         self._inference_engine_asleep = False
 
+    def _synchronize_cuda_device(self) -> None:
+        """Drain this rank's GPU on the explicit LOCAL_RANK device.
+
+        CUDA current_device is per-thread; the Ray caller thread may not have
+        called set_device, so target LOCAL_RANK to avoid draining the wrong device.
+        """
+        torch.cuda.synchronize(device=int(os.environ["LOCAL_RANK"]))
+
     def _sleep(self) -> None:
         """Pause + suspend the engine. No-op if already asleep."""
         if self._inference_engine_asleep:
@@ -223,6 +231,8 @@ class MegatronGenerationMixin:
             self._sleep_engine(), self._inference_loop
         )
         future.result()
+        # _sleep_engine drained this rank's device; the barrier fences that
+        # globally before training reuses the shared communicator.
         torch.distributed.barrier()
         self._inference_engine_asleep = True
         print(f"[Rank {self.rank}] paused inference engine")
@@ -235,16 +245,21 @@ class MegatronGenerationMixin:
         if torch.distributed.get_rank() == 0:
             self.inference_client.suspend_engines()
         await self.dynamic_inference_engine.wait_until(EngineState.SUSPENDED)
+        # Ack suspension only once this rank's decode kernels have retired.
+        self._synchronize_cuda_device()
 
     def _wake(self) -> None:
         """Resume + unpause the engine. No-op if already awake."""
         if not self._inference_engine_asleep:
             return
+        # Fence training completion before any rank resumes decode on the shared
+        # communicator; this must precede the resume signal.
+        self._synchronize_cuda_device()
+        torch.distributed.barrier()
         future = asyncio.run_coroutine_threadsafe(
             self._wake_engine(), self._inference_loop
         )
         future.result()
-        torch.distributed.barrier()
         self._inference_engine_asleep = False
         print(f"[Rank {self.rank}] resumed inference engine")
 
