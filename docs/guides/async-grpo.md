@@ -24,7 +24,7 @@ loss_fn:
   use_importance_sampling_correction: true
 ```
 
-3. **Disable colocated inference** (required for async mode):
+3. **Disable colocated inference** (required for the vLLM backend):
 ```yaml
 policy:
   generation:
@@ -34,6 +34,9 @@ policy:
         num_nodes: 1  # or more
         gpus_per_node: 2  # adjust based on your setup
 ```
+
+   The Megatron generation backend also supports colocated async GRPO. See
+   [Colocated Generation with the Megatron Backend](#colocated-generation-with-the-megatron-backend).
 
 4. **Add async GRPO configuration**:
 ```yaml
@@ -74,6 +77,91 @@ cluster:
   num_nodes: 2
   gpus_per_node: 4
 ```
+
+## Colocated Generation with the Megatron Backend
+
+By default, async GRPO runs generation on dedicated GPUs and refits weights to the
+inference workers after every training step. With the Megatron generation backend you
+can instead run generation *colocated* with training: the inference engine shares the
+training workers' GPUs and reads the training weights in place, so there is no refit
+and no second copy of the model.
+
+The tradeoff is that training and generation take turns on the same GPUs rather than
+overlapping across separate pools. Colocated is the better fit when weight transfer
+dominates (large models, slow interconnect) or when you cannot spare GPUs for a
+separate inference pool; non-colocated is the better fit when you can.
+
+Colocated async GRPO is supported only for `backend: megatron`. The vLLM backend still
+requires `colocated.enabled: false`.
+
+### Enable Colocated Megatron Generation
+
+```yaml
+policy:
+  generation:
+    backend: megatron
+    colocated:
+      enabled: true
+    mcore_generation_config:
+      async_engine: true
+```
+
+For fast decode, build the training model itself out of dual-mode
+`inference_optimized` layers, which run inference kernels under `InferenceMode` and
+fall back to the trainable Transformer Engine path for training. One model then both
+trains and generates:
+
+```yaml
+policy:
+  megatron_cfg:
+    transformer_impl: "inference_optimized"
+    allow_inference_optimized_training: true
+```
+
+`allow_inference_optimized_training` is opt-in: without it, `inference_optimized` is
+rejected on training workers, since it is otherwise only valid for a dedicated
+inference model.
+
+### Parallelism Must Match Training
+
+A colocated engine reuses the training model's shards and process groups, so it cannot
+apply a parallelism layout of its own. Setting `tensor_model_parallel_size`,
+`pipeline_model_parallel_size`, `expert_model_parallel_size`, or
+`expert_tensor_parallel_size` under `mcore_generation_config` to a value that differs
+from `megatron_cfg` raises at startup rather than being silently ignored.
+`context_parallel_size` warns for the same reason.
+
+To give generation its own layout, use non-colocated generation, where
+`mcore_generation_config` is merged into a dedicated inference model's config.
+
+### Engine Lifecycle
+
+The colocated engine is started once, before trajectory collection begins, and stays
+resident for the rest of the run. It is suspended and resumed around each phase that
+needs exclusive use of the GPUs and the shared communicator:
+
+- **Training step** — the collector is quiesced and the engine suspended for the
+  duration of the step, then resumed.
+- **Checkpoint save** — distributed checkpointing runs collectives across the whole
+  world on the same GPUs, so the engine stays suspended across the entire save. On a
+  step that both validates and checkpoints, it is not woken in between.
+- **Validation** — the engine is *not* torn down, so its KV cache survives.
+
+Because the engine outlives individual steps and rollouts are not drained at a step
+boundary, a rollout may span more than one weight version. That is by design in async
+GRPO; `grpo.async_grpo.max_trajectory_age_steps` bounds how stale a trajectory may be,
+and `loss_fn.use_importance_sampling_correction` must be enabled to correct for it.
+
+`policy.generation.mcore_generation_config.kv_cache_management_mode` controls what
+happens to the KV cache while the engine is suspended. `persist` keeps the pool
+resident; `offload` moves it to host memory so the training forward pass has more room,
+and requires `torch_memory_saver` to be installed.
+
+### Limitations
+
+- Weight refit is not supported in colocated mode. Generation reads the training
+  weights in place, so the weight version is bumped without any transfer.
+- Only the Megatron generation backend can be colocated under async GRPO.
 
 ## Implementation Structure
 This section covers the internal architecture of async GRPO and includes detailed explanations of how the core components interact.
