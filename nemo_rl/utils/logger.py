@@ -507,6 +507,9 @@ class RayGpuMonitorLogger:
         self.collection_thread: Optional[threading.Thread] = None
         self.lock = threading.Lock()
         self.start_time: float = float("-inf")
+        self.gpu_utilization_sum = 0.0
+        self.gpu_utilization_count = 0
+        self.latest_gpu_utilization_step = 0
 
     def start(self) -> None:
         """Start the GPU monitoring thread."""
@@ -549,6 +552,7 @@ class RayGpuMonitorLogger:
                 # Collect metrics with timing information
                 metrics = self._collect_metrics()
                 if metrics:
+                    self._accumulate_gpu_utilization(metrics, int(relative_time))
                     with self.lock:
                         self.metrics_buffer.append(
                             {
@@ -571,6 +575,36 @@ class RayGpuMonitorLogger:
                     f"Error in GPU monitoring collection loop or stopped abruptly: {e}"
                 )
                 time.sleep(self.collection_interval)  # Continue despite errors
+
+    def _accumulate_gpu_utilization(
+        self, metrics: dict[str, Any], step: int
+    ) -> None:
+        """Accumulate GPU utilization samples for the current time window."""
+        gpu_utils = [
+            value for name, value in metrics.items() if name.endswith(".util")
+        ]
+        if not gpu_utils:
+            return
+
+        with self.lock:
+            self.gpu_utilization_sum += sum(gpu_utils)
+            self.gpu_utilization_count += len(gpu_utils)
+            self.latest_gpu_utilization_step = step
+
+    def drain_gpu_utilization_time_average(self) -> dict[str, float | int]:
+        """Return and reset the all-GPU utilization average for this time window."""
+        with self.lock:
+            if self.gpu_utilization_count == 0:
+                return {}
+
+            metrics: dict[str, float | int] = {
+                "cluster_gpu_utilization_time_avg": self.gpu_utilization_sum
+                / self.gpu_utilization_count,
+                self.step_metric: self.latest_gpu_utilization_step,
+            }
+            self.gpu_utilization_sum = 0.0
+            self.gpu_utilization_count = 0
+            return metrics
 
     def _parse_metric(self, sample: Sample, node_idx: int) -> dict[str, Any]:
         """Parse a metric sample into a standardized format.
@@ -1026,6 +1060,20 @@ class Logger(LoggerInterface):
             step_metric: Optional name of a field in metrics to use as step instead
                          of the provided step value (currently only needed for wandb)
         """
+        if step_finished and self.gpu_monitor:
+            gpu_utilization_metrics = (
+                self.gpu_monitor.drain_gpu_utilization_time_average()
+            )
+            if gpu_utilization_metrics:
+                for logger in self.loggers:
+                    logger.log_metrics(
+                        gpu_utilization_metrics,
+                        step,
+                        self.gpu_monitor.metric_prefix,
+                        self.gpu_monitor.step_metric,
+                        False,
+                    )
+
         for logger in self.loggers:
             logger.log_metrics(metrics, step, prefix, step_metric, step_finished)
 
