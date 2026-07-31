@@ -118,7 +118,7 @@ if [[ "${TOPOLOGY}" == non_colocated ]]; then
   add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
 else
   # Colocated shares weights in-process (CUDA-IPC); refit_backend is a no-op.
-  add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nccl}"
+  add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
   # Every colocated arm offloads the KV cache during the training pause. mcore
   # asserts torch_memory_saver (or UVM) for any non-persist cache mode, and the
   # wheel predates the container uv.lock, so install it in the worker venv.
