@@ -4328,6 +4328,14 @@ def async_grpo_train(
 
     ft_save_period = master_config.checkpointing.get("ft_save_period")
 
+    # Plot consumed_samples over wall-clock time, not step: async step cadence is
+    # uneven (buffer-empty waits), so a vs-step curve misstates throughput.
+    train_wall_start = time.perf_counter()
+    if logger.wandb_logger:
+        logger.wandb_logger.define_metric(
+            "train/consumed_samples", step_metric="train/elapsed_time_s"
+        )
+
     # Main training loop
     try:
         while step < master_config.grpo.max_num_steps:
@@ -5158,6 +5166,16 @@ def async_grpo_train(
             logger.log_metrics(performance_metrics, step + 1, prefix="performance")
             logger.log_metrics(metrics, step + 1, prefix="train")
             logger.log_metrics(efficiency_loggable, step + 1, prefix="")
+            # consumed_samples indexed by wall time (see train_wall_start above).
+            logger.log_metrics(
+                {
+                    "train/consumed_samples": consumed_samples
+                    * master_config.grpo.num_generations_per_prompt,
+                    "train/elapsed_time_s": time.perf_counter() - train_wall_start,
+                },
+                step + 1,
+                step_metric="train/elapsed_time_s",
+            )
             # step_finished=True here since this is the final log of our current step.
             logger.log_metrics(
                 timing_metrics,
