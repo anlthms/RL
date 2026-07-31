@@ -25,7 +25,12 @@ from nemo_rl.distributed.ray_actor_environment_registry import (
     PY_EXECUTABLES,
 )
 from nemo_rl.distributed.virtual_cluster import RayVirtualCluster
-from nemo_rl.distributed.worker_groups import RayWorkerBuilder, RayWorkerGroup
+from nemo_rl.distributed.worker_groups import (
+    WORKER_IMPORT_RETRIES,
+    RayWorkerBuilder,
+    RayWorkerGroup,
+    _import_worker_class,
+)
 
 
 @ray.remote
@@ -287,6 +292,27 @@ def test_basic_worker_creation_and_method_calls(register_test_actor, virtual_clu
         assert f"Actor {pids[i]} echoes: {messages[i]}" == result
 
     worker_group.shutdown(force=True)
+
+
+def test_initializer_restarts_after_worker_import_failure(monkeypatch, capsys):
+    def fail_import(_module_name):
+        raise ImportError("transient import failure")
+
+    def exit_process(status):
+        raise SystemExit(status)
+
+    monkeypatch.setattr(
+        "nemo_rl.distributed.worker_groups.importlib.import_module", fail_import
+    )
+    monkeypatch.setattr("nemo_rl.distributed.worker_groups.os._exit", exit_process)
+
+    with pytest.raises(SystemExit, match="1"):
+        _import_worker_class("example.Worker")
+
+    assert "restarting initializer to retry" in capsys.readouterr().out
+    options = RayWorkerBuilder.IsolatedWorkerInitializer._default_options
+    assert options["max_restarts"] == WORKER_IMPORT_RETRIES
+    assert options["max_task_retries"] == WORKER_IMPORT_RETRIES
 
 
 def test_initializer_pool_is_per_node_single_node(worker_group_1d_sharding):
