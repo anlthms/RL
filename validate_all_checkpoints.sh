@@ -78,6 +78,17 @@ uv run examples/run_megatron_eval.py \
   fi
 done
 
+# RESULTS_TSV keeps the step/reward rows for a caller that logs the curve itself
+# (see offline_val_compare.sh, which merges both arms into one wandb run).
+if [ -n "${RESULTS_TSV:-}" ]; then
+  cp "${RESULTS}" "${RESULTS_TSV}"
+fi
+if [ "${SKIP_WANDB:-0}" = 1 ]; then
+  rm -f "${RESULTS}"
+  echo "=== skipping wandb (SKIP_WANDB=1) ==="
+  exit 0
+fi
+
 echo "=== logging curve to wandb run '${WANDB_NAME}' ==="
 NETRC="/home/$(whoami)/.netrc" WANDB_NAME="${WANDB_NAME}" \
 WANDB_ENTITY="${WANDB_ENTITY:-adlr}" WANDB_PROJECT="${WANDB_PROJECT:-mllm-rl-dev}" \
