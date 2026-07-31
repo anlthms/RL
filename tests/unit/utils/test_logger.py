@@ -1737,9 +1737,7 @@ class TestLogger:
             "cluster_gpu_utilization_time_avg": 62.5,
             "ray/ray_step": 120,
         }
-        mock_gpu_instance.drain_gpu_utilization_time_average.return_value = (
-            gpu_metrics
-        )
+        mock_gpu_instance.drain_gpu_utilization_time_average.return_value = gpu_metrics
 
         step_metrics = {"total_step_time": 120.0}
         logger.log_metrics(
