@@ -298,6 +298,9 @@ class MegatronConfig(TypedDict):
     # Transformer implementation backing the model. Only valid on generation workers.
     # Options are 'transformer_engine' and 'inference_optimized'.
     transformer_impl: NotRequired[str]
+    # Opt in to a single dual-mode inference_optimized model that both trains (TE
+    # fallback) and generates fast. Off (absent) by default.
+    allow_inference_optimized_training: NotRequired[bool]
     # CUDA-graph implementation.
     # Options: 'none', 'local', 'transformer_engine', 'full_iteration'.
     cuda_graph_impl: NotRequired[str]
