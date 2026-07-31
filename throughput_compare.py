@@ -138,9 +138,7 @@ def parse_runs(items: list[str]) -> list[tuple[str, str]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--project", default=DEFAULT_PROJECT, help="W&B entity/project")
-    parser.add_argument(
-        "--runs", nargs="+", required=True, metavar="LABEL:RUN_ID"
-    )
+    parser.add_argument("--runs", nargs="+", required=True, metavar="LABEL:RUN_ID")
     parser.add_argument(
         "--warmup-steps",
         type=int,

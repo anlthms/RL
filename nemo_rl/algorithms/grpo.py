@@ -4171,9 +4171,9 @@ def async_grpo_train(
                     )
 
                 is_last_step = step + 1 == master_config.grpo["max_num_steps"]
-                validation_due = (
-                    val_period > 0 and (step + 1) % val_period == 0
-                ) or (val_at_end and is_last_step)
+                validation_due = (val_period > 0 and (step + 1) % val_period == 0) or (
+                    val_at_end and is_last_step
+                )
 
                 # Compute the checkpoint decision once (check_save() latches) and
                 # reuse it below.

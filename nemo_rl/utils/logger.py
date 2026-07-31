@@ -576,13 +576,9 @@ class RayGpuMonitorLogger:
                 )
                 time.sleep(self.collection_interval)  # Continue despite errors
 
-    def _accumulate_gpu_utilization(
-        self, metrics: dict[str, Any], step: int
-    ) -> None:
+    def _accumulate_gpu_utilization(self, metrics: dict[str, Any], step: int) -> None:
         """Accumulate GPU utilization samples for the current time window."""
-        gpu_utils = [
-            value for name, value in metrics.items() if name.endswith(".util")
-        ]
+        gpu_utils = [value for name, value in metrics.items() if name.endswith(".util")]
         if not gpu_utils:
             return
 
