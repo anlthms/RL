@@ -34,6 +34,22 @@ from nemo_rl.utils.venvs import (
     create_local_venv_on_each_node,
 )
 
+WORKER_IMPORT_RETRIES = 3
+
+
+def _import_worker_class(ray_actor_class_fqn: str) -> Any:
+    """Import a worker class, restarting the initializer on import failure."""
+    module_name, class_name = ray_actor_class_fqn.rsplit(".", 1)
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as error:
+        print(
+            f"Worker import failed; restarting initializer to retry: {error}",
+            flush=True,
+        )
+        os._exit(1)
+    return getattr(module, class_name)
+
 
 @dataclass
 class MultiWorkerFuture:
@@ -130,7 +146,10 @@ class MultiWorkerFuture:
 
 
 class RayWorkerBuilder:
-    @ray.remote
+    @ray.remote(
+        max_restarts=WORKER_IMPORT_RETRIES,
+        max_task_retries=WORKER_IMPORT_RETRIES,
+    )
     class IsolatedWorkerInitializer:
         def __init__(self, ray_actor_class_fqn: str, *init_args, **init_kwargs):
             self.ray_actor_class_fqn = ray_actor_class_fqn
@@ -166,9 +185,7 @@ class RayWorkerBuilder:
                 A Ray actor reference to the created worker
             """
             # Set up worker arguments and resources
-            module_name, class_name = self.ray_actor_class_fqn.rsplit(".", 1)
-            module = importlib.import_module(module_name)
-            worker_class = getattr(module, class_name)
+            worker_class = _import_worker_class(self.ray_actor_class_fqn)
             worker_kwargs = dict(self.init_kwargs)
             default_options = getattr(worker_class, "_default_options", {})
             options = recursive_merge_options(default_options, extra_options)
