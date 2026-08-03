@@ -45,7 +45,15 @@ def fetch(*, project: str, run_id: str) -> tuple[list[dict[str, Any]], int | Non
 
     run = wandb.Api(timeout=60).run(f"{project}/{run_id}")
     # Avoid endpoint bias from run.history downsampling.
-    rows = list(run.scan_history(keys=KEYS, page_size=1000))
+    try:
+        rows = list(run.scan_history(keys=KEYS, page_size=1000))
+    except Exception:
+        # A keyed scan needs a `_step` column, which runs that log against a
+        # custom step_metric do not expose. Scan everything and project locally.
+        rows = [
+            {key: row[key] for key in KEYS if key in row}
+            for row in run.scan_history(page_size=2000)
+        ]
     cfg = run.config
     policy = cfg.get("policy")
     batch = policy.get("train_global_batch_size") if isinstance(policy, dict) else None
