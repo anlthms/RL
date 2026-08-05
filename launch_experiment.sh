@@ -88,19 +88,12 @@ export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-${DEFAULT_NODES}}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
 USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 
-# The container ships CPython 3.13.13 but pyproject requires >=3.13.14, so uv
-# refuses to build any venv ("No interpreter found for Python 3.13.14"). Point it
-# at a standalone 3.13.14 on shared storage. CPython is ABI-stable across patch
-# releases, so the image's cp313 wheels still apply and nothing is rebuilt.
-# Exported here so sbatch propagates it to every container: the setup command,
-# `ray start`, and therefore every Ray worker. Set UV_PYTHON to override, or to
-# an empty string once the container itself carries 3.13.14.
-if [[ -z "${UV_PYTHON+x}" ]]; then
-  export UV_PYTHON=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/pythons/cpython-3.13.14/bin/python3
-fi
-if [[ -n "${UV_PYTHON}" ]] && [[ ! -x "${UV_PYTHON}" ]]; then
-  die "UV_PYTHON is not executable: ${UV_PYTHON}"
-fi
+# Everything runs on the interpreter the container already ships (3.13.13); the
+# branch floats requires-python down to match. Do not point uv at a newer one:
+# Ray compares cluster and worker interpreter versions exactly, and Gym passes an
+# explicit --python when it builds server venvs, so a partial override desyncs
+# them. Unset any inherited value so a stale shell export cannot resplit them.
+unset UV_PYTHON
 
 # One name for both slurm and wandb, so a job id always maps to a run.
 RUN_NAME="async_${TOPOLOGY}_${MODEL}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
