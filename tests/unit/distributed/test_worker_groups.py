@@ -305,10 +305,13 @@ def test_worker_import_retries_transient_failure(monkeypatch, capsys):
             raise ImportError("transient import failure")
         return module
 
+    # Patch sleep first: resolving a dotted target goes through
+    # importlib.import_module, so once that is stubbed monkeypatch can no longer
+    # look anything up and the stub eats the lookup as a retry attempt.
+    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
     monkeypatch.setattr(
         "nemo_rl.distributed.worker_groups.importlib.import_module", flaky_import
     )
-    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
 
     assert _import_worker_class("example.Worker") == "worker-class"
     assert len(attempts) == 3
@@ -321,10 +324,11 @@ def test_worker_import_raises_after_exhausting_retries(monkeypatch):
     def fail_import(_module_name):
         raise ImportError("permanent import failure")
 
+    # Patch sleep before import_module; see the note in the retry test above.
+    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
     monkeypatch.setattr(
         "nemo_rl.distributed.worker_groups.importlib.import_module", fail_import
     )
-    monkeypatch.setattr("nemo_rl.distributed.worker_groups.time.sleep", lambda _s: None)
 
     with pytest.raises(ImportError, match="permanent import failure"):
         _import_worker_class("example.Worker")
