@@ -182,6 +182,10 @@ fi
 # with eager training collectives on the shared colocated communicator.
 # HF_HOME must be on shared storage: OpenMathInstruct-2's mmap'd Arrow cache is
 # pickled to a collector on another node, so node-local /root/.cache would miss.
+# NEMO_GYM_VENV_DIR is assigned inline rather than exported: the image sets it in
+# its own ENV, which enroot applies over anything inherited from the job. It also
+# points at gym_venvs_main rather than the original gym_venvs, whose servers pin
+# Ray 2.55.1 and are refused by main's 2.56.1 cluster.
 export COMMAND="mkdir -p /tmp/nemo_rl_triton_cache && \
 TRITON_CACHE_DIR=/tmp/nemo_rl_triton_cache \
 NETRC=/home/${USER_NAME}/.netrc \
@@ -189,7 +193,7 @@ NCCL_GRAPH_MIXING_SUPPORT=${NCCL_GRAPH_MIXING_SUPPORT:-1} \
 NCCL_DEBUG=${NCCL_DEBUG:-} \
 NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-} \
 NRL_MEGATRON_CHECKPOINT_DIR=/lustre/fsw/portfolios/nemotron/users/${USER_NAME}/megatron_ckpt_cache \
-NEMO_GYM_VENV_DIR=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/${USER_NAME}/gym_venvs \
+NEMO_GYM_VENV_DIR=${NEMO_GYM_VENV_DIR:-/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/${USER_NAME}/gym_venvs_main} \
 HF_HOME=${HF_HOME:-/lustre/fsw/portfolios/nemotron/users/${USER_NAME}/hf_home} \
 ${COLL_TRACE_ENV} \
 uv run ${ENTRYPOINT} \
