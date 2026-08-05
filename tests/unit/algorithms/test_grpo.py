@@ -165,6 +165,8 @@ def test_initial_policy_generation_stale() -> None:
 
     generation.weight_synchronizer.is_stale = True
     assert _initial_policy_generation_stale(generation, completed_steps=0)
+
+
 def test_colocated_checkpoint_suspends_decode_collectives(monkeypatch):
     events = []
 
