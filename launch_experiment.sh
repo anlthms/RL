@@ -18,7 +18,7 @@
 # The experiment is three orthogonal axes; every combination has a config at
 # examples/configs/async/<model>_<env>_<topology>.yaml.
 #
-#   MODEL     nanov3 | qwen3_1p7b         which policy to train
+#   MODEL     qwen3_1p7b | nanov3         which policy to train
 #   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
@@ -27,13 +27,13 @@
 #     bash launch_experiment.sh {colocated|non_colocated}
 #
 # Common env:
-#   NUM_ACTOR_NODES   total nodes (default from the model profile below)
+#   NUM_ACTOR_NODES   total nodes (default 8)
 #   NUM_GEN_NODES     non-colocated generation nodes (default NUM_ACTOR_NODES/2)
 #   RUN_TAG           label appended to the slurm + wandb run name
 #   MAX_STEPS         cap grpo.max_num_steps
 #   TIMEOUT_MIN       slurm wall clock in minutes (default 240)
 #   CMP=1             comparison preset: validation off, periodic weights-only
-#                     checkpoints, and the model's comparison sequence length
+#                     checkpoints, and a fixed comparison sequence length
 #   COLL_TRACE=1      dump NCCL flight-recorder traces to ./nccl_traces on timeout
 #   EXTRA_OVERRIDES   ad-hoc Hydra overrides, applied last, e.g. "a=1 b=2"
 #
@@ -51,10 +51,10 @@ case "${TOPOLOGY}" in
   *) die "usage: bash launch_experiment.sh colocated|non_colocated" ;;
 esac
 
-MODEL="${MODEL:-nanov3}"
+MODEL="${MODEL:-qwen3_1p7b}"
 case "${MODEL}" in
-  nanov3 | qwen3_1p7b) ;;
-  *) die "invalid MODEL: ${MODEL} (expected nanov3 or qwen3_1p7b)" ;;
+  qwen3_1p7b | nanov3) ;;
+  *) die "invalid MODEL: ${MODEL} (expected qwen3_1p7b or nanov3)" ;;
 esac
 
 ENV="${ENV:-gym}"
@@ -63,28 +63,7 @@ case "${ENV}" in
   *) die "invalid ENV: ${ENV} (expected gym or math)" ;;
 esac
 
-# ------------------------------------------------------- model profile -----
-# Everything that varies by model, in one place.
-#   DEFAULT_NODES     node count when NUM_ACTOR_NODES is unset
-#   CMP_SEQ           sequence length for CMP=1 ("" keeps the config's value)
-#   CMP_SAVE_PERIOD   checkpoint cadence for CMP=1
-#   NEEDS_IMPORT_PREFLIGHT  retry imports per node (lustre PEP-420 namespace race)
-case "${MODEL}" in
-  nanov3)
-    DEFAULT_NODES=8
-    CMP_SEQ=16384
-    CMP_SAVE_PERIOD=5
-    NEEDS_IMPORT_PREFLIGHT=1
-    ;;
-  qwen3_1p7b)
-    DEFAULT_NODES=2
-    CMP_SEQ=""
-    CMP_SAVE_PERIOD=10
-    NEEDS_IMPORT_PREFLIGHT=1
-    ;;
-esac
-
-export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-${DEFAULT_NODES}}"
+export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
 USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 
@@ -112,39 +91,35 @@ add_override "policy.generation.backend=megatron"
 add_override "cluster.num_nodes=${NUM_ACTOR_NODES}"
 add_override "logger.wandb.name=${RUN_NAME}"
 add_override "+logger.wandb.entity=${WANDB_ENTITY:-adlr}"
+# Non-colocated reshards weights over the network: nvshmem is proven stable at
+# <=4 generation nodes, while nccl hangs the reshard there. Colocated shares
+# weights in-process (CUDA-IPC), so the backend is a no-op.
+add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
 [[ -n "${WANDB_PROJECT:-}" ]] && add_override "logger.wandb.project=${WANDB_PROJECT}"
 [[ -n "${MAX_STEPS:-}" ]] && add_override "grpo.max_num_steps=${MAX_STEPS}"
+# Retry imports on each node: lustre loses races resolving PEP-420 namespaces.
+add_setup "bash tools/retry_import.sh nemo_rl.algorithms.grpo"
 
 # Layer 2: topology.
 if [[ "${TOPOLOGY}" == non_colocated ]]; then
   # Symmetric train/gen split; asymmetric splits hang the reshard.
   NUM_GEN_NODES="${NUM_GEN_NODES:-$((NUM_ACTOR_NODES / 2))}"
   add_override "policy.generation.colocated.resources.num_nodes=${NUM_GEN_NODES}"
-  # nvshmem is proven stable at <=4 nodes; nccl hangs the reshard there and is
-  # only needed at 8-node scale, where nvshmem hits its teams limit.
-  add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
 else
-  # Colocated shares weights in-process (CUDA-IPC); refit_backend is a no-op.
-  add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
   # Every colocated arm offloads the KV cache during the training pause. mcore
   # asserts torch_memory_saver (or UVM) for any non-persist cache mode, and the
   # wheel predates the container uv.lock, so install it in the worker venv.
   add_setup "uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
 fi
 
-# Layer 3: model.
-if [[ "${NEEDS_IMPORT_PREFLIGHT}" == 1 ]]; then
-  add_setup "bash tools/retry_import.sh nemo_rl.algorithms.grpo"
-fi
-
-# Layer 4: CMP preset -- validation off, weights-only checkpoints, fixed seq.
+# Layer 3: CMP preset -- validation off, weights-only checkpoints, fixed seq.
 if [[ "${CMP:-0}" == 1 ]]; then
   add_override "grpo.val_period=0 grpo.val_at_start=false grpo.val_at_end=false"
-  add_override "checkpointing.enabled=true checkpointing.save_period=${CMP_SAVE_PERIOD} checkpointing.save_optimizer=false"
-  [[ -n "${CMP_SEQ}" ]] && add_override "policy.max_total_sequence_length=${CMP_SEQ}"
+  add_override "checkpointing.enabled=true checkpointing.save_period=5 checkpointing.save_optimizer=false"
+  add_override "policy.max_total_sequence_length=16384"
 fi
 
-# Layer 5: caller overrides, last so they win.
+# Layer 4: caller overrides, last so they win.
 [[ -n "${EXTRA_OVERRIDES:-}" ]] && add_override "${EXTRA_OVERRIDES}"
 
 # ------------------------------------------- entrypoint, config, setup -----
@@ -157,10 +132,8 @@ esac
 CONFIG="examples/configs/async/${MODEL}_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${MODEL} x ${ENV} x ${TOPOLOGY}: ${CONFIG}"
 
-if [[ ${#SETUP_PARTS[@]} -gt 0 ]]; then
-  printf -v SETUP_JOINED '%s && ' "${SETUP_PARTS[@]}"
-  export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"
-fi
+printf -v SETUP_JOINED '%s && ' "${SETUP_PARTS[@]}"
+export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"
 
 # COLL_TRACE=1 enables torch's NCCL flight recorder: dumps each rank's last
 # collectives to ./nccl_traces/ on a watchdog timeout (shows the stuck collective).
