@@ -438,27 +438,53 @@ With `in_flight_weight_updates: false` and `max_trajectory_age_steps: 1` (now in
 | generation length | 1363 → 3841 | flat ~1300 |
 | reward over 12 steps | climbed then collapsed | 0.00 → 0.19, holding |
 
-### Milestone 2 rerun — **GO** (job 5989773, 8 nodes)
+### Milestone 2 rerun — **GO** (job 5989773, 8 nodes, 60 steps, COMPLETED in 46 min)
 
-| step | grid_match | cell_match | format_valid | accuracy |
-|---|---|---|---|---|
-| 0 | 0.0000 | 0.2308 | 0.4593 | 0.0244 |
-| 10 | 0.0000 | 0.3854 | 0.8430 | 0.1184 |
-| 20 | 0.0000 | 0.4000 | 0.9012 | 0.1330 |
-| 30 | 0.0000 | 0.4791 | 0.9244 | 0.1599 |
+| step | grid_match | cell_match | format_valid | accuracy | response tokens |
+|---|---|---|---|---|---|
+| 0 | 0.0000 | 0.2308 | 0.4593 | 0.0244 | 2076 |
+| 10 | 0.0000 | 0.3854 | 0.8430 | 0.1184 | 1464 |
+| 20 | 0.0000 | 0.4000 | 0.9012 | 0.1330 | 1504 |
+| 30 | 0.0000 | 0.4791 | 0.9244 | 0.1599 | 2283 |
+| 40 | 0.0000 | 0.5227 | 0.9477 | 0.1756 | 2287 |
+| 50 | 0.0000 | **0.5601** | 0.9767 | **0.1904** | 1484 |
+| 60 | 0.0000 | 0.5118 | 0.9535 | 0.1713 | 1845 |
 
-Monotone through step 30, past the point where the previous run collapsed. Training is stable:
-`token_mult_prob_error` 1.01–2.19, generation length flat at ~1400.
+Accuracy rose 0.024 → 0.190 (peak, step 50), cell match 0.23 → 0.56. Training stayed stable
+throughout: `token_mult_prob_error` 1.01 at every late step, generation length ~900–1400.
 
-**The gains have decoupled from formatting.** Between steps 20 and 30 format validity moved +0.023
-(+2.6% relative, clearly saturating) while cell match moved +0.079 (+20% relative). Early gains were
-the model learning the output contract; these are not. That is the question §4 raised about when
-shaping stops helping, and so far the answer is that genuine grid accuracy keeps improving after
-the format term is exhausted.
+**The gains decoupled from formatting.** Format validity saturated around step 30 (0.92 → 0.98,
++6% relative from step 30 to 50) while cell match kept climbing (0.48 → 0.56, +17% relative). Early
+gains were the model learning the output contract; later ones were not. This is the §4 question
+about when shaping stops helping, and the answer here is that genuine grid accuracy kept improving
+well after the format term was exhausted — no `w_cell` annealing was needed within 60 steps.
 
-`grid_match` remains 0.0000. Expected for ARC-AGI-2 at 1.7B, and the honest headline: **nothing has
-been solved outright.** Cell match near 0.48 means predictions are roughly half-right on a
-centered overlay.
+The step-60 dip (0.190 → 0.171) is within what 172 evaluation rows can resolve; it is not evidence
+of a trend either way.
+
+**`grid_match` is 0.0000 at every checkpoint.** This is the honest headline: **nothing was solved
+outright.** Expected for ARC-AGI-2 at 1.7B — cell match 0.56 means predictions are a bit better
+than half-right on a centered overlay, which is progress on the shaped objective, not on ARC.
+
+### Milestone 3 — CoT emergence: **no lengthening, accuracy rose anyway**
+
+| | step 0 / first 10 | final / last 10 |
+|---|---|---|
+| validation response tokens | 2076 | 1845 |
+| training generation tokens | 1329 | 999 |
+| policy entropy | 0.054 | 0.147 |
+
+Responses got **shorter**, not longer, while accuracy improved 7.8×. GRPO did not induce longer
+reasoning here; it made the existing response more useful — the early drop (2076 → 1464) is the
+model abandoning rambling that never reached an answer, and the later variation is noise around a
+flat trend. Rising entropy (0.054 → 0.147) says the policy did not collapse to a single template
+either.
+
+Per the plan's own criterion this is a legitimate outcome rather than a failure: CoT was a means to
+accuracy, not the goal. The prompt-level instruction to describe the transformation, plus the
+format term, was sufficient to get parseable structured answers out of an instruct model **with no
+SFT of any kind** — which answers the original question. What it did *not* do is produce visibly
+longer deliberation, so nothing here demonstrates that ARC-style reasoning emerged.
 
 ---
 
