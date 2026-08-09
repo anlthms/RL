@@ -1,0 +1,59 @@
+# ARC-AGI data/env layer. Model-agnostic: list AFTER a <model>_<topology>
+# config in a `defaults:` list to run that model on ARC-AGI.
+#
+# `_override_: true` fully replaces the data/env blocks the model base
+# inherited, so this composes onto a gym-native base as well as a math-native
+# one. Runs under the standard examples/run_grpo.py entrypoint -- no NeMo-Gym
+# server and no gym venv.
+
+grpo:
+  # The ARC-AGI-2 public evaluation split is 120 tasks -> 172 test-pair rows.
+  # Score all of them; 43 divides 172 exactly (validate() floors the ratio).
+  max_val_samples: 172
+  val_batch_size: 43
+
+policy:
+  # ARC prompts are large: the worst evaluation task is ~9.7k characters of
+  # grid content before the instruction, and grids tokenize close to 1:1. 32k
+  # leaves room for the reasoning the reward is trying to induce.
+  # NOTE: launch_experiment.sh's CMP=1 preset hard-sets 16384 and is applied
+  # after this layer -- do not combine CMP=1 with ENV=arc.
+  max_total_sequence_length: 32768
+
+data:
+  _override_: true
+  # Non-null required: the processor does `length >= max_seq_length`.
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: arc_agi
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025
+    split: training
+    # The ARC `test` split ships no solutions file (competition holdout), so
+    # `evaluation` is the only usable validation source.
+    validation_split: evaluation
+    seed: ${grpo.seed}
+  validation: null  # ArcAgiDataset supplies val_dataset from validation_split
+  default:
+    prompt_file: "examples/prompts/arc_agi.txt"
+    system_prompt_file: null
+    processor: "arc_agi_data_processor"
+    env_name: "arc_agi"
+
+env:
+  _override_: true
+  should_use_nemo_gym: false
+  arc_agi:
+    # Dense terms exist to break degenerate GRPO groups; exact match stays
+    # dominant so shaping is never the cheaper path. See ArcAgiEnvConfig.
+    exact_weight: 1.0
+    cell_weight: 0.20
+    color_weight: 0.05
+    extraneous_color_weight: 0.05
+    shape_weight: 0.05
+    format_weight: 0.05
+
+logger:
+  monitor_gpus: true

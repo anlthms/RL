@@ -19,7 +19,7 @@
 # examples/configs/async/<model>_<env>_<topology>.yaml.
 #
 #   MODEL     qwen3_1p7b | nanov3         which policy to train
-#   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
+#   ENV       gym | math | arc            NeMo-Gym servers, the built-in math env, or ARC-AGI
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
@@ -59,8 +59,8 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | math) ;;
-  *) die "invalid ENV: ${ENV} (expected gym or math)" ;;
+  gym | math | arc) ;;
+  *) die "invalid ENV: ${ENV} (expected gym, math, or arc)" ;;
 esac
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
@@ -127,7 +127,7 @@ fi
 # entrypoint; math runs on the standard one.
 case "${ENV}" in
   gym)  ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  math) ENTRYPOINT="examples/run_grpo.py" ;;
+  math | arc) ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/${MODEL}_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${MODEL} x ${ENV} x ${TOPOLOGY}: ${CONFIG}"

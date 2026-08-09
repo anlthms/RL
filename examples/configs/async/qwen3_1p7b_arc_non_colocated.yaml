@@ -1,0 +1,5 @@
+# Qwen3-1.7B dense, ARC-AGI env, non_colocated async GRPO (Megatron inference).
+# Launch: MODEL=qwen3_1p7b ENV=arc bash launch_experiment.sh non_colocated
+defaults:
+  - qwen3_1p7b_non_colocated.yaml
+  - env_arc.yaml

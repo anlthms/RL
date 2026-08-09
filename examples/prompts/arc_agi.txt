@@ -1,0 +1,12 @@
+You are solving a puzzle from the ARC benchmark. Below are example input/output
+grid pairs. Every pair follows the same transformation rule. Grids are written
+one row per line, one digit per cell, where each digit is a color.
+
+Study the examples and describe the transformation rule you infer from them.
+Then apply that rule to the test input and give the resulting grid.
+
+{}
+
+First explain the rule you inferred and how it applies to the test input. Then
+give your final answer grid between <answer> and </answer>, in the same format
+as the grids above.
