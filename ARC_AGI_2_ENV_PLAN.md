@@ -366,11 +366,55 @@ never reached wandb, and validation's `accuracy` was the mean *shaped* reward, w
 solving with getting close. `validate()` now averages any per-sample `terms` dict an environment
 attaches to its metadata. Environments that don't populate it are unaffected.
 
-### Milestone 2 — in flight (job 5985429)
+### A generation bug that inverted every earlier measurement
 
-8 nodes, 60 steps, 3 h wall clock, validation every 10 steps plus a step-0 baseline, on all 172
-ARC-AGI-2 evaluation rows. Queued on `QOS=normal`. Will report `val:grid_match`, `val:cell_match`,
-and `val:format_valid` against the step-0 baseline.
+Validation reported `format_valid = 0` while training-step rewards plainly contained parseable
+answers. Instrumenting `validate()` showed 43 samples but only 18 with scoring terms, and every
+unscored sample sitting at `total_reward = 0.0000` — they never reached the environment at all.
+The driver log had 299 copies of:
+
+```
+RuntimeError: The expanded size of the tensor (836) must match the existing size (838)
+  megatron_worker.py:557 in _parse_result_to_batched_data_dict
+```
+
+mcore strips the matched stop string from `generated_tokens` but leaves its logprobs in
+`generated_log_probs`. The padded logprob row is sized from the *token* count, so the longer
+logprob slice raised a shape mismatch — 838 vs 836 is exactly the two tokens of `</answer>` — and
+the rollout was dropped with reward 0.
+
+**The failure is silently selective, which is what made it so misleading: only rollouts that
+actually hit their stop string crash.** The samples surviving to be scored were precisely the ones
+that failed to answer, so a working environment reported a 0% format-valid rate. It also explains
+the earlier `accuracy` vs `reward` discrepancy — 24 scored samples at -0.1 plus 19 dropped zeros
+averages to exactly the -0.0558 that looked impossible. The terms aggregation was correct
+throughout.
+
+Fixed by clipping logprobs to the kept tokens (`megatron_worker.py`). Logprobs must align 1:1 with
+the tokens retained for training, so clipping is the correct direction, not padding. After the fix:
+0 generation errors, 43/43 samples scored, `accuracy == reward`.
+
+This bug affects **any** Megatron-generation run that uses stop strings, not just ARC.
+
+### Milestone 2 — **accuracy is increasing** (job 5988364, in flight)
+
+8 nodes, 60 steps, 3 h, validation at step 0 / every 10 steps / at end, on all 172 ARC-AGI-2
+evaluation rows.
+
+| step | grid_match | cell_match | format_valid | color_recall | shape_mismatch ↓ | accuracy |
+|---|---|---|---|---|---|---|
+| 0 | 0.0000 | 0.1925 | 0.4302 | 0.3126 | 0.6490 | 0.0118 |
+| 10 | 0.0000 | 0.3748 | 0.8488 | 0.6121 | 0.2976 | 0.1194 |
+
+Go criterion (cell match beats the step-0 baseline) met at the first checkpoint: 0.19 → 0.37.
+
+**Read this honestly.** Format validity doubling (0.43 → 0.85) and shape mismatch halving (0.65 →
+0.30) say the model is learning the *output contract*. Much of the cell-match gain follows
+mechanically from emitting correctly shaped grids. `grid_match` is still 0.0000, which is the
+expected starting point for ARC-AGI-2 at 1.7B but means nothing has yet been *solved*. The
+interesting question is what happens at steps 20–60, once format saturates near 1.0 and shaping can
+no longer supply easy reward: that is when the curve either keeps climbing on genuine partial
+solves or flattens.
 
 ---
 
