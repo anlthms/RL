@@ -60,8 +60,17 @@ class TestExtractAnswerGrid:
     def test_empty_block(self):
         assert extract_answer_grid("<answer></answer>") is None
 
-    def test_unclosed_block(self):
-        assert extract_answer_grid("<answer>\n012\n345") is None
+    def test_unclosed_final_block_is_still_read(self):
+        # Generation stops on "</answer>" and may not echo it back; a response
+        # truncated at the token cap has no closing tag either.
+        assert extract_answer_grid("<answer>\n012\n345") == [[0, 1, 2], [3, 4, 5]]
+
+    def test_unclosed_block_with_no_grid(self):
+        assert extract_answer_grid("<answer>\nstill thinking about it") is None
+
+    def test_closed_block_wins_over_later_unclosed_garbage(self):
+        response = answer("11\n11") + "<answer>\nnot a grid"
+        assert extract_answer_grid(response) == [[1, 1], [1, 1]]
 
     def test_last_valid_block_wins(self):
         response = answer("00") + answer("11\n11")

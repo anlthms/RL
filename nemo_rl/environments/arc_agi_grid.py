@@ -86,11 +86,21 @@ def extract_answer_grid(response: str) -> Grid | None:
     Scans every ``<answer>...</answer>`` block and returns the last one that
     parses, so free-form reasoning that mentions grid-like text earlier cannot
     displace the real answer.
+
+    Falls back to the text after a final unclosed ``<answer>``. Generation stops
+    on the closing delimiter and may not echo it back, and a response truncated
+    at the token cap has no closing tag either -- in both cases the grid is
+    right there, and refusing to read it would score a complete answer as
+    garbage.
     """
     for block in reversed(_ANSWER_BLOCK_RE.findall(response)):
         grid = parse_grid(block)
         if grid is not None:
             return grid
+
+    _, delimiter, tail = response.rpartition(ANSWER_OPEN)
+    if delimiter and ANSWER_CLOSE not in tail:
+        return parse_grid(tail)
     return None
 
 

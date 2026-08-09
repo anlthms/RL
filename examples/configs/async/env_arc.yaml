@@ -13,6 +13,14 @@ grpo:
   val_batch_size: 43
 
 policy:
+  tokenizer:
+    chat_template_kwargs:
+      # Qwen3's thinking block ate the entire response budget before the model
+      # ever reached its answer, so every rollout hit the token cap unparsed.
+      # We want the reasoning in the *scored* response anyway: the prompt asks
+      # the model to describe the transformation, and those are the tokens GRPO
+      # should be reinforcing.
+      enable_thinking: false
   # ARC prompts are large: the worst evaluation task is ~9.7k characters of
   # grid content before the instruction, and grids tokenize close to 1:1. 32k
   # leaves room for the reasoning the reward is trying to induce.
