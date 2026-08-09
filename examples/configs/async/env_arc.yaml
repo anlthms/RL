@@ -7,6 +7,17 @@
 # server and no gym venv.
 
 grpo:
+  async_grpo:
+    # Keep each rollout on one weight version. With in-flight updates a ~1300
+    # token ARC response straddles a refit, so its generation logprobs come
+    # from weights the trainer no longer has: train/token_mult_prob_error grew
+    # past 1e4, the importance ratios went with it, and the policy collapsed
+    # into 3800-token responses that never answer. Bounded to ~4 with these.
+    # (Turning async off entirely is not an option here -- the colocated
+    # Megatron path fails in prepare_for_generation with the weights offloaded.)
+    in_flight_weight_updates: false
+    max_trajectory_age_steps: 1
+
   # The ARC-AGI-2 public evaluation split is 120 tasks -> 172 test-pair rows.
   # Score all of them; 43 divides 172 exactly (validate() floors the ratio).
   max_val_samples: 172
