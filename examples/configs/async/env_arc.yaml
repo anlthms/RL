@@ -19,6 +19,13 @@ policy:
   # NOTE: launch_experiment.sh's CMP=1 preset hard-sets 16384 and is applied
   # after this layer -- do not combine CMP=1 with ENV=arc.
   max_total_sequence_length: 32768
+  generation:
+    # Cap the response. The context is sized for the *prompt* (p99 7.8k
+    # tokens), not for unbounded reasoning: Qwen3 is a thinking model, and with
+    # the default 32768 budget rollouts run to the cap, so the async buffer
+    # never fills and no training step starts. 4096 leaves ample room for a
+    # transformation description plus a 30x30 answer grid (~930 tokens).
+    max_new_tokens: 4096
 
 data:
   _override_: true
