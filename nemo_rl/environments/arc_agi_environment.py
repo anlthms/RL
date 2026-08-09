@@ -27,7 +27,6 @@ from pydantic import BaseModel
 from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.arc_agi_grid import (
-    ANSWER_CLOSE,
     Grid,
     RewardWeights,
     score_response,
@@ -152,7 +151,7 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         return EnvironmentReturn(
             observations=observations,
             metadata=updated_metadata,
-            next_stop_strings=[[ANSWER_CLOSE]] * len(message_log_batch),
+            next_stop_strings=[None] * len(message_log_batch),
             rewards=rewards,
             terminateds=torch.ones_like(rewards).cpu(),
             answers=None,

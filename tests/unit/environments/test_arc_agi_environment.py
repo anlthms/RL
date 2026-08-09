@@ -63,8 +63,10 @@ def test_step_scores_a_batch(arc_env):
     assert result.rewards[0] > result.rewards[1] > result.rewards[2]
     assert result.metadata[0]["terms"]["grid_match"] == 1.0
     assert result.metadata[2]["terms"]["format_valid"] == 0.0
-    # The environment asks generation to stop at the closing delimiter.
-    assert result.next_stop_strings[0] == ["</answer>"]
+    # No stop strings: mcore's stop-word trimming desynchronizes generated
+    # tokens from their logprobs, which corrupts the importance ratios. The
+    # parser tolerates an unclosed answer instead.
+    assert result.next_stop_strings[0] is None
 
 
 def test_step_preserves_metadata_fields(arc_env):

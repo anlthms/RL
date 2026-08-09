@@ -30,7 +30,7 @@ from nemo_rl.data.interfaces import (
     VLMMessageLogType,
 )
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
-from nemo_rl.environments.arc_agi_grid import ANSWER_CLOSE, format_task_prompt
+from nemo_rl.environments.arc_agi_grid import format_task_prompt
 
 TokenizerType = PreTrainedTokenizerBase
 
@@ -504,10 +504,6 @@ def arc_agi_data_processor(
         "loss_multiplier": loss_multiplier,
         "idx": idx,
         "task_name": datum_dict["task_name"],
-        # Stop as soon as the answer grid closes. Reasoning before it is free
-        # to be any length, but there is nothing to gain after the grid, and
-        # 32k of context is a lot of rope.
-        "stop_strings": [ANSWER_CLOSE],
     }
     return output
 
