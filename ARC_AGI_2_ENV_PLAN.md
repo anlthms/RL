@@ -408,13 +408,57 @@ evaluation rows.
 
 Go criterion (cell match beats the step-0 baseline) met at the first checkpoint: 0.19 → 0.37.
 
-**Read this honestly.** Format validity doubling (0.43 → 0.85) and shape mismatch halving (0.65 →
-0.30) say the model is learning the *output contract*. Much of the cell-match gain follows
-mechanically from emitting correctly shaped grids. `grid_match` is still 0.0000, which is the
-expected starting point for ARC-AGI-2 at 1.7B but means nothing has yet been *solved*. The
-interesting question is what happens at steps 20–60, once format saturates near 1.0 and shaping can
-no longer supply easy reward: that is when the curve either keeps climbing on genuine partial
-solves or flattens.
+**That run then collapsed at step 20** — every metric to zero, accuracy to the -0.10 floor. Cause
+below.
+
+### The collapse: off-policy logprob drift
+
+`train/token_mult_prob_error` (generation-vs-training logprob mismatch) grew from 1.005 to **1e10**
+starting at step 7, and generation length blew up 1363 → 3841 tokens (the cap) as the policy
+collapsed into responses that never answer.
+
+Two contributing causes, found in order:
+
+1. **The stop-string logprob clip was misaligned.** The error stayed ~1.0 in earlier runs only
+   because those samples were being *dropped* by the crash above; once they entered training it
+   exploded. The tail-clip guessed the wrong end. Rather than keep guessing at mcore internals, the
+   environment no longer sets stop strings at all — the parser already tolerates an unclosed
+   `<answer>`, so the delimiter was only ever a latency optimization.
+2. **In-flight weight updates, the dominant cause.** Removing stop strings alone still hit 12379 by
+   step 10. A ~1300-token ARC response straddles a weight refit, so its generation logprobs come
+   from weights the trainer no longer holds. Turning async off entirely is *not* available: the
+   colocated Megatron path fails in `prepare_for_generation` with the weights offloaded (verified,
+   job 5989038).
+
+With `in_flight_weight_updates: false` and `max_trajectory_age_steps: 1` (now in `env_arc.yaml`):
+
+| | before | after |
+|---|---|---|
+| `token_mult_prob_error` | 86 → 12379 | ≤ 4.5 |
+| generation length | 1363 → 3841 | flat ~1300 |
+| reward over 12 steps | climbed then collapsed | 0.00 → 0.19, holding |
+
+### Milestone 2 rerun — **GO** (job 5989773, 8 nodes)
+
+| step | grid_match | cell_match | format_valid | accuracy |
+|---|---|---|---|---|
+| 0 | 0.0000 | 0.2308 | 0.4593 | 0.0244 |
+| 10 | 0.0000 | 0.3854 | 0.8430 | 0.1184 |
+| 20 | 0.0000 | 0.4000 | 0.9012 | 0.1330 |
+| 30 | 0.0000 | 0.4791 | 0.9244 | 0.1599 |
+
+Monotone through step 30, past the point where the previous run collapsed. Training is stable:
+`token_mult_prob_error` 1.01–2.19, generation length flat at ~1400.
+
+**The gains have decoupled from formatting.** Between steps 20 and 30 format validity moved +0.023
+(+2.6% relative, clearly saturating) while cell match moved +0.079 (+20% relative). Early gains were
+the model learning the output contract; these are not. That is the question §4 raised about when
+shaping stops helping, and so far the answer is that genuine grid accuracy keeps improving after
+the format term is exhausted.
+
+`grid_match` remains 0.0000. Expected for ARC-AGI-2 at 1.7B, and the honest headline: **nothing has
+been solved outright.** Cell match near 0.48 means predictions are roughly half-right on a
+centered overlay.
 
 ---
 
