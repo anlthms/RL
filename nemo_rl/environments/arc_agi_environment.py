@@ -142,7 +142,7 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
             {
                 "role": "environment",
                 "content": "Environment: correct"
-                if terms["exact_match"]
+                if terms["grid_match"]
                 else "Environment: incorrect",
             }
             for terms in all_terms
@@ -178,8 +178,8 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
             return sum(terms[name] for terms in scored) / len(scored)
 
         metrics: dict[str, float | int] = {
-            "accuracy": mean("exact_match"),
-            "grid_match": mean("exact_match"),
+            "accuracy": mean("grid_match"),
+            "grid_match": mean("grid_match"),
             "cell_match": mean("cell_match"),
             "color_recall": mean("color_recall"),
             "extraneous_colors": mean("extraneous_colors"),

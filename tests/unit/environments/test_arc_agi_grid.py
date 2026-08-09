@@ -148,7 +148,7 @@ class TestScoreResponse:
     def test_exact_match_scores_highest(self):
         target = [[1, 2], [3, 4]]
         terms = score_response(answer("12\n34"), target, WEIGHTS)
-        assert terms["exact_match"] == 1.0
+        assert terms["grid_match"] == 1.0
         assert terms["cell_match"] == 1.0
         assert terms["format_valid"] == 1.0
         assert terms["reward"] == pytest.approx(1.0 + 0.20 + 0.05 + 0.05)

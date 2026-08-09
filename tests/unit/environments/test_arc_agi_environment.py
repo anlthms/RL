@@ -61,7 +61,7 @@ def test_step_scores_a_batch(arc_env):
     assert len(result.observations) == 3
     # Ordering is the contract the whole reward design rests on.
     assert result.rewards[0] > result.rewards[1] > result.rewards[2]
-    assert result.metadata[0]["terms"]["exact_match"] == 1.0
+    assert result.metadata[0]["terms"]["grid_match"] == 1.0
     assert result.metadata[2]["terms"]["format_valid"] == 0.0
     # The environment asks generation to stop at the closing delimiter.
     assert result.next_stop_strings[0] == ["</answer>"]

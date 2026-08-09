@@ -184,7 +184,7 @@ def score_response(
         # the only reward difference the policy can act on.
         return {
             "reward": -(weights.extraneous + weights.shape),
-            "exact_match": 0.0,
+            "grid_match": 0.0,
             "cell_match": 0.0,
             "color_recall": 0.0,
             "extraneous_colors": 1.0,
@@ -193,7 +193,7 @@ def score_response(
         }
 
     terms = {
-        "exact_match": float(pred == target),
+        "grid_match": float(pred == target),
         "cell_match": overlay_cell_accuracy(pred, target),
         "color_recall": color_recall(pred, target),
         "extraneous_colors": extraneous_color_fraction(pred, target),
@@ -201,7 +201,7 @@ def score_response(
         "format_valid": 1.0,
     }
     terms["reward"] = (
-        weights.exact * terms["exact_match"]
+        weights.exact * terms["grid_match"]
         + weights.cell * terms["cell_match"]
         + weights.color * terms["color_recall"]
         - weights.extraneous * terms["extraneous_colors"]
