@@ -20,6 +20,22 @@ grpo:
   val_batch_size: 43
 
 policy:
+  megatron_cfg:
+    optimizer:
+      # 5e-6 moves the policy far enough per step that age-4 trajectories are
+      # wildly off-policy: the importance ratios are still unbiased, but their
+      # variance wrecks the update (token_mult_prob_error past 1e4, reward
+      # collapse by step 20). Halving the step size keeps the ratios near 1
+      # without throttling the collector or discarding samples.
+      #
+      # Isolated against the alternatives over 40 steps, async settings at
+      # their defaults throughout:
+      #   lr 2e-6            -> max token_mult_prob_error 3.8e4, reward 0.15-0.19 sustained
+      #   ratio_clip 0.1     -> max 2.4e13, reward swings 0.03-0.26
+      #   seq masking @1.5   -> masks 238/256 sequences per step by step 20
+      # The clip bounds the surrogate ratio but not how far the weights move;
+      # the learning rate bounds the drift itself.
+      lr: 2.0e-6
   tokenizer:
     chat_template_kwargs:
       # Qwen3's thinking block ate the entire response budget before the model
