@@ -488,7 +488,124 @@ longer deliberation, so nothing here demonstrates that ARC-style reasoning emerg
 
 ---
 
-## 9. Open questions
+## 9. Follow-up: is the async machinery broken? (No.)
+
+An earlier draft of this document claimed in-flight weight updates were the culprit and implied the
+async mechanism was at fault. **That framing was wrong**, and the controls below show why.
+
+### Does the stop-string logprob desync affect nanov3 + gym?
+
+**No.** The NeMo-Gym path force-sets `generation_config["stop_strings"] = None`
+(`nemo_gym.py:609`) and then asserts they are unset (`rollouts.py:2152`). `grpo_nanov3.yaml`
+ships `stop_strings: null`, the math environment returns `next_stop_strings = [None]`, and no
+non-ARC data processor sets datum-level stop strings. Nothing outside ARC reaches mcore's
+stop-word trimming, so the token/logprob length desync cannot trigger there. ARC was the first
+workload on this branch to use stop strings with Megatron generation.
+
+### Why did the importance ratio not save us?
+
+The mechanism is exactly as designed: `generation_logprobs` are the behavior logprobs recorded at
+rollout time, and the actor weight is `exp(prev_logprobs - generation_logprobs)` per token
+(`loss_functions.py`). The denominator is right. The problem is that with
+`truncated_importance_sampling_type: null` the weight is **unbounded**, and it is unbiased only in
+expectation — its *variance* explodes once the policy moves far from the behavior policy.
+
+`token_mult_prob_error` is `mean(exp|generation_logprobs - prev_logprobs|)`, i.e. a direct measure
+of how far the policy has moved since those tokens were sampled. It is not a bug detector.
+
+**ARC is an unusually fast-moving policy.** Format validity goes 0.43 → 0.85 in ten steps — the
+output distribution is being rewritten. With `max_trajectory_age_steps: 4`, trajectories in the
+buffer were sampled by a policy up to four steps back, i.e. from the middle of that rewrite. The
+error explodes at exactly steps 7–10, which is exactly when reward first moves
+(0.018 → 0.036 → 0.050 → 0.195). That is genuine off-policyness, not corruption.
+
+Controls confirming the machinery is healthy elsewhere:
+
+| workload | in-flight / age | max `token_mult_prob_error` | outcome |
+|---|---|---|---|
+| nanov3 + gym (async colo & non-colo) | true / 4 | **1.02 – 1.04** | rewards 0.33–0.64 |
+| qwen3-1.7B + math (19–41 steps) | true / 4 | **1.0 – 1.1** | rewards 0.40–0.80 |
+| qwen3-1.7B + ARC | true / 4 | **1e5 – 1e15** | collapse by step 20 |
+| qwen3-1.7B + ARC | false / 1 | 170 (60 steps; ≤4.5 over the first 12) | stable, accuracy 0.024 → 0.190 |
+
+Math and gym policies start already well-formed and move slowly, so their behavior logprobs stay
+close to current. ARC's do not.
+
+Two hypotheses tested and **rejected**:
+
+- *Truncated importance sampling fixes it* (job 6014543, `tis`, ratio 5 / min 0.2, async defaults
+  restored): reward peaked 0.20 at step 11 then decayed to -0.03 by step 20, with the error still
+  reaching 1e15. Clamping bounds the weight but cannot recover signal from tokens whose behavior
+  policy is four steps of rapid drift away.
+- *Chunked prefill misaligns logprobs for ARC's long prompts* (job 6014907,
+  `enable_chunked_prefill: false`): still exploded at step 9. Prompt length is not the mechanism.
+
+**Conclusion.** `in_flight_weight_updates: false` + `max_trajectory_age_steps: 1` is the right
+setting *for this workload* because ARC's early training is a large, fast distribution shift, and
+it is a workload property rather than a defect in the async implementation. Existing async recipes
+need no change. Note `grpo_nanov3.yaml` already ships `max_trajectory_age_steps: 1` for the gym
+recipe; only `nanov3_base.yaml` uses age 4, and its measured error stays at ~1.02.
+
+The one thing worth revisiting is that a fast-moving policy silently degrading is hard to notice
+when `CMP=1` turns validation off — the async nanov3 comparisons were throughput-focused, and
+their healthy `token_mult_prob_error` is the evidence that they were fine, not the absence of a
+validation curve.
+
+## 10. How the CoT actually evolves (job 6015119)
+
+Sampled validation responses at steps 0 / 10 / 20 / 30 (`logger.num_val_samples_to_print`).
+Accuracy on this 2-node rerun: -0.044 → 0.100 → 0.135 → 0.132; format 0.28 → 0.77 → 0.91 → 0.86;
+response length 1933 → 1410 → 1229 → 1838 tokens.
+
+**Step 0 — a confident essay about the wrong rule, and often no answer.**
+
+> ### Rule Inference
+> After analyzing the three example input/output pairs, the transformation rule can be inferred as:
+> **Each row is transformed by replacing every occurrence of the digit `2` with `2` and every
+> occurrence of the digit `4` with `8`.**
+> ### Applying the Rule to the Test Input
+> ```
+> 4242442424424242242442
+> …(echoes all 22 rows of the input verbatim)…
+> ```
+> After applying the transformation (replacing `4` with `8`): …(echoes 22 more rows)…
+
+Note the rule is degenerate ("`2` stays as `2`"), and the response burns most of its budget
+re-printing the input grid twice — which is why format validity is only 0.28: many responses never
+reach `<answer>`.
+
+**Step 10 — the essay collapses, the answer arrives.**
+
+> After analyzing the examples, I infer that the transformation rule is:
+> **Rule**: Each digit in the input grid is replaced with the same digit in the output grid.
+> However, there is a subtle change in the placement of digits… it appears that the transformation
+> is **not a simple digit-wise shift**, but rather a **rearrangement of digits**…
+> To apply this rule to the test input, I will examine the input and output for patterns…
+> `<answer>` …grid… 
+
+The verbatim grid echo is gone and `<answer>` is emitted reliably (0.77). The prose is *vaguer* than
+step 0 — hedged, non-committal — but it is short and it terminates. GRPO bought format compliance by
+cutting the part of the response that wasn't paying for itself.
+
+**Step 30 — reasoning grounded in the actual grid.**
+
+> ### Example Analysis:
+> 1. In the first example, the input grid has a single 1 in the fourth row and the output has this 1
+>    in the fourth row. This suggests that the 1 remains in the same position.
+> 2. In the second example, the input has multiple 1's in the same row and the output keeps these…
+> ### Applying the Rule:
+> In the test input, the 4th row has "000000000000300", and the output has "000000000044300"…
+
+The analysis now cites concrete rows and cell values from *this* task rather than generic claims,
+and the structure is stable (observations → rule → application → answer).
+
+**What changed and what didn't.** Structure and grounding improved: input echo dropped, `<answer>`
+reliably emitted, observations referencing real cells. The *inferred rules stayed wrong* — degenerate
+substitutions at step 0, hedging at step 10, plausible-but-incorrect row claims at step 30. That is
+exactly consistent with `grid_match = 0.0000` throughout: the model learned to produce a
+well-formed, on-topic, grounded answer, not to solve ARC.
+
+## 11. Open questions
 
 1. **Eval-set size.** 120 tasks / 172 rows is small; step-to-step validation noise will swamp real
    movement. Consider holding out a slice of the 1000 training tasks as the online validation signal
