@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import asyncio
+import heapq
 import statistics
 import threading as _threading
 import uuid
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 import ray
@@ -30,6 +32,35 @@ from nemo_rl.experience.payload import pack_payload, record_to_train_batch
 from nemo_rl.utils.r3_trace import trace_rollout_payload
 
 
+@dataclass
+class PromotionPolicy:
+    """Swap-based promotion of early-completing prompt groups.
+
+    Without promotion a training step consumes only the groups stamped for it,
+    so its wall time is set by the slowest rollout of that one cohort. With
+    promotion, a step short of its own groups pulls ready groups stamped for a
+    later step, and hands each vacated stamp to a straggler that arrives after
+    its own target step was consumed (``_claim_donated_target``).
+
+    Stamps are *permuted*, never created or dropped: each promotion vacates
+    exactly one later slot and each step is still short by exactly the number
+    of stragglers it has, so the two always match. Per-target counts are
+    therefore unchanged and the collector's dispatch accounting
+    (``get_trajectories_needed``) needs no adjustment -- generation is neither
+    over- nor under-produced.
+
+    Mean trajectory age is invariant under a swap (it exchanges two consumption
+    steps while leaving both generation versions alone), but the *spread*
+    grows: promoted groups are fresher, demoted stragglers staler.
+    ``slack_steps`` is the extra age headroom that keeps a demoted straggler
+    from being evicted before it reaches its reassigned target step. Without
+    it, steady-state lookahead already saturates the age window and the first
+    demotion would evict the group.
+    """
+
+    slack_steps: int
+
+
 # Classes with @ray.remote can't be inherited from, so we split the implementation out.
 class ReplayBufferImpl(ReplayBufferProtocol):
     """Replay buffer storing per-prompt groups.
@@ -38,10 +69,24 @@ class ReplayBufferImpl(ReplayBufferProtocol):
     grpo.num_generations_per_prompt (required to compute per-prompt advantages).
     """
 
-    def __init__(self, max_size: int):
+    def __init__(
+        self, max_size: int, promotion_policy: Optional[PromotionPolicy] = None
+    ):
         if max_size <= 0:
             raise ValueError(f"max_size must be positive, got {max_size}")
+        if promotion_policy is not None and promotion_policy.slack_steps < 0:
+            raise ValueError(
+                f"promotion slack_steps must be non-negative, got "
+                f"{promotion_policy.slack_steps}"
+            )
         self.max_size = max_size
+        # None disables promotion; the buffer then consumes only groups stamped
+        # for the current step (see PromotionPolicy).
+        self.promotion_policy = promotion_policy
+        # Min-heap of target stamps vacated by promotion, handed to stragglers
+        # earliest-deadline-first so a reassigned group has the best chance of
+        # arriving on time.
+        self.donated_targets: list[int] = []
         self.trajectories = []  # List[dict[str, Any]]
         # If trajectory_version is 1 and target_weight_version is 4 it means that weight version 1 was used for generating a trajectory and this trajectory will be used for training when weight version is 4.
         self.trajectory_versions = []  # it is the weight-version used for generation of a trajectory
@@ -85,6 +130,16 @@ class ReplayBufferImpl(ReplayBufferProtocol):
         with self._lock:
             if len(self.trajectories) >= self.max_size:
                 return "full"
+
+            # A straggler whose target step was already consumed had its slot
+            # given away by a promotion; hand it a stamp vacated by that swap.
+            if (
+                self.promotion_policy is not None
+                and target_weight_version <= self.last_target_weight_already_generated
+            ):
+                target_weight_version = self._claim_donated_target(
+                    target_weight_version
+                )
 
             print("🔍 ReplayBuffer.add: Adding trajectory")
             self.trajectories.append(trajectory)
@@ -164,6 +219,41 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             }
         return info
 
+    def _claim_donated_target(self, original_target: int) -> int:
+        """Return the earliest still-future stamp vacated by a promotion.
+
+        Must be called while holding ``self._lock``. Donated stamps whose step
+        has itself already been consumed are discarded as they are popped: that
+        slot was either re-donated by a later promotion or the group is now too
+        late to fill it. When nothing usable remains the original stamp is kept
+        and the group ages out -- the collector's existing gap-fill path then
+        regenerates the shortfall for that target, so the deficit self-heals.
+        """
+        while self.donated_targets:
+            candidate = heapq.heappop(self.donated_targets)
+            if candidate > self.last_target_weight_already_generated:
+                print(
+                    f"🔀 Reassigned straggler from consumed target "
+                    f"{original_target} to donated target {candidate}"
+                )
+                return candidate
+
+        print(
+            f"⚠️ Straggler for consumed target {original_target} found no donated "
+            "slot; it will age out and be gap-filled"
+        )
+        return original_target
+
+    def _age_window(self, max_age_steps: Optional[int]) -> Optional[int]:
+        """Widen the age window by the promotion slack when promotion is on.
+
+        A demoted straggler is consumed later than it was stamped for, so it
+        needs headroom beyond the dispatch lookahead to stay selectable.
+        """
+        if max_age_steps is None or self.promotion_policy is None:
+            return max_age_steps
+        return max_age_steps + self.promotion_policy.slack_steps
+
     def get_last_target_weight_already_generated(self) -> int:
         with self._lock:
             return self.last_target_weight_already_generated
@@ -188,21 +278,27 @@ class ReplayBufferImpl(ReplayBufferProtocol):
     ) -> Optional[dict[str, Any]]:
         """Sample per-prompt trajectory groups intended for the current training step.
 
-        Only returns trajectories with target_weight_version == current_weight_version.
+        Returns trajectories with target_weight_version == current_weight_version.
         If insufficient trajectories are available, returns None to stall training
         until the remaining trajectories are generated. This ensures no trajectory
         loses its last chance to be used for its intended training step.
 
+        Under a ``PromotionPolicy`` the step additionally pulls ready groups
+        stamped for later steps to cover its stragglers, vacating those stamps
+        for the stragglers to claim on arrival. See ``PromotionPolicy``.
+
         Returns:
-            Dictionary with 'trajectories' and 'avg_trajectory_age' keys, or None if insufficient data
+            Dictionary with 'trajectories', 'avg_trajectory_age' and
+            'num_promoted_groups' keys, or None if insufficient data
         """
         with self._lock:
             if not self.trajectories:
                 return None
 
             total_trajectories = len(self.trajectories)
+            age_window = self._age_window(max_age_steps)
             print("🔍 ReplayBuffer sampling debug:")
-            print(f"   {current_weight_version=}, {max_age_steps=}")
+            print(f"   {current_weight_version=}, {max_age_steps=}, {age_window=}")
             print(f"   {self.trajectory_versions=}")
 
             # For debugging: check for unexpected old trajectories
@@ -211,7 +307,7 @@ class ReplayBufferImpl(ReplayBufferProtocol):
 
             # Compute minimum valid version based on age window
             # max_age_steps=1 means trajectories from the last 1 step are valid
-            min_valid_version = max(0, current_weight_version - max_age_steps)
+            min_valid_version = max(0, current_weight_version - age_window)
             print(f"   {min_valid_version=}")
 
             # Evict old trajectories that are beyond the age window. This can
@@ -249,8 +345,8 @@ class ReplayBufferImpl(ReplayBufferProtocol):
                 )
                 return None
 
-            # Only select trajectories intended for the current training step
-            # This ensures no trajectory loses its "last chance" to be used for its intended step
+            # Prefer trajectories intended for the current training step, so no
+            # trajectory loses its "last chance" to be used for its intended step
             intended_indices = [
                 i
                 for i in valid_indices
@@ -261,20 +357,43 @@ class ReplayBufferImpl(ReplayBufferProtocol):
                 f"   🎯 Found {len(intended_indices)} trajectories intended for current step {current_weight_version}"
             )
 
-            # Stall training if we don't have enough trajectories intended for this step
-            if len(intended_indices) < num_prompt_groups:
+            # Select the trajectories intended for this step (FIFO within same target)
+            selected: list[int] = intended_indices[:num_prompt_groups]
+            promoted: list[int] = []
+            if self.promotion_policy is not None and len(selected) < num_prompt_groups:
+                # Buffer order is arrival order, so this takes the earliest
+                # completions among the lookahead groups.
+                lookahead_indices = [
+                    i
+                    for i in valid_indices
+                    if self.target_weight_versions[i] > current_weight_version
+                ]
+                promoted = lookahead_indices[: num_prompt_groups - len(selected)]
+                selected = selected + promoted
+
+            # Stall training if we still don't have enough trajectories for this step
+            if len(selected) < num_prompt_groups:
                 print(
-                    f"   ⏸️ STALLING: Need {num_prompt_groups} trajectories for step {current_weight_version}, but only {len(intended_indices)} are ready"
+                    f"   ⏸️ STALLING: Need {num_prompt_groups} trajectories for step {current_weight_version}, but only {len(selected)} are ready"
                 )
                 print(
-                    f"   ⏸️ Training will wait for remaining {num_prompt_groups - len(intended_indices)} trajectories to be generated"
+                    f"   ⏸️ Training will wait for remaining {num_prompt_groups - len(selected)} trajectories to be generated"
                 )
                 return None
 
-            # Select exactly the trajectories intended for this step (FIFO within same target)
-            selected: list[int] = intended_indices[:num_prompt_groups]
+            # Commit the swap only once the batch is known to be complete, so a
+            # stalled sample() leaves the stamp multiset untouched.
+            for i in promoted:
+                heapq.heappush(self.donated_targets, self.target_weight_versions[i])
+            if promoted:
+                print(
+                    f"   🔀 Promoted {len(promoted)} lookahead groups into step "
+                    f"{current_weight_version}; donated stamps now "
+                    f"{sorted(self.donated_targets)}"
+                )
+
             print(
-                f"   ✅ Selected {len(selected)} trajectories all intended for step {current_weight_version}"
+                f"   ✅ Selected {len(selected)} trajectories for step {current_weight_version}"
             )
 
             sampled_weights = [self.trajectory_versions[i] for i in selected]
@@ -286,7 +405,9 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             )
             print(f"📊 Average trajectory age: {avg_trajectory_age:.2f} steps")
             print(
-                f"🎯 All selected trajectories target step {current_weight_version} (100% target match)"
+                f"🎯 {len(selected) - len(promoted)}/{len(selected)} selected "
+                f"trajectories were stamped for step {current_weight_version}; "
+                f"{len(promoted)} promoted from later steps"
             )
 
             # Remove selected items in reverse order to maintain correct indices
@@ -313,6 +434,7 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             return {
                 "trajectories": sampled_items,
                 "avg_trajectory_age": avg_trajectory_age,
+                "num_promoted_groups": len(promoted),
             }
 
     def size(self) -> int:
@@ -326,6 +448,7 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             self.trajectories.clear()
             self.trajectory_versions.clear()
             self.target_weight_versions.clear()
+            self.donated_targets.clear()
 
     def state_dict(self) -> dict[str, Any]:
         """Return serializable state for checkpointing."""
@@ -338,6 +461,7 @@ class ReplayBufferImpl(ReplayBufferProtocol):
                     self.last_target_weight_already_generated
                 ),
                 "max_size": self.max_size,
+                "donated_targets": list(self.donated_targets),
             }
 
     def load_state_dict(
@@ -403,6 +527,9 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             self.last_target_weight_already_generated = state[
                 "last_target_weight_already_generated"
             ]
+            # Absent in checkpoints written before promotion existed.
+            self.donated_targets = list(state.get("donated_targets", []))
+            heapq.heapify(self.donated_targets)
 
             if current_training_step is not None and num_prompts_per_step is not None:
                 self._prepare_for_training_step(
@@ -501,12 +628,13 @@ class ReplayBufferImpl(ReplayBufferProtocol):
 
         Must be called while holding ``self._lock``.
         """
+        age_window = self._age_window(max_age_steps)
         indices_to_remove = [
             i
             for i, (trajectory_version, target) in enumerate(
                 zip(self.trajectory_versions, self.target_weight_versions)
             )
-            if not self._is_valid_for_target(trajectory_version, target, max_age_steps)
+            if not self._is_valid_for_target(trajectory_version, target, age_window)
         ]
         if not indices_to_remove:
             return
@@ -524,15 +652,16 @@ class ReplayBufferImpl(ReplayBufferProtocol):
 
         Must be called while holding ``self._lock``.
         """
+        # Use the same widened window as sample(), so the collector's dispatch
+        # accounting agrees with what training can actually select.
+        age_window = self._age_window(max_age_steps)
         return sum(
             1
             for trajectory_version, target in zip(
                 self.trajectory_versions, self.target_weight_versions
             )
             if target == target_step
-            and self._is_valid_for_target(
-                trajectory_version, target_step, max_age_steps
-            )
+            and self._is_valid_for_target(trajectory_version, target_step, age_window)
         )
 
     def _truncate_to_max_size(self, current_training_step: int | None = None) -> None:

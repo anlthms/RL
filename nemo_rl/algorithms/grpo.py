@@ -183,6 +183,17 @@ class AsyncGRPOConfig(BaseModel, extra="allow"):
     in_flight_weight_updates: bool = False
     # Recomputes the KV cache after weight updates.
     recompute_kv_cache_after_weight_updates: bool = False
+    # Let a training step consume early-completing prompt groups stamped for a
+    # later step, swapping stamps with its own stragglers. Bounds step wall
+    # time by the Nth-fastest of all outstanding groups instead of by the
+    # slowest of the step's own cohort. Stamps are permuted, not resized, so
+    # generation is neither wasted nor over-produced.
+    promote_early_groups: bool = False
+    # Extra trajectory-age headroom, in steps, for groups demoted by a swap.
+    # Only meaningful when promote_early_groups is true. Must be >= 1 there:
+    # steady-state lookahead already saturates max_trajectory_age_steps, so
+    # with 0 slack the first demotion evicts the group.
+    promotion_slack_steps: int = 1
 
 
 class RewardPenaltyTokenIdsConfig(BaseModel, extra="allow"):
@@ -3967,7 +3978,11 @@ def async_grpo_train(
             )
 
     # Import async utilities only when needed
-    from nemo_rl.algorithms.async_utils import AsyncTrajectoryCollector, ReplayBuffer
+    from nemo_rl.algorithms.async_utils import (
+        AsyncTrajectoryCollector,
+        PromotionPolicy,
+        ReplayBuffer,
+    )
 
     timer = Timer(context={"worker": "driver"})
     training_wall_start = time.perf_counter()
@@ -4051,8 +4066,29 @@ def async_grpo_train(
         num_prompts_per_step * max_trajectory_age_steps * late_arrival_slack
     )
 
+    async_grpo_config = master_config.grpo.async_grpo
+    promotion_policy = (
+        PromotionPolicy(slack_steps=async_grpo_config.promotion_slack_steps)
+        if async_grpo_config.promote_early_groups
+        else None
+    )
+    if promotion_policy is not None:
+        # Demotion pushes a straggler's target one step later per swap, so with
+        # zero slack the widened window equals the lookahead and the group is
+        # evicted the first time it is demoted.
+        assert promotion_policy.slack_steps >= 1, (
+            "grpo.async_grpo.promotion_slack_steps must be >= 1 when "
+            "promote_early_groups is true; got "
+            f"{promotion_policy.slack_steps}"
+        )
+        print(
+            f"🔀 Prompt-group promotion enabled (slack={promotion_policy.slack_steps} "
+            f"steps, effective max age="
+            f"{max_trajectory_age_steps + promotion_policy.slack_steps})"
+        )
+
     replay_buffer = ReplayBuffer.options(runtime_env=_replay_runtime_env).remote(
-        max_size=optimal_buffer_size
+        max_size=optimal_buffer_size, promotion_policy=promotion_policy
     )
 
     last_checkpoint_path = checkpointer.get_latest_checkpoint_path()
@@ -4442,6 +4478,7 @@ def async_grpo_train(
                     # Extract trajectories and metadata from sample result
                     trajectories = sample_result["trajectories"]
                     avg_trajectory_age = sample_result["avg_trajectory_age"]
+                    num_promoted_groups = sample_result["num_promoted_groups"]
 
                     print(
                         f"✅ Sampled {len(trajectories)} trajectory groups from buffer (avg age: {avg_trajectory_age:.2f} steps)"
@@ -5079,6 +5116,9 @@ def async_grpo_train(
             buffer_size_current = ray.get(replay_buffer.size.remote())
             metrics["buffer_size"] = buffer_size_current
             metrics["avg_trajectory_age"] = avg_trajectory_age
+            # How much of this step's batch came from swapped-in lookahead
+            # groups; 0 whenever promotion is disabled.
+            metrics["num_promoted_groups"] = num_promoted_groups
 
             if (
                 master_config.policy["generation"]

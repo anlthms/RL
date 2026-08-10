@@ -56,6 +56,13 @@ grpo:
     max_trajectory_age_steps: 1
     in_flight_weight_updates: false # Set to true to enable in-flight weight updates
     recompute_kv_cache_after_weight_updates: false # Set to true to recompute kv cache after weight updates
+    # Set to true to let a step consume early-completing prompt groups stamped for a
+    # later step, swapping stamps with its own stragglers. Bounds step wall time by the
+    # Nth-fastest outstanding group instead of the slowest of the step's own cohort.
+    promote_early_groups: false
+    # Extra trajectory-age headroom (in steps) for groups demoted by a swap.
+    # Must be >= 1 when promote_early_groups is true.
+    promotion_slack_steps: 1
 
 # Reward-zeroing penalties applied to NeMo-Gym rollout results.
 reward_penalties:

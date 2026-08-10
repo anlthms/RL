@@ -36,7 +36,10 @@ from nemo_rl.algorithms.async_utils import (
     AsyncTrajectoryCollector,
     ReplayBuffer,
 )
-from nemo_rl.algorithms.async_utils.replay_buffer import ReplayBufferImpl
+from nemo_rl.algorithms.async_utils.replay_buffer import (
+    PromotionPolicy,
+    ReplayBufferImpl,
+)
 from nemo_rl.algorithms.grpo import (
     AsyncGRPOConfig,
     GRPOConfig,
@@ -354,6 +357,168 @@ class TestReplayBufferImplCheckpointing:
                     "target_weight_versions": [1],
                     "last_target_weight_already_generated": 1,
                 }
+            )
+
+
+class TestReplayBufferImplPromotion:
+    """Swap-based promotion of early-completing prompt groups.
+
+    Exercised on the local implementation class: Ray actor execution is not
+    reliably attributed to source coverage.
+    """
+
+    def _buffer(self, slack_steps: int = 1, max_size: int = 32) -> ReplayBufferImpl:
+        return ReplayBufferImpl(
+            max_size=max_size,
+            promotion_policy=PromotionPolicy(slack_steps=slack_steps),
+        )
+
+    @staticmethod
+    def _add(
+        buffer: ReplayBufferImpl, name: str, weight_version: int, target: int
+    ) -> None:
+        buffer.add({"batch": name, "rollout_metrics": {}}, weight_version, target)
+
+    def test_promotion_covers_stragglers_and_donates_their_stamps(self):
+        buffer = self._buffer()
+        # Step 1 is short one group; two lookahead groups are already ready.
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        self._add(buffer, "early_b", 1, 2)
+
+        result = buffer.sample(
+            num_prompt_groups=2, current_weight_version=1, max_age_steps=1
+        )
+
+        assert result is not None
+        assert [t["batch"] for t in result["trajectories"]] == ["own_a", "early_a"]
+        assert result["num_promoted_groups"] == 1
+        # The promoted group's stamp is now available to step 1's straggler.
+        assert buffer.donated_targets == [2]
+
+    def test_straggler_claims_donated_stamp_on_arrival(self):
+        buffer = self._buffer()
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        buffer.sample(num_prompt_groups=2, current_weight_version=1, max_age_steps=1)
+
+        # Step 1's straggler finally lands, after step 1 was already consumed.
+        self._add(buffer, "slow_a", 0, 1)
+
+        assert buffer.get_debug_info()["target_weight_versions"] == [2]
+        assert buffer.donated_targets == []
+
+    def test_stamp_multiset_is_permuted_not_resized(self):
+        buffer = self._buffer()
+        # Both targets get a full cohort of 3, as the collector would dispatch.
+        for i in range(2):
+            self._add(buffer, f"own_{i}", 0, 1)  # third is still generating
+        for i in range(3):
+            self._add(buffer, f"early_{i}", 1, 2)
+        assert buffer.get_trajectories_needed(2, 3, 2) == 0
+
+        # Step 1 needs 3 groups but only has 2 of its own: one gets promoted.
+        buffer.sample(num_prompt_groups=3, current_weight_version=1, max_age_steps=2)
+        # The displaced straggler arrives and inherits the vacated stamp.
+        self._add(buffer, "slow_0", 0, 1)
+
+        # Target 2 still has exactly the 3 groups the collector dispatched for
+        # it, so get_trajectories_needed reports no shortfall to gap-fill.
+        assert buffer.get_trajectories_needed(2, 3, 2) == 0
+
+    def test_promotion_does_not_fire_when_own_cohort_is_complete(self):
+        buffer = self._buffer()
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "own_b", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+
+        result = buffer.sample(
+            num_prompt_groups=2, current_weight_version=1, max_age_steps=1
+        )
+
+        assert result is not None
+        assert result["num_promoted_groups"] == 0
+        assert buffer.donated_targets == []
+        assert buffer.get_debug_info()["target_weight_versions"] == [2]
+
+    def test_stalled_sample_leaves_stamps_untouched(self):
+        buffer = self._buffer()
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+
+        # Needs 3, only 2 exist anywhere: the step must stall without
+        # committing a partial swap.
+        assert (
+            buffer.sample(
+                num_prompt_groups=3, current_weight_version=1, max_age_steps=1
+            )
+            is None
+        )
+        assert buffer.donated_targets == []
+        assert buffer.get_debug_info()["target_weight_versions"] == [1, 2]
+
+    def test_slack_keeps_a_demoted_straggler_selectable(self):
+        buffer = self._buffer(slack_steps=1)
+        # Generated at version 0 and stamped for step 1 (age == max_age_steps),
+        # so without slack a single demotion would push it out of the window.
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        buffer.sample(num_prompt_groups=2, current_weight_version=1, max_age_steps=1)
+        self._add(buffer, "slow_a", 0, 1)  # demoted to target 2
+        self._add(buffer, "own_b", 2, 2)
+
+        result = buffer.sample(
+            num_prompt_groups=2, current_weight_version=2, max_age_steps=1
+        )
+
+        assert result is not None
+        assert sorted(t["batch"] for t in result["trajectories"]) == [
+            "own_b",
+            "slow_a",
+        ]
+
+    def test_promotion_disabled_by_default_keeps_strict_target_matching(self):
+        buffer = ReplayBufferImpl(max_size=32)
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+
+        assert (
+            buffer.sample(
+                num_prompt_groups=2, current_weight_version=1, max_age_steps=1
+            )
+            is None
+        )
+        assert buffer.donated_targets == []
+
+    def test_hopeless_straggler_keeps_its_stamp_and_is_gap_filled(self):
+        buffer = self._buffer()
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        buffer.sample(num_prompt_groups=2, current_weight_version=1, max_age_steps=1)
+        # Consume the donated stamp with the first straggler...
+        self._add(buffer, "slow_a", 0, 1)
+        # ...so a second, even later straggler finds no slot to claim.
+        self._add(buffer, "slow_b", 0, 1)
+
+        assert buffer.donated_targets == []
+        assert buffer.get_debug_info()["target_weight_versions"] == [2, 1]
+
+    def test_donated_stamps_survive_checkpoint_round_trip(self):
+        buffer = self._buffer()
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        buffer.sample(num_prompt_groups=2, current_weight_version=1, max_age_steps=1)
+        state = buffer.state_dict()
+
+        restored = self._buffer()
+        restored.load_state_dict(state)
+
+        assert restored.donated_targets == [2]
+
+    def test_rejects_negative_slack(self):
+        with pytest.raises(ValueError, match="slack_steps must be non-negative"):
+            ReplayBufferImpl(
+                max_size=4, promotion_policy=PromotionPolicy(slack_steps=-1)
             )
 
 
