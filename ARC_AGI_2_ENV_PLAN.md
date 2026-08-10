@@ -526,7 +526,7 @@ Controls confirming the machinery is healthy elsewhere:
 | nanov3 + gym (async colo & non-colo) | true / 4 | **1.02 – 1.04** | rewards 0.33–0.64 |
 | qwen3-1.7B + math (19–41 steps) | true / 4 | **1.0 – 1.1** | rewards 0.40–0.80 |
 | qwen3-1.7B + ARC | true / 4 | **1e5 – 1e15** | collapse by step 20 |
-| qwen3-1.7B + ARC | false / 1 | 170 (60 steps; ≤4.5 over the first 12) | stable, accuracy 0.024 → 0.190 |
+| qwen3-1.7B + ARC | false / 1 | 170 (60 steps) | stable, accuracy 0.024 → 0.190 (superseded — see below) |
 
 Math and gym policies start already well-formed and move slowly, so their behavior logprobs stay
 close to current. ARC's do not.
@@ -540,16 +540,42 @@ Two hypotheses tested and **rejected**:
 - *Chunked prefill misaligns logprobs for ARC's long prompts* (job 6014907,
   `enable_chunked_prefill: false`): still exploded at step 9. Prompt length is not the mechanism.
 
-**Conclusion.** `in_flight_weight_updates: false` + `max_trajectory_age_steps: 1` is the right
-setting *for this workload* because ARC's early training is a large, fast distribution shift, and
-it is a workload property rather than a defect in the async implementation. Existing async recipes
-need no change. Note `grpo_nanov3.yaml` already ships `max_trajectory_age_steps: 1` for the gym
-recipe; only `nanov3_base.yaml` uses age 4, and its measured error stays at ~1.02.
+**The ratio stays unbiased across a refit.** An earlier draft claimed a straddling sequence has "no
+behavior policy" and that IS therefore cannot correct it. That is wrong. The ratio is per *token*,
+and the recorded `generation_logprob` for a post-refit token is the probability of the distribution
+that actually sampled it — new weights over a stale KV cache. Odd proposal distribution, still a
+valid one. The pathology is variance, not bias, so the fix belongs at the drift, not at the
+collector.
 
-The one thing worth revisiting is that a fast-moving policy silently degrading is hard to notice
-when `CMP=1` turns validation off — the async nanov3 comparisons were throughput-focused, and
-their healthy `token_mult_prob_error` is the evidence that they were fine, not the absence of a
-validation curve.
+### Controlling the drift instead (async settings restored)
+
+Three controls, each with `in_flight_weight_updates: true` and `max_trajectory_age_steps: 4`
+restored, 2 nodes, 40 steps:
+
+| control | max `token_mult_prob_error` | outcome |
+|---|---|---|
+| **`lr` 5e-6 → 2e-6** | 3.8e4 (steady ~1.0) | reward 0.15–0.19 sustained |
+| `ratio_clip` 0.2 → 0.1 | 2.4e13 | reward swings 0.03–0.26 |
+| `seq_logprob_error_threshold: 1.5` | ~1.1 after masking | masks **238 of 256** sequences/step by step 20 |
+
+The clip bounds the surrogate ratio but not how far the weights move; the learning rate bounds the
+drift itself. Sequence masking only "works" by discarding 93% of the batch.
+
+**Confirmation** (job 6029953, 8 nodes, 60 steps, async at defaults + `lr` 2e-6):
+
+| step | 0 | 20 | 30 | 40 | 60 |
+|---|---|---|---|---|---|
+| accuracy | 0.0296 | 0.1129 | 0.0513 | 0.1857 | 0.1819 |
+| cell_match | 0.2176 | 0.3930 | 0.2914 | 0.5544 | 0.5559 |
+| format_valid | 0.5116 | 0.7907 | 0.5174 | 0.9709 | 0.9419 |
+
+Matches the throttled-async result (0.190 / 0.560 / 0.977) while the collector keeps running four
+steps ahead — **27 minutes versus 46**. The step-30 dip recovers fully by step 40. `lr: 2.0e-6` is
+now in `env_arc.yaml`; the async overrides were reverted.
+
+**Conclusion.** Nothing is wrong with the async machinery, and existing recipes need no change.
+ARC needed a smaller step size because its early training rewrites the output distribution; the
+right lever was the learning rate, not the collector.
 
 ## 10. How the CoT actually evolves (job 6015119)
 
