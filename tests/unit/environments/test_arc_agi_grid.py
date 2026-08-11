@@ -4,6 +4,7 @@ import pytest
 
 from nemo_rl.environments.arc_agi_grid import (
     RewardWeights,
+    best_alignment_cell_accuracy,
     color_recall,
     edit_similarity,
     extract_answer_grid,
@@ -222,6 +223,54 @@ class TestScoreResponse:
             assert exact["reward"] > score(answer(wrong), target)[
                 "reward"
             ]
+
+
+class TestBestAlignmentCellAccuracy:
+    def test_identical(self):
+        grid = [[1, 2], [3, 4]]
+        assert best_alignment_cell_accuracy(grid, grid) == 1.0
+
+    def test_equal_shapes_have_exactly_one_placement(self):
+        # Valid mode over equal shapes is a single position, so this must agree
+        # with the centered overlay by construction -- the majority of real rows.
+        pred, target = [[1, 2], [3, 9]], [[1, 2], [3, 4]]
+        assert best_alignment_cell_accuracy(pred, target) == overlay_cell_accuracy(
+            pred, target
+        )
+
+    def test_finds_the_offset_the_centered_overlay_misses(self):
+        # A 1x2 patch that matches the right end of a 1x3 target. Centering
+        # floors the offset to 0, lands the patch on the left, and scores this
+        # exactly-right-but-shifted answer a flat zero. The search finds 2/3.
+        target = [[9, 1, 2]]
+        pred = [[1, 2]]
+        assert overlay_cell_accuracy(pred, target) == 0.0
+        assert best_alignment_cell_accuracy(pred, target) == pytest.approx(2 / 3)
+
+    def test_oversized_prediction_is_still_penalized(self):
+        # The max-area denominator has to survive the change of alignment, or
+        # padding out to a giant grid becomes free.
+        target = [[5]]
+        pred = [[5, 5, 5], [5, 5, 5], [5, 5, 5]]
+        assert best_alignment_cell_accuracy(pred, target) == pytest.approx(1 / 9)
+
+    def test_mixed_dimensions_fall_back_to_the_centered_overlay(self):
+        # Taller but narrower: no valid placement exists in either direction.
+        pred, target = [[1], [2], [3]], [[1, 2]]
+        assert best_alignment_cell_accuracy(pred, target) == overlay_cell_accuracy(
+            pred, target
+        )
+
+    def test_never_scores_below_the_centered_overlay_when_valid_mode_applies(self):
+        rng = random.Random(7)
+        for _ in range(200):
+            th, tw = rng.randint(1, 6), rng.randint(1, 6)
+            ph, pw = rng.randint(1, th), rng.randint(1, tw)
+            target = [[rng.randint(0, 3) for _ in range(tw)] for _ in range(th)]
+            pred = [[rng.randint(0, 3) for _ in range(pw)] for _ in range(ph)]
+            assert best_alignment_cell_accuracy(pred, target) >= overlay_cell_accuracy(
+                pred, target
+            ) - 1e-9
 
 
 class TestEditSimilarity:

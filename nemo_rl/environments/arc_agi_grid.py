@@ -13,13 +13,17 @@
 # limitations under the License.
 """Grid serialization, answer extraction, and reward scoring for ARC-AGI tasks.
 
-Deliberately stdlib-only so the parser and scorer can be exercised without Ray,
-torch, or a GPU -- they are the two pieces most likely to silently starve or
-inflate a training run, so they need to be cheap to test.
+Deliberately free of Ray, torch, and any GPU dependency so the parser and scorer
+can be exercised on their own -- they are the two pieces most likely to silently
+starve or inflate a training run, so they need to be cheap to test. numpy is the
+one exception, for the sliding alignment search in
+``best_alignment_cell_accuracy``.
 """
 
 import re
 from dataclasses import dataclass
+
+import numpy as np
 
 # An ARC grid: rectangular, symbols 0-9, at most 30x30.
 Grid = list[list[int]]
@@ -162,6 +166,47 @@ def overlay_cell_accuracy(pred: Grid, target: Grid) -> float:
                 matches += 1
 
     return matches / max(pred_h * pred_w, target_h * target_w)
+
+
+def best_alignment_cell_accuracy(pred: Grid, target: Grid) -> float:
+    """Cell agreement at the best valid-mode placement of one grid in the other.
+
+    This is the valid-mode cross-correlation of the two grids: slide the smaller
+    entirely inside the larger and count agreeing cells at each placement. Colors
+    are labels, not magnitudes, so the per-cell operator is equality rather than
+    a product -- one-hot the two grids and it is exactly a 3D correlation, since
+    a product summed over one-hot channels *is* the equality indicator.
+
+    Preferred over ``overlay_cell_accuracy`` because that function has to pick an
+    alignment, and ``(h_t - h_p) // 2`` decides every odd-sized near-miss by a
+    coin flip. Here the alignment is chosen rather than assumed. When the shapes
+    are equal -- 123 of the 172 evaluation rows -- there is exactly one valid
+    placement and the two agree by construction.
+
+    The denominator stays ``max`` of the two areas, so a prediction padded out to
+    cover the target still cannot buy a high score. Falls back to the centered
+    overlay when neither grid fits inside the other (one taller, the other
+    wider), where valid mode has no placement at all.
+    """
+    pred_h, pred_w = grid_shape(pred)
+    target_h, target_w = grid_shape(target)
+
+    if pred_h <= target_h and pred_w <= target_w:
+        small, big = np.array(pred), np.array(target)
+    elif target_h <= pred_h and target_w <= pred_w:
+        small, big = np.array(target), np.array(pred)
+    else:
+        return overlay_cell_accuracy(pred, target)
+
+    small_h, small_w = small.shape
+    big_h, big_w = big.shape
+    denominator = max(pred_h * pred_w, target_h * target_w)
+    best = 0
+    for row in range(big_h - small_h + 1):
+        for col in range(big_w - small_w + 1):
+            window = big[row : row + small_h, col : col + small_w]
+            best = max(best, int(np.count_nonzero(small == window)))
+    return best / denominator
 
 
 def color_recall(pred: Grid, target: Grid) -> float:
@@ -308,12 +353,12 @@ def score_response(
             "copied_input": 0.0,
         }
 
-    copy_cell = overlay_cell_accuracy(test_input, target)
+    copy_cell = best_alignment_cell_accuracy(test_input, target)
     copy_edit = edit_similarity(test_input, target)
 
     terms = {
         "grid_match": float(pred == target),
-        "cell_match": overlay_cell_accuracy(pred, target),
+        "cell_match": best_alignment_cell_accuracy(pred, target),
         "edit_similarity": edit_similarity(pred, target),
         "color_recall": color_recall(pred, target),
         "extraneous_colors": extraneous_color_fraction(pred, target),
