@@ -21,7 +21,10 @@ Work through the puzzle in this order, then answer.
 4. Test the rule: apply it to each example input and compare the grid you get
    against that example's actual output. If any example disagrees, say which
    one and how, revise the rule, and test it again.
-5. Apply the final rule to the test input.
+5. Apply the final rule to the test input and write the resulting grid between
+   <answer> and </answer>. Use exactly the format of the grids above: one row
+   per line, cells separated by single spaces, at most 30 rows and 30 cells per
+   row. Do not put the answer grid in a code block, and do not write the whole
+   grid on one line.
 
-Give the resulting grid between <answer> and </answer>, in the same format as
-the grids above: one row per line, cells separated by single spaces.
+Every response must end with the <answer> block.
