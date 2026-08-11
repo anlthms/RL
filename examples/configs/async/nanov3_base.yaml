@@ -5,6 +5,11 @@ grpo:
     enabled: true
     in_flight_weight_updates: true
     max_trajectory_age_steps: 4
+    # Swap early-completing prompt groups into the current step (see
+    # PromotionPolicy). Declared here so either arm can set it without a
+    # Hydra '+' append.
+    promote_early_groups: false
+    promotion_slack_steps: 1
   num_prompts_per_step: 64
 
 loss_fn:
