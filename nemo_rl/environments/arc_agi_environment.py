@@ -44,10 +44,23 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
     produces no gradient at all. These terms make two wrong answers
     distinguishable.
 
+    Both similarity terms are paid on their gain over echoing the test input
+    rather than on their absolute value. Scored absolutely, a copy of the input
+    earns ~0.61 cell accuracy on the ARC-AGI-2 evaluation split -- more than any
+    run has yet earned by reasoning -- and training duly converged on the echo
+    (58% of validation answers by step 60 of job 6041201). Measured against a
+    copy of the same task's input, an echo is worth exactly zero.
+
     Attributes:
         exact_weight: Weight on exact grid match. Kept dominant so that shaping
             can never be a cheaper path to reward than solving the task.
-        cell_weight: Weight on centered-overlay cell accuracy.
+        cell_weight: Weight on centered-overlay cell accuracy, scored as gain
+            over the copy-the-input baseline.
+        edit_weight: Weight on 1 - normalized edit distance, likewise scored as
+            gain over the copy baseline. Complements the overlay term, which
+            compares fixed positions and so writes off a prediction that is
+            correct but shifted by a row; edit distance charges that same
+            prediction for a single insertion.
         color_weight: Weight on the fraction of target colors present.
         extraneous_color_weight: Penalty weight on predicted colors absent from
             the target. Required alongside ``color_weight``, which is otherwise
@@ -58,6 +71,7 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
 
     exact_weight: float = 1.0
     cell_weight: float = 0.20
+    edit_weight: float = 0.10
     color_weight: float = 0.05
     extraneous_color_weight: float = 0.05
     shape_weight: float = 0.05
@@ -67,13 +81,16 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
 class ArcAgiEnvironmentMetadata(TypedDict):
     """Per-sample state carried through ``extra_env_info``.
 
-    ``target`` is set by the data processor; the scoring terms are written back
-    by ``step`` so ``global_post_process_and_metrics`` can report the reward
-    breakdown -- whether reward growth is real (exact match) or merely shaping
-    is the diagnostic this whole environment is built around.
+    ``target`` and ``test_input`` are set by the data processor; the scoring
+    terms are written back by ``step`` so ``global_post_process_and_metrics``
+    can report the reward breakdown -- whether reward growth is real (exact
+    match) or merely shaping is the diagnostic this whole environment is built
+    around. ``test_input`` is carried because the similarity terms are scored
+    as gain over echoing it, which needs the input at scoring time.
     """
 
     target: Grid
+    test_input: Grid
     task_id: str
     terms: dict[str, float] | None
 
@@ -93,6 +110,7 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         self.weights = RewardWeights(
             exact=cfg.exact_weight,
             cell=cfg.cell_weight,
+            edit=cfg.edit_weight,
             color=cfg.color_weight,
             extraneous=cfg.extraneous_color_weight,
             shape=cfg.shape_weight,
@@ -130,7 +148,9 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         # inline rather than fanning out to verifier actors the way the math
         # environment must for math-verify.
         all_terms = [
-            score_response(response, meta["target"], self.weights)
+            score_response(
+                response, meta["target"], meta["test_input"], self.weights
+            )
             for response, meta in zip(responses, metadata)
         ]
 
@@ -180,6 +200,12 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
             "accuracy": mean("grid_match"),
             "grid_match": mean("grid_match"),
             "cell_match": mean("cell_match"),
+            "cell_gain": mean("cell_gain"),
+            "edit_similarity": mean("edit_similarity"),
+            "edit_gain": mean("edit_gain"),
+            # The hack detector: the fraction of answers that are the test input
+            # echoed back. Rising here means the run is gaming the shaped terms.
+            "copied_input": mean("copied_input"),
             "color_recall": mean("color_recall"),
             "extraneous_colors": mean("extraneous_colors"),
             "shape_mismatch": mean("shape_mismatch"),

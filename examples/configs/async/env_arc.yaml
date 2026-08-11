@@ -91,8 +91,15 @@ env:
   arc_agi:
     # Dense terms exist to break degenerate GRPO groups; exact match stays
     # dominant so shaping is never the cheaper path. See ArcAgiEnvConfig.
+    #
+    # cell_weight and edit_weight are paid on the gain over echoing the test
+    # input, not on absolute similarity: an echo scores ~0.61 absolute cell
+    # accuracy on this eval split, which is more than any run has earned by
+    # reasoning, and job 6041201 duly converged on it (58% of validation
+    # answers by step 60). Against the copy baseline an echo is worth 0.
     exact_weight: 1.0
     cell_weight: 0.20
+    edit_weight: 0.10
     color_weight: 0.05
     extraneous_color_weight: 0.05
     shape_weight: 0.05

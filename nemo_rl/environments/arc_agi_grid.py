@@ -29,6 +29,9 @@ ANSWER_CLOSE = "</answer>"
 MAX_GRID_DIM = 30
 NUM_COLORS = 10
 
+# Row boundary marker for edit distance. Outside 0-9 so it can never match a cell.
+_ROW_SENTINEL = -1
+
 _ANSWER_BLOCK_RE = re.compile(
     re.escape(ANSWER_OPEN) + r"(.*?)" + re.escape(ANSWER_CLOSE), re.DOTALL
 )
@@ -46,6 +49,7 @@ class RewardWeights:
 
     exact: float
     cell: float
+    edit: float
     color: float
     extraneous: float
     shape: float
@@ -178,6 +182,81 @@ def extraneous_color_fraction(pred: Grid, target: Grid) -> float:
     return len(pred_colors - target_colors) / len(pred_colors)
 
 
+def _flatten(grid: Grid) -> list[int]:
+    """Flatten a grid to a cell sequence with a sentinel between rows.
+
+    The row sentinel is what makes edit distance shape-aware: without it,
+    dropping a row and shifting every subsequent cell one place left would look
+    like a handful of substitutions instead of a deleted row.
+    """
+    sequence: list[int] = []
+    for index, row in enumerate(grid):
+        if index:
+            sequence.append(_ROW_SENTINEL)
+        sequence.extend(row)
+    return sequence
+
+
+def _levenshtein(left: list[int], right: list[int]) -> int:
+    """Edit distance between two cell sequences, two-row DP."""
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+
+    previous = list(range(len(right) + 1))
+    for i, left_cell in enumerate(left, start=1):
+        current = [i]
+        for j, right_cell in enumerate(right, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (left_cell != right_cell),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def edit_similarity(pred: Grid, target: Grid) -> float:
+    """1 - normalized edit distance between the two grids, in [0, 1].
+
+    Complements ``overlay_cell_accuracy``, which compares cells at fixed
+    positions and so scores a prediction that is right but shifted by one row as
+    almost entirely wrong. Edit distance charges that same prediction for one
+    insertion. Nothing here has to be differentiable, so the two can simply be
+    added: they disagree exactly on the near-misses that matter.
+
+    Cost is O(area^2), which is 930^2 only for a 30x30 pair; real ARC test grids
+    are far smaller and the typical case is a few thousand operations.
+    """
+    left, right = _flatten(pred), _flatten(target)
+    return 1.0 - _levenshtein(left, right) / max(len(left), len(right))
+
+
+def gain_over_baseline(score: float, baseline: float) -> float:
+    """Rescale an absolute score to its improvement over a baseline, into [-1, 1].
+
+    ``0`` means "no better than the baseline", ``1`` means perfect, negative
+    means worse than the baseline. Both directions are normalized by the room
+    available in that direction, so a task where the baseline is already 0.95
+    is not quietly worth twenty times less than one where it is 0.05.
+
+    This is what stops copying the input from paying. An echo scores ~0.61 cell
+    accuracy averaged over the ARC-AGI-2 evaluation split -- more than any run
+    so far has earned -- because ARC grids are mostly background and the
+    background usually survives the transformation. Measured against a copy of
+    that same task's input, an echo is worth exactly zero.
+    """
+    if score >= baseline:
+        headroom = 1.0 - baseline
+        return 1.0 if headroom <= 0.0 else (score - baseline) / headroom
+    return (score - baseline) / baseline if baseline > 0.0 else -1.0
+
+
 def shape_mismatch(pred: Grid, target: Grid) -> float:
     """Normalized magnitude of the shape error, in [0, 1]."""
     pred_h, pred_w = grid_shape(pred)
@@ -187,45 +266,70 @@ def shape_mismatch(pred: Grid, target: Grid) -> float:
 
 
 def score_response(
-    response: str, target: Grid, weights: RewardWeights
+    response: str, target: Grid, test_input: Grid, weights: RewardWeights
 ) -> dict[str, float]:
     """Score one model response against the target grid.
 
     Only the extracted grid is scored -- the reasoning that precedes it is never
     inspected, so it is free to be unreadable.
 
+    The two similarity terms are paid on the *gain over echoing ``test_input``*,
+    not on their absolute value, because absolute similarity to an ARC target is
+    something a copy of the input already earns most of. Their raw values are
+    still returned, both as the honest metric to report and so a run can be
+    compared against the ones scored the old way.
+
     Returns the total plus every term separately. The breakdown is the primary
     diagnostic for whether reward growth is real (exact match) or shaping.
     """
     pred = extract_answer_grid(response)
     if pred is None:
-        # Charge the penalty terms in full and grant no format credit. This puts
-        # the unparseable floor strictly below the worst parseable answer (whose
-        # reward bottoms out at ``format - extraneous - shape``), so emitting
-        # *something* well formed is always an improvement. Without that gap the
-        # format term cannot bootstrap: at step 0, when nothing is solved, it is
-        # the only reward difference the policy can act on.
+        # Charge every penalty in full and grant no format credit. This puts the
+        # unparseable floor strictly below the worst parseable answer, which
+        # bottoms out one format bonus above it, so emitting *something* well
+        # formed is always an improvement. Without that gap the format term
+        # cannot bootstrap: at step 0, when nothing is solved, it is the only
+        # reward difference the policy can act on. Note the gain terms reach -1,
+        # so they belong in this floor -- otherwise a badly-wrong parseable
+        # answer would score below garbage and the ordering would invert.
         return {
-            "reward": -(weights.extraneous + weights.shape),
+            "reward": -(
+                weights.cell + weights.edit + weights.extraneous + weights.shape
+            ),
             "grid_match": 0.0,
             "cell_match": 0.0,
+            "cell_gain": -1.0,
+            "edit_similarity": 0.0,
+            "edit_gain": -1.0,
             "color_recall": 0.0,
             "extraneous_colors": 1.0,
             "shape_mismatch": 1.0,
             "format_valid": 0.0,
+            "copied_input": 0.0,
         }
+
+    copy_cell = overlay_cell_accuracy(test_input, target)
+    copy_edit = edit_similarity(test_input, target)
 
     terms = {
         "grid_match": float(pred == target),
         "cell_match": overlay_cell_accuracy(pred, target),
+        "edit_similarity": edit_similarity(pred, target),
         "color_recall": color_recall(pred, target),
         "extraneous_colors": extraneous_color_fraction(pred, target),
         "shape_mismatch": shape_mismatch(pred, target),
         "format_valid": 1.0,
+        # Not scored. Logged because "is the policy converging on an echo" is
+        # the question this whole reward change exists to answer.
+        "copied_input": float(pred == test_input),
     }
+    terms["cell_gain"] = gain_over_baseline(terms["cell_match"], copy_cell)
+    terms["edit_gain"] = gain_over_baseline(terms["edit_similarity"], copy_edit)
+
     terms["reward"] = (
         weights.exact * terms["grid_match"]
-        + weights.cell * terms["cell_match"]
+        + weights.cell * terms["cell_gain"]
+        + weights.edit * terms["edit_gain"]
         + weights.color * terms["color_recall"]
         - weights.extraneous * terms["extraneous_colors"]
         - weights.shape * terms["shape_mismatch"]

@@ -457,6 +457,9 @@ def arc_agi_data_processor(
     )
     extra_env_info = {
         "target": datum_dict["target"],
+        # The environment scores the similarity terms as gain over echoing the
+        # test input, so it needs the input itself, not just the target.
+        "test_input": datum_dict["test_input"],
         "task_id": datum_dict["task_id"],
         "terms": None,
     }
