@@ -1,0 +1,5 @@
+idx	branch	commit	arm	wandb_id	jobid	steps_2h	samples_hr	tok_sec_e2e	mean_gen_len	sec_step	expgen_median	expgen_mean	buffer_median	avg_age	reward_median	promoted_per_step	status	notes
+0	async_colo_promote	d623fdee	promoff (matched control)	yer1ci5y	6040074	31	33481	52271	5620	220.2	2.0	121.6	361.5	3.7	0.6	0	ref	same-day control; bimodal stall distribution
+1	async_colo_promote	d623fdee	promon (uncapped)	gngsnntg	6037419	30	37998	53041	5025	194.0	98.5	103.6	22.0	1.4	0.6	96.1	keep	reserve cannibalized; escalates to 128/128
+2	async_colo_promote	724d3e9f	promcap128 (reserve floor 128)	4za9ytgk	6041012	34	41152	59281	5186	179.2	90.7	88.5	155.0	2.4	0.6	84.7	best	+22.9% samples/hr, +13.4% tok/s vs control
+x	(historical)	-	corecheck 2026-07-31	e3z8rw7d	-	24	32502	60960	6752	226.8	2.1	60.6	265.7	3.6	0.4	0	discard	bad comparator: 6752 gen len vs 5620 today
