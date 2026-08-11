@@ -704,7 +704,68 @@ around 0.52-0.56: the policy is climbing toward the copy baseline, not past it.
 The prompt changes are not what caused this -- the baseline's 0.556 is below 0.6058 too -- but they
 do not fix it either. **The reward, not the prompt, is the next thing to change.**
 
-## 12. Open questions
+## 12. Copy-relative reward (job 6056499)
+
+Two changes, on `autoresearch/2026-08-10-arc-prompt/copy-relative-reward`:
+
+1. **Both similarity terms are paid on their gain over echoing the test input**, via
+   `gain_over_baseline(score, baseline)` -> [-1, 1], zero at the baseline, each direction normalized
+   by the room available in it so that solving an easy-baseline task pays the same 1.0 as solving a
+   hard-baseline one. An echo is worth exactly zero on both terms. This is a re-baselining rather
+   than a `pred == test_input` penalty: nothing is singled out, the zero point moves to where it
+   belongs.
+2. **An edit-distance term** (`edit_weight: 0.10`), `1 - levenshtein / max(len)` over the flattened
+   cells with a row sentinel between rows. Its value is that it *disagrees* with the centered
+   overlay: a prediction that is correct but shifted one row is nearly worthless to the overlay and
+   costs edit distance one insertion. The reward does not have to be differentiable, so the two can
+   simply be added.
+
+The unparseable floor moves to `-(cell + edit + extraneous + shape)`, since the gain terms reach -1
+and otherwise a badly wrong parseable answer would score below garbage, inverting the ordering the
+format bootstrap depends on.
+
+Vetted against job 6041201's 172 stored rollouts before spending GPU time -- the main risk of
+relative scoring is flattening reward into degenerate groups, and it does not: step-0 reward std is
+0.2243. A pure echo earns +0.084 rather than dominating; that residual is the format and
+color-recall floor any parseable answer gets.
+
+### It stopped the drift toward copying, and bought nothing else
+
+| step | 0 | 20 | 40 | 60 |
+|---|---|---|---|---|
+| `copied_input`, **absolute** reward (6041201) | 0.291 | 0.366 | 0.488 | **0.576** |
+| `copied_input`, **copy-relative** (6056499) | 0.291 | 0.343 | 0.384 | **0.401** |
+| `cell_match`, absolute | 0.359 | 0.493 | 0.517 | 0.525 |
+| `cell_match`, copy-relative | 0.418 | 0.489 | 0.542 | 0.515 |
+
+The monotone climb into the echo is gone: `copied_input` plateaus around 0.35-0.41 instead of
+rising through 0.58. Cell match is unchanged within noise, and `grid_match` is still 0.0000.
+
+**The metric that actually settles it is the fraction of answers strictly better than an echo:**
+
+| step | 0 | 20 | 40 | 60 |
+|---|---|---|---|---|
+| beats the echo, absolute reward | 0.076 | 0.076 | 0.064 | **0.041** |
+| beats the echo, copy-relative | 0.093 | 0.076 | 0.105 | **0.099** |
+| mean `cell_gain`, copy-relative | -0.315 | -0.190 | -0.137 | -0.165 |
+
+Under the old reward this fraction **declined** with training -- the run was actively learning to
+stop beating the echo. Under the new one it holds around 0.10, about 2.4x higher by step 60. So the
+change fixed the pathology it was aimed at.
+
+It did not, however, produce learning. The fraction is flat, not climbing, and mean `cell_gain`
+stays negative at -0.165: **the average answer is still worse than simply echoing the input.** Nine
+in ten answers fail to beat a strategy that requires no reasoning at all.
+
+That is the state of things. Across four runs the model has learned the output contract (format
+validity 0.43 -> 0.91), learned to ground its prose in the actual grid, and stopped drifting into
+the echo -- and has solved zero ARC-AGI-2 tasks. Every gain so far has been in presentation. The
+remaining levers are the ones §1 and §6 deferred: a synthetic curriculum of easy transformations
+that a 1.7B model can actually solve, so that `grid_match` has somewhere to move from, and expert
+iteration on whatever it does solve. Shaping the reward further looks exhausted -- two rounds of it
+have moved presentation and nothing else.
+
+## 13. Open questions
 
 1. **Eval-set size.** 120 tasks / 172 rows is small; step-to-step validation noise will swamp real
    movement. Consider holding out a slice of the 1000 training tasks as the online validation signal
