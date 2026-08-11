@@ -17,6 +17,7 @@ grpo:
     # Hydra '+' append.
     promote_early_groups: false
     promotion_slack_steps: 1
+    promotion_min_reserve_groups: 0
 
 loss_fn:
   use_importance_sampling_correction: true

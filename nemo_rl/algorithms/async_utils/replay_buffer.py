@@ -56,9 +56,20 @@ class PromotionPolicy:
     from being evicted before it reaches its reassigned target step. Without
     it, steady-state lookahead already saturates the age window and the first
     demotion would evict the group.
+
+    ``min_reserve_groups`` is a floor on the buffered lookahead left behind.
+    Uncapped promotion cannibalizes that reserve: borrowing from step T+1
+    leaves T+1 short, so it borrows too, and the system converges to promoting
+    the whole batch every step. The buffer then never accumulates and every
+    step waits on fresh completions instead of finding its cohort ready --
+    measured at 128/128 groups promoted, buffer residual ~15 vs ~266, and
+    exposed_generation median 2.1 s -> 98.5 s. With a floor, only genuine
+    surplus above the reserve is promotable, so the pipeline that makes most
+    steps cheap is preserved and promotion only covers the tail steps.
     """
 
     slack_steps: int
+    min_reserve_groups: int
 
 
 # Classes with @ray.remote can't be inherited from, so we split the implementation out.
@@ -78,6 +89,11 @@ class ReplayBufferImpl(ReplayBufferProtocol):
             raise ValueError(
                 f"promotion slack_steps must be non-negative, got "
                 f"{promotion_policy.slack_steps}"
+            )
+        if promotion_policy is not None and promotion_policy.min_reserve_groups < 0:
+            raise ValueError(
+                f"promotion min_reserve_groups must be non-negative, got "
+                f"{promotion_policy.min_reserve_groups}"
             )
         self.max_size = max_size
         # None disables promotion; the buffer then consumes only groups stamped
@@ -368,7 +384,15 @@ class ReplayBufferImpl(ReplayBufferProtocol):
                     for i in valid_indices
                     if self.target_weight_versions[i] > current_weight_version
                 ]
-                promoted = lookahead_indices[: num_prompt_groups - len(selected)]
+                # Only the surplus above the reserve floor is promotable, so
+                # promotion cannot cannibalize the pipeline it borrows from.
+                promotable = max(
+                    0,
+                    len(lookahead_indices) - self.promotion_policy.min_reserve_groups,
+                )
+                promoted = lookahead_indices[
+                    : min(num_prompt_groups - len(selected), promotable)
+                ]
                 selected = selected + promoted
 
             # Stall training if we still don't have enough trajectories for this step

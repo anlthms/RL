@@ -194,6 +194,11 @@ class AsyncGRPOConfig(BaseModel, extra="allow"):
     # steady-state lookahead already saturates max_trajectory_age_steps, so
     # with 0 slack the first demotion evicts the group.
     promotion_slack_steps: int = 1
+    # Floor on buffered lookahead groups that promotion may not consume. 0
+    # leaves promotion uncapped, which cannibalizes the reserve and makes every
+    # step wait on fresh completions; set to about num_prompts_per_step to keep
+    # one step of pipeline intact. See PromotionPolicy.
+    promotion_min_reserve_groups: int = 0
 
 
 class RewardPenaltyTokenIdsConfig(BaseModel, extra="allow"):
@@ -4068,7 +4073,10 @@ def async_grpo_train(
 
     async_grpo_config = master_config.grpo.async_grpo
     promotion_policy = (
-        PromotionPolicy(slack_steps=async_grpo_config.promotion_slack_steps)
+        PromotionPolicy(
+            slack_steps=async_grpo_config.promotion_slack_steps,
+            min_reserve_groups=async_grpo_config.promotion_min_reserve_groups,
+        )
         if async_grpo_config.promote_early_groups
         else None
     )
@@ -4084,7 +4092,8 @@ def async_grpo_train(
         print(
             f"🔀 Prompt-group promotion enabled (slack={promotion_policy.slack_steps} "
             f"steps, effective max age="
-            f"{max_trajectory_age_steps + promotion_policy.slack_steps})"
+            f"{max_trajectory_age_steps + promotion_policy.slack_steps}, "
+            f"min_reserve={promotion_policy.min_reserve_groups} groups)"
         )
 
     replay_buffer = ReplayBuffer.options(runtime_env=_replay_runtime_env).remote(

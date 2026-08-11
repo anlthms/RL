@@ -66,6 +66,9 @@ grpo:
     # Extra trajectory-age headroom (in steps) for groups demoted by a swap.
     # Must be >= 1 when promote_early_groups is true.
     promotion_slack_steps: 1
+    # Floor on buffered lookahead groups promotion may not consume. 0 leaves it
+    # uncapped; ~num_prompts_per_step keeps one step of pipeline intact.
+    promotion_min_reserve_groups: 0
 
 # Reward-zeroing penalties applied to NeMo-Gym rollout results.
 reward_penalties:

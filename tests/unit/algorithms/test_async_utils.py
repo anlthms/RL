@@ -367,10 +367,17 @@ class TestReplayBufferImplPromotion:
     reliably attributed to source coverage.
     """
 
-    def _buffer(self, slack_steps: int = 1, max_size: int = 32) -> ReplayBufferImpl:
+    def _buffer(
+        self,
+        slack_steps: int = 1,
+        max_size: int = 32,
+        min_reserve_groups: int = 0,
+    ) -> ReplayBufferImpl:
         return ReplayBufferImpl(
             max_size=max_size,
-            promotion_policy=PromotionPolicy(slack_steps=slack_steps),
+            promotion_policy=PromotionPolicy(
+                slack_steps=slack_steps, min_reserve_groups=min_reserve_groups
+            ),
         )
 
     @staticmethod
@@ -503,6 +510,38 @@ class TestReplayBufferImplPromotion:
         assert buffer.donated_targets == []
         assert buffer.get_debug_info()["target_weight_versions"] == [2, 1]
 
+    def test_reserve_floor_blocks_promotion_that_would_drain_lookahead(self):
+        # Two lookahead groups, floor of 2: nothing is surplus, so the step
+        # stalls rather than cannibalizing the reserve it borrows from.
+        buffer = self._buffer(min_reserve_groups=2)
+        self._add(buffer, "own_a", 0, 1)
+        self._add(buffer, "early_a", 1, 2)
+        self._add(buffer, "early_b", 1, 2)
+
+        assert (
+            buffer.sample(
+                num_prompt_groups=2, current_weight_version=1, max_age_steps=1
+            )
+            is None
+        )
+        assert buffer.donated_targets == []
+        assert buffer.get_debug_info()["target_weight_versions"] == [1, 2, 2]
+
+    def test_reserve_floor_allows_promotion_from_surplus(self):
+        buffer = self._buffer(min_reserve_groups=2)
+        self._add(buffer, "own_a", 0, 1)
+        for i in range(3):  # one more than the floor
+            self._add(buffer, f"early_{i}", 1, 2)
+
+        result = buffer.sample(
+            num_prompt_groups=2, current_weight_version=1, max_age_steps=1
+        )
+
+        assert result is not None
+        assert result["num_promoted_groups"] == 1
+        # The floor is intact: two lookahead groups remain buffered.
+        assert buffer.get_debug_info()["target_weight_versions"] == [2, 2]
+
     def test_donated_stamps_survive_checkpoint_round_trip(self):
         buffer = self._buffer()
         self._add(buffer, "own_a", 0, 1)
@@ -518,7 +557,8 @@ class TestReplayBufferImplPromotion:
     def test_rejects_negative_slack(self):
         with pytest.raises(ValueError, match="slack_steps must be non-negative"):
             ReplayBufferImpl(
-                max_size=4, promotion_policy=PromotionPolicy(slack_steps=-1)
+                max_size=4,
+                promotion_policy=PromotionPolicy(slack_steps=-1, min_reserve_groups=0),
             )
 
 

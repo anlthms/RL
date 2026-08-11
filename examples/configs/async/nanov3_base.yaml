@@ -10,6 +10,9 @@ grpo:
     # Hydra '+' append.
     promote_early_groups: false
     promotion_slack_steps: 1
+    # 0 = uncapped (cannibalizes the lookahead reserve); ~num_prompts_per_step
+    # keeps one step of pipeline intact.
+    promotion_min_reserve_groups: 0
   num_prompts_per_step: 64
 
 loss_fn:
