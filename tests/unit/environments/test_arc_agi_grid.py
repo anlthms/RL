@@ -26,30 +26,41 @@ def answer(text: str) -> str:
 
 class TestParseGrid:
     def test_well_formed(self):
+        assert parse_grid("0 1 2\n3 4 5") == [[0, 1, 2], [3, 4, 5]]
+
+    def test_contiguous_digits_still_accepted(self):
+        # We prompt for spaces, but a compact answer is still a well-formed
+        # grid -- rejecting it would discard reward signal over punctuation.
         assert parse_grid("012\n345") == [[0, 1, 2], [3, 4, 5]]
 
     def test_surrounding_whitespace_is_tolerated(self):
-        assert parse_grid("\n  012  \n  345  \n") == [[0, 1, 2], [3, 4, 5]]
+        assert parse_grid("\n  0 1 2  \n  3 4 5  \n") == [[0, 1, 2], [3, 4, 5]]
+
+    def test_irregular_inner_spacing_is_tolerated(self):
+        assert parse_grid("0  1\t2\n3 4  5") == [[0, 1, 2], [3, 4, 5]]
 
     @pytest.mark.parametrize(
         "text",
         [
             "",
             "   \n  ",
-            "012\n34",  # ragged
-            "01a\n345",  # non-digit
-            "0 1 2\n3 4 5",  # inner spaces make rows ragged/non-digit
+            "0 1 2\n3 4",  # ragged
+            "012\n34",  # ragged, compact form
+            "0 1 a\n3 4 5",  # non-digit
+            "01a\n345",  # non-digit, compact form
+            "0 12\n3 45",  # multi-digit cell
+            "0 1 2\n34",  # mixed forms, widths disagree
         ],
     )
     def test_malformed_is_rejected(self, text):
         assert parse_grid(text) is None
 
     def test_oversize_is_rejected(self):
-        assert parse_grid("\n".join("0" * 31 for _ in range(2))) is None
-        assert parse_grid("\n".join("0" * 2 for _ in range(31))) is None
+        assert parse_grid("\n".join(" ".join("0" * 31) for _ in range(2))) is None
+        assert parse_grid("\n".join(" ".join("0" * 2) for _ in range(31))) is None
 
     def test_max_size_is_accepted(self):
-        grid = parse_grid("\n".join("0" * 30 for _ in range(30)))
+        grid = parse_grid("\n".join(" ".join("0" * 30) for _ in range(30)))
         assert grid is not None and len(grid) == 30 and len(grid[0]) == 30
 
 
@@ -225,6 +236,9 @@ class TestRewardHacks:
 
 
 class TestSerialization:
+    def test_cells_are_space_delimited(self):
+        assert serialize_grid([[0, 1, 2], [3, 4, 5]]) == "0 1 2\n3 4 5"
+
     def test_round_trip_is_identity(self):
         rng = random.Random(0)
         for _ in range(200):
@@ -236,8 +250,12 @@ class TestSerialization:
             assert parse_grid(serialize_grid(grid)) == grid
 
     def test_prompt_layout_contains_every_pair_and_the_test_input(self):
-        pairs = [{"input": [[1]], "output": [[2]]}, {"input": [[3]], "output": [[4]]}]
-        prompt = format_task_prompt(pairs, [[5]])
+        pairs = [
+            {"input": [[1, 1]], "output": [[2, 2]]},
+            {"input": [[3, 3]], "output": [[4, 4]]},
+        ]
+        prompt = format_task_prompt(pairs, [[5, 6]])
         assert prompt.count("<example>") == 2
-        assert "<test_input>\n5\n</test_input>" in prompt
-        assert "<input>\n1\n</input>" in prompt and "<output>\n4\n</output>" in prompt
+        assert "<test_input>\n5 6\n</test_input>" in prompt
+        assert "<input>\n1 1\n</input>" in prompt
+        assert "<output>\n4 4\n</output>" in prompt

@@ -44,19 +44,24 @@ policy:
       # the model to describe the transformation, and those are the tokens GRPO
       # should be reinforcing.
       enable_thinking: false
-  # ARC prompts are large: the worst evaluation task is ~9.7k characters of
-  # grid content before the instruction, and grids tokenize close to 1:1. 32k
-  # leaves room for the reasoning the reward is trying to induce.
+  # ARC prompts are large, and space-delimiting the cells roughly doubled them:
+  # measured at the real Qwen3-1.7B tokenizer, p99 is 12.3k (training) / 14.9k
+  # (evaluation) tokens and the worst row in either split is 16593. Nothing
+  # overflows 32k, and 32768 - 16593 - 8192 still leaves headroom.
   # NOTE: launch_experiment.sh's CMP=1 preset hard-sets 16384 and is applied
   # after this layer -- do not combine CMP=1 with ENV=arc.
   max_total_sequence_length: 32768
   generation:
-    # Cap the response. The context is sized for the *prompt* (p99 7.8k
-    # tokens), not for unbounded reasoning: Qwen3 is a thinking model, and with
-    # the default 32768 budget rollouts run to the cap, so the async buffer
-    # never fills and no training step starts. 4096 leaves ample room for a
-    # transformation description plus a 30x30 answer grid (~930 tokens).
-    max_new_tokens: 4096
+    # Cap the response. The context is sized for the *prompt*, not for
+    # unbounded reasoning: with the default 32768 budget rollouts run to the
+    # cap, the async buffer never fills, and no training step ever starts.
+    #
+    # 8192 rather than 4096 because the prompt now asks the model to check its
+    # rule against every example before answering, which means re-deriving
+    # several grids. Running out of budget before reaching `<answer>` is a
+    # failure mode we have already hit once (every rollout at the reward floor,
+    # reward std 0.0), and it looks like a reward bug rather than a length one.
+    max_new_tokens: 8192
 
 data:
   _override_: true
@@ -95,3 +100,7 @@ env:
 
 logger:
   monitor_gpus: true
+  # Every validation chat is already written to `val_data_step<N>.jsonl` in the
+  # log dir; this additionally pretty-prints a few into the driver log, which is
+  # the fastest way to see what the prompt is actually producing.
+  num_val_samples_to_print: 4

@@ -53,8 +53,31 @@ class RewardWeights:
 
 
 def serialize_grid(grid: Grid) -> str:
-    """Render a grid as one line of digits per row."""
-    return "\n".join("".join(str(cell) for cell in row) for row in grid)
+    """Render a grid as one line per row, cells separated by single spaces.
+
+    The separator is not cosmetic: without it a row is a single run of digits
+    that the tokenizer merges into arbitrary multi-cell chunks, so cell
+    boundaries are invisible to the model. One space per cell costs prompt
+    length but makes every cell its own token.
+    """
+    return "\n".join(" ".join(str(cell) for cell in row) for row in grid)
+
+
+def _parse_row(row: str) -> list[int] | None:
+    """Parse one serialized row, accepting spaced or contiguous digits.
+
+    We serialize with spaces, but a model that answers in the compact form has
+    still produced a well-formed grid, and rejecting it would throw away reward
+    signal over punctuation.
+    """
+    if any(char.isspace() for char in row):
+        cells = row.split()
+        if not all(len(cell) == 1 and cell.isdigit() for cell in cells):
+            return None
+        return [int(cell) for cell in cells]
+    if not row.isdigit():
+        return None
+    return [int(char) for char in row]
 
 
 def parse_grid(text: str) -> Grid | None:
@@ -65,18 +88,18 @@ def parse_grid(text: str) -> Grid | None:
     over-permissive parser inflates reward, which is indistinguishable from
     learning until the run is long over.
     """
-    rows = [line.strip() for line in text.strip().splitlines()]
-    rows = [row for row in rows if row]
-    if not rows:
-        return None
-    width = len(rows[0])
-    if width == 0 or width > MAX_GRID_DIM or len(rows) > MAX_GRID_DIM:
+    lines = [line.strip() for line in text.strip().splitlines()]
+    lines = [line for line in lines if line]
+    if not lines or len(lines) > MAX_GRID_DIM:
         return None
     grid: Grid = []
-    for row in rows:
-        if len(row) != width or not row.isdigit():
+    for line in lines:
+        row = _parse_row(line)
+        if row is None or not row or len(row) > MAX_GRID_DIM:
             return None
-        grid.append([int(char) for char in row])
+        if grid and len(row) != len(grid[0]):
+            return None
+        grid.append(row)
     return grid
 
 

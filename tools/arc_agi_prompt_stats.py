@@ -19,15 +19,17 @@ time on a run that would silently mask every overlong sample.
 
 Usage:
     uv run tools/arc_agi_prompt_stats.py [--max-seq-length 32768]
+    uv run tools/arc_agi_prompt_stats.py --dump 3 --dump-file /tmp/arc_chats.txt
 """
 
 import argparse
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
 from nemo_rl.data.datasets.response_datasets.arc_agi import _load_split
 from nemo_rl.data.interfaces import TaskDataSpec
-from nemo_rl.environments.arc_agi_grid import format_task_prompt
+from nemo_rl.environments.arc_agi_grid import format_task_prompt, serialize_grid
 
 DEFAULT_DATA_DIR = "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025"
 
@@ -42,14 +44,24 @@ def main() -> None:
     parser.add_argument("--model-name", default="Qwen/Qwen3-1.7B")
     parser.add_argument("--prompt-file", default="examples/prompts/arc_agi.txt")
     parser.add_argument("--max-seq-length", type=int, default=32768)
+    parser.add_argument(
+        "--dump",
+        type=int,
+        default=0,
+        help="write this many fully rendered chats per split to --dump-file, "
+        "so the exact text the model sees can be eyeballed without a GPU run",
+    )
+    parser.add_argument("--dump-file", default="arc_agi_sample_chats.txt")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     task_spec = TaskDataSpec(task_name="arc_agi", prompt_file=args.prompt_file)
+    dumped: list[str] = []
 
     for split in ("training", "evaluation"):
         rows = _load_split(args.data_dir, split)
         lengths = []
+        dumped_this_split = 0
         for row in rows:
             body = format_task_prompt(row["train_pairs"], row["test_input"])
             message = tokenizer.apply_chat_template(
@@ -58,7 +70,19 @@ def main() -> None:
                 add_generation_prompt=True,
                 add_special_tokens=False,
             )
-            lengths.append(len(tokenizer(message, add_special_tokens=False)["input_ids"]))
+            token_ids = tokenizer(message, add_special_tokens=False)["input_ids"]
+            lengths.append(len(token_ids))
+
+            if dumped_this_split < args.dump:
+                dumped_this_split += 1
+                dumped.append(
+                    f"{'=' * 78}\n"
+                    f"split={split} task_id={row['task_id']} "
+                    f"prompt_tokens={len(token_ids)}\n"
+                    f"{'=' * 78}\n{message}\n"
+                    f"{'-' * 78}\nTARGET (not shown to the model):\n"
+                    f"{serialize_grid(row['target'])}\n"
+                )
 
         over = sum(length >= args.max_seq_length for length in lengths)
         print(f"\n{split}: {len(rows)} rows")
@@ -71,6 +95,10 @@ def main() -> None:
             f"({100 * over / len(rows):.2f}%) -- these get loss_multiplier=0"
         )
         print(f"  room left for the response at p99: {args.max_seq_length - percentile(lengths, 0.99)}")
+
+    if dumped:
+        Path(args.dump_file).write_text("\n".join(dumped))
+        print(f"\nwrote {len(dumped)} rendered chats to {args.dump_file}")
 
 
 if __name__ == "__main__":
