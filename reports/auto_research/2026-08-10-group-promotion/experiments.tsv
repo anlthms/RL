@@ -3,3 +3,6 @@ idx	branch	commit	arm	wandb_id	jobid	steps_2h	samples_hr	tok_sec_e2e	mean_gen_le
 1	async_colo_promote	d623fdee	promon (uncapped)	gngsnntg	6037419	30	37998	53041	5025	194.0	98.5	103.6	22.0	1.4	0.6	96.1	keep	reserve cannibalized; escalates to 128/128
 2	async_colo_promote	724d3e9f	promcap128 (reserve floor 128)	4za9ytgk	6041012	34	41152	59281	5186	179.2	90.7	88.5	155.0	2.4	0.6	84.7	best	+22.9% samples/hr, +13.4% tok/s vs control
 x	(historical)	-	corecheck 2026-07-31	e3z8rw7d	-	24	32502	60960	6752	226.8	2.1	60.6	265.7	3.6	0.4	0	discard	bad comparator: 6752 gen len vs 5620 today
+3	async_colo_promote	724d3e9f	tp1_off (dayaoarm, 2026-08-06)	dayaoarm	-	38	39158	61062	5614	188.3	13.8	118.7	361.0	3.7	0.6	0	ref	TP1/EP4 control; gen len matches same-day TP2 control
+4	async_colo_promote	724d3e9f	tp1_cap (TP1 + reserve floor 128)	l734rpro	6056338	35	41525	62303	5401	177.5	111.8	111.2	147.0	2.2	0.6	89.1	keep	promotion adds only +2.0% tok/s over tp1_off: not additive
+5	async_colo_promote	724d3e9f	tp1_cap attempt 1	n6twtq7r	6053811	0	-	-	-	-	-	-	-	-	-	0	crash	CUDA OOM in MoE expert-bias allreduce at step 0; config identical to dayaoarm; retried as idx 4
