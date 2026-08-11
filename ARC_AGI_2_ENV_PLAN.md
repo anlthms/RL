@@ -631,7 +631,80 @@ substitutions at step 0, hedging at step 10, plausible-but-incorrect row claims 
 exactly consistent with `grid_match = 0.0000` throughout: the model learned to produce a
 well-formed, on-topic, grounded answer, not to solve ARC.
 
-## 11. Open questions
+## 11. Grid-aware prompt (jobs 6040390, 6041201)
+
+Four changes to how a task is presented, on
+`autoresearch/2026-08-10-arc-prompt/grid-legend-and-verify`:
+
+1. **Cells are space-delimited** (`0 1 2` per row, not `012`). Without a separator a row is one
+   run of digits that the tokenizer merges into arbitrary multi-cell chunks, so cell boundaries --
+   the thing every ARC transformation operates on -- are invisible to the model. `parse_grid` still
+   accepts the compact form; rejecting a spaceless answer would discard reward over punctuation.
+2. **The prompt names the colors** (`0 = black ... 9 = maroon`). 0-9 are a palette, not magnitudes.
+3. **Describe the inputs and the outputs separately**, including what all the inputs share and what
+   all the outputs share -- the commonality across examples is where the rule lives.
+4. **Test the inferred rule against every example** and revise it if any disagrees.
+
+Prompt length roughly doubles from the spacing: p99 12316 (training) / 14930 (evaluation), max
+16593 at the real tokenizer. Nothing overflows 32768. `max_new_tokens` 4096 -> 8192, because step 4
+means re-deriving several grids and running out of budget before `<answer>` is a failure we already
+hit once (job 5984932) and misread as a reward bug.
+
+**The `<answer>` tags have to live inside step 5.** The first smoke (6040390) put step-0 format
+validity at 0.314, *below* the 0.512 the terser prompt started from. 95 of the 118 failures never
+emitted `<answer>`: they produced a correct-looking grid in a markdown code block as the last item
+of a five-part write-up, with the tag instruction stranded in a trailing paragraph. Folding the tags
+and the shape constraints into step 5 itself moved step-0 format validity 0.314 -> 0.663 and step-0
+accuracy -0.011 -> 0.092, with no other change.
+
+### Result: much better zero-shot, same place after 60 steps
+
+Job 6041201, 8 nodes, 60 steps, 40 min, against baseline 6029953:
+
+| step | cell_match | format_valid | accuracy | baseline accuracy |
+|---|---|---|---|---|
+| 0 | **0.3589** | 0.6628 | **0.0920** | 0.0296 |
+| 10 | 0.4457 | 0.7674 | 0.1296 | -- |
+| 20 | 0.4928 | 0.8372 | 0.1529 | 0.1129 |
+| 30 | 0.5170 | 0.8953 | 0.1675 | 0.0513 |
+| 40 | 0.5173 | 0.9244 | 0.1724 | 0.1857 |
+| 50 | 0.5309 | 0.9070 | 0.1735 | -- |
+| 60 | 0.5251 | 0.9012 | 0.1703 | 0.1819 |
+
+Step 0 is far stronger -- cell match 0.359 vs 0.218, +65% relative, before any training. Step 60 is
+a hair below the baseline (0.525 vs 0.556), which is inside the ±0.05 step-to-step swing 172
+evaluation rows produce. **The prompt buys a much better starting point and no higher ceiling.**
+`grid_match` is 0.0000 at every checkpoint, as in every prior run.
+
+### The finding that matters: the runs are learning to copy the input
+
+Per §4's own criterion, scoring the copy-the-input baseline over all 172 evaluation rows:
+
+```
+copy-the-input cell_match = 0.6058
+```
+
+**That is higher than any cell match either run ever reached** (0.525 new, 0.556 baseline). And the
+number of predictions *literally identical to the test input* grows monotonically with training:
+
+| step | 0 | 30 | 60 |
+|---|---|---|---|
+| answers identical to the test input | 50/172 | 79/172 | **99/172** |
+
+By step 60, 58% of validation answers are the test input echoed back. The reasoning degenerates to
+match: step-60 rule descriptions are formulaic hedging ("The exact rule is not explicitly stated,
+but it involves modifying the color patterns in a systematic way") wrapped around a copied grid.
+
+This reframes Milestone 2 and every accuracy number in §8. The 7.8x accuracy gain was the model
+learning (a) to emit a parseable grid and (b) to copy the input -- both of which the shaped reward
+pays for, neither of which is ARC. §4 anticipated exactly this and named the test; the test had
+simply never been run. It also explains why `grid_match` never moved and why cell match plateaus
+around 0.52-0.56: the policy is climbing toward the copy baseline, not past it.
+
+The prompt changes are not what caused this -- the baseline's 0.556 is below 0.6058 too -- but they
+do not fix it either. **The reward, not the prompt, is the next thing to change.**
+
+## 12. Open questions
 
 1. **Eval-set size.** 120 tasks / 172 rows is small; step-to-step validation noise will swamp real
    movement. Consider holding out a slice of the 1000 training tasks as the online validation signal
