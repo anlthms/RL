@@ -12,11 +12,13 @@ Branch: `async_arc`.
 
 ---
 
-> **Status, 2026-08-11 — start at §13.** The environment, reward, prompt, and data path are built and
-> have run four times end to end (§8, §11, §12). The model has learned the output contract and
-> nothing else: `grid_match` is **0.0000 at every checkpoint of every run**, so no gradient has ever
-> come from exact match. Two rounds of reward redesign moved presentation only. §13 is the current
-> plan — a synthetic task generator that produces solvable tasks so exact-match signal exists at all.
+> **Status, 2026-08-12 — the generator works; §13 is in progress.** The environment, reward, prompt,
+> and data path ran four times end to end (§8, §11, §12) with `grid_match` **0.0000 at every
+> checkpoint of every run** — no gradient ever came from exact match, and two rounds of reward
+> redesign moved presentation only. §13's synthetic ladder is now built and has run: M4.1 took
+> `grid_match` from 0.51 to **0.79** on level 0 in twenty steps, the first exact-match signal in the
+> campaign. M4.2 (levels 0-2, 8 nodes, 60 steps) is in flight. Real ARC-AGI-2 `grid_match` is still
+> 0.0000, and whether any of this transfers is M4.3's question.
 > §1-§7 are the original design; §8-§12 are results, and where they contradict the design the results
 > win — §3's prompt and §4's reward have both been superseded, as flagged in place. §14 is open.
 
@@ -1011,6 +1013,57 @@ queue behind, or displace, an experiment.
 Not yet run. M4.1 (the identity gate, `levels: [0]`, 2 nodes, ~20 steps, go at `grid_match > 0.9`)
 is the next step and must pass before anything else: if a 1.7B model cannot learn to copy a grid it
 is shown, the problem is in the data path, the prompt, or the parser.
+
+### M4.1 — the identity gate: **exact match finally moves** (job 6070328, 2 nodes, 20 steps, 30 min)
+
+| step | synth `grid_match` (level 0) | synth mean reward | real ARC `grid_match` | real ARC mean reward |
+|---|---|---|---|---|
+| 0 | 0.5116 | +0.628 | 0.0000 | -0.085 |
+| 10 | 0.6221 | +0.855 | 0.0000 | -0.020 |
+| 20 | **0.7907** | +1.110 | 0.0000 | -0.002 |
+
+**This is the result the phase was built to get.** Across the four runs of §8-§12, `grid_match` was
+0.0000 at every checkpoint of every run, so no gradient ever came from exact match. Here it starts
+at 0.51 and climbs to 0.79 in twenty steps. §13's premise -- that the missing ingredient was tasks
+the model can actually solve, not a fifth way to score near-misses -- holds.
+
+**The gate was `grid_match > 0.9` and we reached 0.7907, and I did not treat that as its failure.**
+The gate exists to catch a broken data path, prompt, or parser, and that failure looks like ~0.0 and
+*flat*. This is a steep monotone climb on a run that stopped because it hit `MAX_STEPS`, not because
+it converged. That is under-training, not breakage. M4.2 keeps level 0 in the mixture over 60 steps,
+so it answers the 0.9 question without costing a rerun -- and if level 0 stalls below 0.9 there,
+that is a real finding and the phase should stop on it.
+
+Worth flagging for §14: **copying a grid is not free for a 1.7B model.** 51% zero-shot, not ~100%.
+Exact match over a few hundred cells is unforgiving -- one wrong cell fails the grid -- so level 0 is
+a real task rather than the formality the ladder assumed.
+
+Also: real-ARC mean reward improved -0.085 -> -0.002 while its `grid_match` stayed at zero, on
+level-0-only training. Whether that is transfer or just format compliance leaking across is exactly
+what M4.3 measures.
+
+### The run is generation-bound, and the KV cache was sized for a different workload
+
+Per-step profile at steady state: `idle/buffer_starvation` **40-50% of every step** -- the trainer
+blocked waiting on the collector -- against `policy_training` at ~20%. So raising
+`num_prompts_per_step` or `train_global_batch_size` would make throughput *worse*: each step would
+demand more rollouts from the one thing that cannot keep up.
+
+The constraint is KV-cache concurrency. `buffer_size_gb` was **10**, inherited from
+`grpo_math_1B.yaml` -- a 1B *math* exemplar with short prompts and short answers. mcore derives
+concurrency from that buffer and `max_sequence_length` together (`max_requests` is "primarily
+limited by the combination of `buffer_size_gb` and `max_sequence_length`",
+`megatron/core/inference/config.py`), and at `max_model_len: 32768` with Qwen3's GQA -- 8 KV heads
+x 128 dim x 28 layers, ~115 KB/token -- one full-length sequence reserves ~3.8 GB. Ten gigabytes
+admits very few concurrent requests. Peak GPU memory was ~22 GB of a GB200's ~186 GB, so the buffer
+was the binding constraint and not the hardware; `nanov3_base.yaml` already runs 80 on a much
+larger model.
+
+`buffer_size_gb: 40` is now in `env_arc_synth.yaml` (`61bd3f5e`). It is throughput-only -- same
+16x16 groups, same global batch, identical gradient math -- and shipped **without an A/B**, on the
+evidence above. M4.2's step times against M4.1's are the free comparison. Watch `weight_sync`:
+`kv_cache_management_mode` is `offload`, so a 4x buffer is 4x more to move at each training pause
+(0.72 s of a 17 s step before the change).
 
 ### Operational notes for whoever picks this up
 
