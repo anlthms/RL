@@ -1,8 +1,9 @@
 defaults: ../grpo_math_1B_megatron.yaml
 
-# Fixed-GPU baseline with equal per-learner-GPU batches across topologies.
+# Sized to mirror nanov3_base.yaml so the two models are directly comparable on
+# samples/hour: same nodes, batch, KV pool and sequence length.
 grpo:
-  num_prompts_per_step: 8
+  num_prompts_per_step: 64
   num_generations_per_prompt: 16
   max_num_steps: 55
   val_period: 0
@@ -28,7 +29,7 @@ policy:
   # Keep activation memory bounded at the longer sequence: more grad-accum steps
   # rather than larger microbatches, as the nano-v3 recipe does.
   train_micro_batch_size: 1
-  train_global_batch_size: 128
+  train_global_batch_size: 1024  # num_prompts_per_step * num_generations_per_prompt
   megatron_cfg:
     env_vars:
       # Size cross-world refit teams; MCore recommends two CTAs.
@@ -39,6 +40,11 @@ policy:
     mcore_generation_config:
       async_engine: true
       refit_backend: nvshmem
+      # KV pool per rank; matches nanov3_base.yaml. The exemplar default (10)
+      # holds ~10 of the ~9k-token rollouts at Qwen3's 112 KiB/token, so decode
+      # serializes and the collector starves -- measured ~2.9x samples/hour once
+      # the pool is sized.
+      buffer_size_gb: 80
       # Only consumed when expose_http_server is on (the gym env layer). Qwen3
       # emits <think> blocks, which the deepseek-r1 parser handles generically.
       parsers:
@@ -57,4 +63,4 @@ logger:
 
 cluster:
   gpus_per_node: 4
-  num_nodes: 2
+  num_nodes: 8

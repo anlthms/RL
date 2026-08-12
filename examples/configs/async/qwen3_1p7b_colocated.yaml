@@ -1,29 +1,29 @@
 defaults: qwen3_1p7b_base.yaml
 
-# Match the non-colocated arm's per-learner-GPU batch.
+# 2x the base batch for colocated, matching nanov3_colocated.yaml. Generation here
+# is tail-bound once the KV pool is sized -- 4x the samples per window costs only
+# 1.18x the refill time -- so a bigger batch harvests more rollouts from the same
+# tail: measured ~2x samples/hour going from npps=8 to npps=32.
 grpo:
-  num_prompts_per_step: 16
+  num_prompts_per_step: 128
 
 policy:
-  train_global_batch_size: 256
+  train_global_batch_size: 2048  # num_prompts_per_step * num_generations_per_prompt
   generation:
     colocated:
       enabled: true
     mcore_generation_config:
-      # Offload the KV cache to CPU during the training pause, matching
-      # nanov3_colocated.yaml, so the training forward is not competing with
-      # a resident pool while activation_checkpointing is off. Graph-safe: any
-      # non-persist mode makes megatron_worker.py request static_kv_memory_pointers,
-      # which keeps the captured decode graphs' cache pointers valid across the
-      # offload/reload. mcore asserts torch_memory_saver is installed in that case,
-      # so the launcher installs it for this model (NEEDS_MEMORY_SAVER).
+      # Offload the KV cache during the training pause so the forward fits without
+      # activation_checkpointing (cuda_graph_impl=local forbids it), as
+      # nanov3_colocated.yaml does. Any non-persist mode makes megatron_worker.py
+      # request static_kv_memory_pointers, keeping the captured decode graphs valid
+      # across offload/reload; mcore then asserts torch_memory_saver, which the
+      # launcher installs.
       kv_cache_management_mode: "offload"
   megatron_cfg:
     # One dual-mode model that trains (TE fallback) and generates fast, mirroring
-    # nanov3_colocated.yaml. Without these the shared model would generate
-    # with training kernels. Requires RMSNorm and no bias_linear/qkv_bias, which
-    # transformer_config.py asserts and Qwen3 satisfies. The MoE-only knobs from
-    # the nano recipe do not apply to a dense model.
+    # nanov3_colocated.yaml. Requires RMSNorm and no bias_linear/qkv_bias, which
+    # Qwen3 satisfies. The MoE-only knobs from the nano recipe do not apply here.
     transformer_impl: "inference_optimized"
     allow_inference_optimized_training: true
     # Graphed decode. Forbids full recompute, hence activation_checkpointing off.
