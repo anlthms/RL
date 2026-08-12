@@ -17,9 +17,15 @@ Milestone 0 of ARC_AGI_2_ENV_PLAN.md: confirm the serialized few-shot prompts
 leave room for reasoning inside the configured context, before spending any GPU
 time on a run that would silently mask every overlong sample.
 
+``--synth`` measures the generated ladder instead of the real corpus, which is
+M4.0's go check: the generated prompts have to fit the same context, and a dump
+is the only way to see what a level actually looks like before spending GPU time
+on it.
+
 Usage:
     uv run tools/arc_agi_prompt_stats.py [--max-seq-length 32768]
     uv run tools/arc_agi_prompt_stats.py --dump 3 --dump-file /tmp/arc_chats.txt
+    uv run tools/arc_agi_prompt_stats.py --synth --dump 2
 """
 
 import argparse
@@ -28,7 +34,9 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from nemo_rl.data.datasets.response_datasets.arc_agi import _load_split
+from nemo_rl.data.datasets.response_datasets.arc_synth import _to_row
 from nemo_rl.data.interfaces import TaskDataSpec
+from nemo_rl.environments.arc_agi_generators import LEVELS, generate_task
 from nemo_rl.environments.arc_agi_grid import format_task_prompt, serialize_grid
 
 DEFAULT_DATA_DIR = "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025"
@@ -52,14 +60,40 @@ def main() -> None:
         "so the exact text the model sees can be eyeballed without a GPU run",
     )
     parser.add_argument("--dump-file", default="arc_agi_sample_chats.txt")
+    parser.add_argument(
+        "--synth",
+        action="store_true",
+        help="measure the synthetic ladder instead of the real corpus, "
+        "reporting one split per difficulty level",
+    )
+    parser.add_argument("--synth-seed", type=int, default=0)
+    parser.add_argument(
+        "--synth-tasks",
+        type=int,
+        default=500,
+        help="tasks to generate per level",
+    )
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     task_spec = TaskDataSpec(task_name="arc_agi", prompt_file=args.prompt_file)
     dumped: list[str] = []
 
-    for split in ("training", "evaluation"):
-        rows = _load_split(args.data_dir, split)
+    if args.synth:
+        splits = {
+            f"level_{level}": [
+                _to_row(generate_task(args.synth_seed, index, level))
+                for index in range(args.synth_tasks)
+            ]
+            for level in LEVELS
+        }
+    else:
+        splits = {
+            split: _load_split(args.data_dir, split)
+            for split in ("training", "evaluation")
+        }
+
+    for split, rows in splits.items():
         lengths = []
         dumped_this_split = 0
         for row in rows:
@@ -94,7 +128,9 @@ def main() -> None:
             f"  >= max_seq_length ({args.max_seq_length}): {over} "
             f"({100 * over / len(rows):.2f}%) -- these get loss_multiplier=0"
         )
-        print(f"  room left for the response at p99: {args.max_seq_length - percentile(lengths, 0.99)}")
+        print(
+            f"  room left for the response at p99: {args.max_seq_length - percentile(lengths, 0.99)}"
+        )
 
     if dumped:
         Path(args.dump_file).write_text("\n".join(dumped))

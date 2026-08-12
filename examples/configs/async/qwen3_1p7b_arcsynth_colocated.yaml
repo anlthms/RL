@@ -1,0 +1,5 @@
+# Qwen3-1.7B dense, synthetic ARC-ladder env, colocated async GRPO (Megatron inference).
+# Launch: MODEL=qwen3_1p7b ENV=arcsynth bash launch_experiment.sh colocated
+defaults:
+  - qwen3_1p7b_colocated.yaml
+  - env_arc_synth.yaml

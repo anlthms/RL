@@ -1,0 +1,910 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Synthetic ARC-style task generator: a ladder of solvable transformations.
+
+Four GRPO runs on real ARC-AGI-2 produced ``grid_match == 0.0000`` at every
+checkpoint, so no gradient has ever come from exact match -- every one came from
+shaping, and shaping has bought presentation and nothing else. ARC-AGI-2 is
+built so that frontier models score near zero; for a 1.7B policy it is not a
+hard learning problem, it is a null signal. This module manufactures tasks the
+model can actually solve, so that exact match has somewhere to move from.
+
+Tasks are generated from ``(seed, index, level)`` rather than materialized into
+a static dataset: volume is free and a run is still reproducible.
+
+Stdlib only -- no Ray, torch, GPU, or numpy -- so the whole ladder can be
+exercised on a login node. See ``arc_agi_grid.py``, which this mirrors.
+"""
+
+import random
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from nemo_rl.environments.arc_agi_grid import MAX_GRID_DIM, Grid
+
+BACKGROUND = 0
+COLORS = tuple(range(1, 10))
+
+# 3x3 is the smallest grid that can hold a shape with an interior; 20 is the
+# plan's upper bound on an *input* -- geometric rules multiply it, and every
+# grid in a task must still fit MAX_GRID_DIM.
+MIN_GRID_DIM = 3
+DEFAULT_MAX_INPUT_DIM = 20
+# Object placement needs room. Below this, "put three shapes down with a
+# background margin between them" usually fails and we would spend the whole
+# attempt budget on rejections.
+MIN_OBJECT_GRID_DIM = 8
+
+LEVELS = (0, 1, 2, 3, 4, 5)
+
+# How many (rule, pairs) draws to make before giving up on a level. Generous:
+# rejection is the normal path (a rot180 that happens to land on a symmetric
+# grid is *supposed* to be thrown away), and exhausting this budget means a
+# generator bug rather than bad luck, which is why it raises.
+_MAX_ATTEMPTS = 200
+_MAX_PLACEMENT_TRIES = 40
+
+Pair = tuple[Grid, Grid]
+
+
+# ---------------------------------------------------------------------------
+# Grid transformations
+# ---------------------------------------------------------------------------
+
+
+def rot90(grid: Grid) -> Grid:
+    """Rotate a quarter turn clockwise."""
+    return [list(row) for row in zip(*grid[::-1])]
+
+
+def rot180(grid: Grid) -> Grid:
+    return [row[::-1] for row in grid[::-1]]
+
+
+def rot270(grid: Grid) -> Grid:
+    return [list(row) for row in zip(*grid)][::-1]
+
+
+def flip_h(grid: Grid) -> Grid:
+    """Mirror left-right."""
+    return [row[::-1] for row in grid]
+
+
+def flip_v(grid: Grid) -> Grid:
+    """Mirror top-bottom."""
+    return [list(row) for row in grid[::-1]]
+
+
+def transpose(grid: Grid) -> Grid:
+    return [list(row) for row in zip(*grid)]
+
+
+def anti_transpose(grid: Grid) -> Grid:
+    """Reflect across the anti-diagonal."""
+    return rot180(transpose(grid))
+
+
+def identity(grid: Grid) -> Grid:
+    return [list(row) for row in grid]
+
+
+# The dihedral group of the square. Keyed by name so a task can say which
+# element it used, and so the group property is testable by composition.
+DIHEDRAL: dict[str, Callable[[Grid], Grid]] = {
+    "identity": identity,
+    "rot90": rot90,
+    "rot180": rot180,
+    "rot270": rot270,
+    "flip_h": flip_h,
+    "flip_v": flip_v,
+    "transpose": transpose,
+    "anti_transpose": anti_transpose,
+}
+
+
+def drop_color(color: int) -> Callable[[Grid], Grid]:
+    """Send every cell of ``color`` to the background."""
+    return lambda grid: [
+        [BACKGROUND if cell == color else cell for cell in row] for row in grid
+    ]
+
+
+def recolor(source: int, destination: int) -> Callable[[Grid], Grid]:
+    return lambda grid: [
+        [destination if cell == source else cell for cell in row] for row in grid
+    ]
+
+
+def keep_only(color: int) -> Callable[[Grid], Grid]:
+    """Erase everything except ``color``."""
+    return lambda grid: [
+        [cell if cell == color else BACKGROUND for cell in row] for row in grid
+    ]
+
+
+def tile(vertical: int, horizontal: int) -> Callable[[Grid], Grid]:
+    """Repeat the whole grid ``vertical`` x ``horizontal`` times."""
+
+    def apply(grid: Grid) -> Grid:
+        wide = [row * horizontal for row in grid]
+        return [list(row) for _ in range(vertical) for row in wide]
+
+    return apply
+
+
+def scale(factor: int) -> Callable[[Grid], Grid]:
+    """Blow each cell up into a ``factor`` x ``factor`` block."""
+
+    def apply(grid: Grid) -> Grid:
+        out: Grid = []
+        for row in grid:
+            stretched = [cell for cell in row for _ in range(factor)]
+            out.extend([list(stretched) for _ in range(factor)])
+        return out
+
+    return apply
+
+
+def crop_to_bbox(grid: Grid) -> Grid:
+    """Crop to the bounding box of the non-background cells.
+
+    Returns the grid unchanged when it is entirely background, which the
+    degeneracy guard then rejects -- there is nothing to crop to.
+    """
+    cells = [
+        (r, c)
+        for r, row in enumerate(grid)
+        for c, cell in enumerate(row)
+        if cell != BACKGROUND
+    ]
+    if not cells:
+        return identity(grid)
+    top = min(r for r, _ in cells)
+    bottom = max(r for r, _ in cells)
+    left = min(c for _, c in cells)
+    right = max(c for _, c in cells)
+    return [row[left : right + 1] for row in grid[top : bottom + 1]]
+
+
+def add_border(color: int, width: int = 1) -> Callable[[Grid], Grid]:
+    """Wrap the grid in a frame of ``color``."""
+
+    def apply(grid: Grid) -> Grid:
+        inner_width = len(grid[0]) + 2 * width
+        frame = [[color] * inner_width for _ in range(width)]
+        body = [[color] * width + list(row) + [color] * width for row in grid]
+        return frame + body + [list(row) for row in frame]
+
+    return apply
+
+
+def denoise(grid: Grid) -> Grid:
+    """Erase non-background cells that have no non-background 4-neighbor.
+
+    "Keep the shapes, drop the specks" -- the isolated-cell definition is the
+    one that makes a shape's own cells safe, since every cell of a 2x2-or-larger
+    blob touches another.
+    """
+    height, width = len(grid), len(grid[0])
+    out = identity(grid)
+    for r in range(height):
+        for c in range(width):
+            if grid[r][c] == BACKGROUND:
+                continue
+            neighbors = [
+                grid[r + dr][c + dc]
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                if 0 <= r + dr < height and 0 <= c + dc < width
+            ]
+            if all(neighbor == BACKGROUND for neighbor in neighbors):
+                out[r][c] = BACKGROUND
+    return out
+
+
+def complete_symmetry(axis: str) -> Callable[[Grid], Grid]:
+    """Fill background cells from the grid's mirror image across ``axis``.
+
+    The input is a symmetric picture with part of one side erased; the output
+    puts it back. A cell that is already painted is never overwritten, so the
+    rule is a pure completion.
+    """
+    mirror = flip_h if axis == "horizontal" else flip_v
+
+    def apply(grid: Grid) -> Grid:
+        reflected = mirror(grid)
+        return [
+            [
+                cell if cell != BACKGROUND else reflected[r][c]
+                for c, cell in enumerate(row)
+            ]
+            for r, row in enumerate(grid)
+        ]
+
+    return apply
+
+
+def fill_enclosed(color: int) -> Callable[[Grid], Grid]:
+    """Paint every background cell that cannot reach the border with ``color``.
+
+    Flood from the border rather than searching for closed curves: reachability
+    is the definition of "enclosed" and needs no shape analysis.
+    """
+
+    def apply(grid: Grid) -> Grid:
+        height, width = len(grid), len(grid[0])
+        outside = [[False] * width for _ in range(height)]
+        stack = [
+            (r, c)
+            for r in range(height)
+            for c in range(width)
+            if (r in (0, height - 1) or c in (0, width - 1))
+            and grid[r][c] == BACKGROUND
+        ]
+        for r, c in stack:
+            outside[r][c] = True
+        while stack:
+            r, c = stack.pop()
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if (
+                    0 <= nr < height
+                    and 0 <= nc < width
+                    and not outside[nr][nc]
+                    and grid[nr][nc] == BACKGROUND
+                ):
+                    outside[nr][nc] = True
+                    stack.append((nr, nc))
+        return [
+            [
+                color if cell == BACKGROUND and not outside[r][c] else cell
+                for c, cell in enumerate(row)
+            ]
+            for r, row in enumerate(grid)
+        ]
+
+    return apply
+
+
+def apply_color_map(grid: Grid, mapping: dict[int, int]) -> Grid:
+    return [[mapping.get(cell, cell) for cell in row] for row in grid]
+
+
+# ---------------------------------------------------------------------------
+# Input patterns
+# ---------------------------------------------------------------------------
+#
+# Uniform noise makes several levels degenerate: crop-to-bounding-box needs a
+# bounding box, denoising needs signal to distinguish from noise, and symmetry
+# completion needs a symmetry. So inputs come from a small library of pattern
+# samplers, and each rule names the one that gives it something to act on.
+#
+# Every sampler paints all of `palette`, because the identifiability guard
+# requires a color rule's parameter to appear in the examples that are supposed
+# to teach it. Samplers return None when placement fails, and the caller
+# redraws.
+
+
+def _size(
+    rng: random.Random, max_dim: int, min_dim: int = MIN_GRID_DIM
+) -> tuple[int, int]:
+    high = min(max_dim, MAX_GRID_DIM)
+    low = min(min_dim, high)
+    return rng.randint(low, high), rng.randint(low, high)
+
+
+def _blank(height: int, width: int) -> Grid:
+    return [[BACKGROUND] * width for _ in range(height)]
+
+
+def _color_cycle(rng: random.Random, palette: list[int], count: int) -> list[int]:
+    """``count`` colors that use every entry of ``palette`` at least once."""
+    colors = list(palette)
+    colors.extend(rng.choice(palette) for _ in range(max(0, count - len(palette))))
+    rng.shuffle(colors)
+    return colors
+
+
+def pattern_scatter(
+    rng: random.Random, palette: list[int], max_dim: int
+) -> Grid | None:
+    """Loose points on a background."""
+    height, width = _size(rng, max_dim)
+    count = max(len(palette), int(round(0.2 * height * width)))
+    if count > height * width:
+        return None
+    cells = rng.sample([(r, c) for r in range(height) for c in range(width)], count)
+    grid = _blank(height, width)
+    for (r, c), color in zip(cells, _color_cycle(rng, palette, count)):
+        grid[r][c] = color
+    return grid
+
+
+def _place(
+    rng: random.Random,
+    grid: Grid,
+    occupied: list[list[bool]],
+    shape: Grid,
+    margin: int,
+) -> bool:
+    """Stamp ``shape`` somewhere free, keeping ``margin`` cells clear around it.
+
+    The margin is what guarantees the shapes stay separate objects: without it
+    two rectangles can fuse, and "remove the isolated cells" or "fill the
+    enclosed region" stop having a single well-defined answer.
+    """
+    height, width = len(grid), len(grid[0])
+    shape_h, shape_w = len(shape), len(shape[0])
+    if height - shape_h - 2 * margin < 0 or width - shape_w - 2 * margin < 0:
+        return False
+    for _ in range(_MAX_PLACEMENT_TRIES):
+        top = rng.randint(margin, height - shape_h - margin)
+        left = rng.randint(margin, width - shape_w - margin)
+        if any(
+            occupied[r][c]
+            for r in range(max(0, top - margin), min(height, top + shape_h + margin))
+            for c in range(max(0, left - margin), min(width, left + shape_w + margin))
+        ):
+            continue
+        for r in range(shape_h):
+            for c in range(shape_w):
+                occupied[top + r][left + c] = True
+                if shape[r][c] != BACKGROUND:
+                    grid[top + r][left + c] = shape[r][c]
+        return True
+    return False
+
+
+def _filled_rect(height: int, width: int, color: int) -> Grid:
+    return [[color] * width for _ in range(height)]
+
+
+def _hollow_rect(height: int, width: int, color: int) -> Grid:
+    return [
+        [
+            color if r in (0, height - 1) or c in (0, width - 1) else BACKGROUND
+            for c in range(width)
+        ]
+        for r in range(height)
+    ]
+
+
+def objects_pattern(
+    margin: int = 1, hollow: bool = False
+) -> Callable[..., Grid | None]:
+    """Sampler factory: a few rectangles on a background.
+
+    ``margin`` > 0 leaves a background frame, which is what makes
+    crop-to-bounding-box a real transformation. ``hollow`` produces rectangles
+    with an interior, which is what makes fill-enclosed one.
+    """
+
+    def sample(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
+        height, width = _size(rng, max_dim, min_dim=MIN_OBJECT_GRID_DIM)
+        grid = _blank(height, width)
+        occupied = [[False] * width for _ in range(height)]
+        colors = _color_cycle(rng, palette, len(palette) + rng.randint(0, 1))
+        for color in colors:
+            low = 3 if hollow else 2
+            shape_h = rng.randint(low, min(low + 2, height - 2 * margin))
+            shape_w = rng.randint(low, min(low + 2, width - 2 * margin))
+            builder = _hollow_rect if hollow else _filled_rect
+            if not _place(
+                rng, grid, occupied, builder(shape_h, shape_w, color), margin
+            ):
+                return None
+        return grid
+
+    return sample
+
+
+def pattern_lines(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
+    """Full rows and columns, which is where crosses and stripes come from."""
+    height, width = _size(rng, max_dim)
+    grid = _blank(height, width)
+    for color in _color_cycle(rng, palette, len(palette)):
+        if rng.random() < 0.5:
+            grid[rng.randrange(height)] = [color] * width
+        else:
+            column = rng.randrange(width)
+            for row in grid:
+                row[column] = color
+    return grid
+
+
+def pattern_motif(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
+    """A small motif repeated to fill the grid."""
+    height, width = _size(rng, max_dim)
+    motif_h = rng.randint(1, min(3, height))
+    motif_w = rng.randint(1, min(3, width))
+    count = motif_h * motif_w
+    if count < len(palette):
+        return None
+    colors = _color_cycle(rng, palette, count)
+    motif = [
+        [
+            colors[r * motif_w + c] if rng.random() < 0.7 else BACKGROUND
+            for c in range(motif_w)
+        ]
+        for r in range(motif_h)
+    ]
+    grid = [
+        [motif[r % motif_h][c % motif_w] for c in range(width)] for r in range(height)
+    ]
+    # The masking above can erase a palette color from every copy of the motif.
+    if {cell for row in grid for cell in row} - {BACKGROUND} != set(palette):
+        return None
+    return grid
+
+
+def pattern_noisy_objects(
+    rng: random.Random, palette: list[int], max_dim: int
+) -> Grid | None:
+    """Solid rectangles plus isolated single cells -- the denoise input.
+
+    The specks are placed with a one-cell margin so they are genuinely isolated
+    under the 4-neighbor rule, and the rectangles are at least 2x2 so none of
+    their own cells is.
+    """
+    grid = objects_pattern(margin=1)(rng, palette, max_dim)
+    if grid is None:
+        return None
+    height, width = len(grid), len(grid[0])
+    occupied = [
+        [
+            any(
+                grid[r + dr][c + dc] != BACKGROUND
+                for dr in (-1, 0, 1)
+                for dc in (-1, 0, 1)
+                if 0 <= r + dr < height and 0 <= c + dc < width
+            )
+            for c in range(width)
+        ]
+        for r in range(height)
+    ]
+    speck_colors = _color_cycle(rng, palette, rng.randint(2, 5))
+    placed = 0
+    for color in speck_colors:
+        if _place(rng, grid, occupied, [[color]], margin=1):
+            placed += 1
+    if placed == 0:
+        return None
+    return grid
+
+
+def symmetric_holes_pattern(axis: str) -> Callable[..., Grid | None]:
+    """Sampler factory: a symmetric picture with part of one side erased."""
+    mirror = flip_h if axis == "horizontal" else flip_v
+
+    def sample(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
+        base = pattern_scatter(rng, palette, max_dim)
+        if base is None:
+            return None
+        reflected = mirror(base)
+        symmetric = [
+            [
+                cell if cell != BACKGROUND else reflected[r][c]
+                for c, cell in enumerate(row)
+            ]
+            for r, row in enumerate(base)
+        ]
+        # Erase from one half only, so the other half still carries the answer.
+        height, width = len(symmetric), len(symmetric[0])
+        grid = identity(symmetric)
+        painted = [
+            (r, c)
+            for r in range(height)
+            for c in range(width)
+            if symmetric[r][c] != BACKGROUND
+            and (c >= width // 2 if axis == "horizontal" else r >= height // 2)
+        ]
+        if not painted:
+            return None
+        for r, c in rng.sample(painted, max(1, len(painted) // 2)):
+            grid[r][c] = BACKGROUND
+        if {cell for row in grid for cell in row} - {BACKGROUND} != set(palette):
+            return None
+        return grid
+
+    return sample
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Rule:
+    """One concrete, fully-parameterized transformation plus its input source.
+
+    ``required_colors`` is what the identifiability guard checks: "drop color 3"
+    cannot be inferred from examples that contain no 3, and a task whose rule is
+    not pinned down by its own examples is unsolvable in principle -- which
+    during a training run is indistinguishable from the model failing to learn.
+    """
+
+    name: str
+    level: int
+    stages: tuple[Callable[[Grid], Grid], ...]
+    sample_input: Callable[[random.Random], Grid | None]
+    required_colors: frozenset[int] = frozenset()
+
+    def apply(self, grid: Grid) -> Grid:
+        """Run every stage in order."""
+        for stage in self.stages:
+            grid = stage(grid)
+        return grid
+
+    def trace(self, grid: Grid) -> list[Grid]:
+        """The grid after each stage, for the per-stage degeneracy guard."""
+        out = []
+        for stage in self.stages:
+            grid = stage(grid)
+            out.append(grid)
+        return out
+
+
+def _bind(
+    sampler: Callable[..., Grid | None], palette: list[int], max_dim: int
+) -> Callable[[random.Random], Grid | None]:
+    return lambda rng: sampler(rng, palette, max_dim)
+
+
+def _generic_sampler(rng: random.Random) -> Callable[..., Grid | None]:
+    return rng.choice(
+        [pattern_scatter, pattern_lines, pattern_motif, objects_pattern(margin=1)]
+    )
+
+
+def _sample_palette(rng: random.Random, low: int = 1, high: int = 3) -> list[int]:
+    return rng.sample(COLORS, rng.randint(low, high))
+
+
+def _level0_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    palette = palette or _sample_palette(rng)
+    return Rule(
+        name="identity",
+        level=0,
+        stages=(identity,),
+        sample_input=_bind(_generic_sampler(rng), palette, DEFAULT_MAX_INPUT_DIM),
+    )
+
+
+def _level1_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    palette = palette or _sample_palette(rng)
+    name = rng.choice([key for key in DIHEDRAL if key != "identity"])
+    return Rule(
+        name=name,
+        level=1,
+        stages=(DIHEDRAL[name],),
+        sample_input=_bind(_generic_sampler(rng), palette, DEFAULT_MAX_INPUT_DIM),
+    )
+
+
+def _level2_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    palette = palette or _sample_palette(rng, low=2, high=4)
+    source = rng.choice(palette)
+    kind = rng.choice(["drop_color", "recolor", "keep_only"])
+    if kind == "drop_color":
+        name, apply = f"drop_color({source})", drop_color(source)
+    elif kind == "keep_only":
+        name, apply = f"keep_only({source})", keep_only(source)
+    else:
+        # Recolor to a color the input never uses: mapping onto an existing one
+        # merges two objects, and then the examples no longer say which of the
+        # two the rule was about.
+        destination = rng.choice([c for c in COLORS if c not in palette])
+        name, apply = f"recolor({source}->{destination})", recolor(source, destination)
+    return Rule(
+        name=name,
+        level=2,
+        stages=(apply,),
+        sample_input=_bind(_generic_sampler(rng), palette, DEFAULT_MAX_INPUT_DIM),
+        required_colors=frozenset({source}),
+    )
+
+
+def _level3_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    palette = palette or _sample_palette(rng)
+    kind = rng.choice(["tile", "crop", "scale", "border"])
+    if kind == "tile":
+        vertical, horizontal = rng.randint(1, 3), rng.randint(1, 3)
+        if (vertical, horizontal) == (1, 1):
+            vertical = 2
+        max_dim = MAX_GRID_DIM // max(vertical, horizontal)
+        return Rule(
+            name=f"tile({vertical}x{horizontal})",
+            level=3,
+            stages=(tile(vertical, horizontal),),
+            sample_input=_bind(_generic_sampler(rng), palette, max_dim),
+        )
+    if kind == "scale":
+        factor = rng.randint(2, 3)
+        return Rule(
+            name=f"scale({factor})",
+            level=3,
+            stages=(scale(factor),),
+            sample_input=_bind(_generic_sampler(rng), palette, MAX_GRID_DIM // factor),
+        )
+    if kind == "border":
+        color = rng.choice([c for c in COLORS if c not in palette])
+        return Rule(
+            name=f"add_border({color})",
+            level=3,
+            stages=(add_border(color),),
+            sample_input=_bind(_generic_sampler(rng), palette, MAX_GRID_DIM - 2),
+        )
+    # Crop needs a background frame to crop away, so it gets the margin sampler
+    # rather than a generic one.
+    return Rule(
+        name="crop_to_bbox",
+        level=3,
+        stages=(crop_to_bbox,),
+        sample_input=_bind(objects_pattern(margin=1), palette, DEFAULT_MAX_INPUT_DIM),
+    )
+
+
+def _level4_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    palette = palette or _sample_palette(rng, low=1, high=2)
+    kind = rng.choice(["denoise", "symmetry", "fill"])
+    if kind == "denoise":
+        return Rule(
+            name="denoise",
+            level=4,
+            stages=(denoise,),
+            sample_input=_bind(pattern_noisy_objects, palette, DEFAULT_MAX_INPUT_DIM),
+        )
+    if kind == "symmetry":
+        axis = rng.choice(["horizontal", "vertical"])
+        return Rule(
+            name=f"complete_symmetry({axis})",
+            level=4,
+            stages=(complete_symmetry(axis),),
+            sample_input=_bind(
+                symmetric_holes_pattern(axis), palette, DEFAULT_MAX_INPUT_DIM
+            ),
+        )
+    color = rng.choice([c for c in COLORS if c not in palette])
+    return Rule(
+        name=f"fill_enclosed({color})",
+        level=4,
+        stages=(fill_enclosed(color),),
+        sample_input=_bind(
+            objects_pattern(margin=1, hollow=True), palette, DEFAULT_MAX_INPUT_DIM
+        ),
+    )
+
+
+def _level5_rule(rng: random.Random, palette: list[int] | None = None) -> Rule:
+    """A color op followed by a shape op.
+
+    Always in that order, and never shape-then-color: a color op can erase the
+    very color a following color op is parameterized on, and then the second
+    stage is not identifiable from the examples. Shape ops are color-agnostic,
+    so composing one after a color op can never do that.
+
+    Both stages share one palette, and the *shape* stage supplies the input
+    sampler -- it is the stage with an opinion about size (tile and scale bound
+    the input so the output still fits) and about structure (crop needs a
+    background border to crop away).
+    """
+    palette = palette or _sample_palette(rng, low=2, high=4)
+    shape = rng.choice([_level1_rule, _level3_rule])(rng, palette)
+    color = _level2_rule(rng, palette)
+    return Rule(
+        name=f"{color.name}+{shape.name}",
+        level=5,
+        stages=color.stages + shape.stages,
+        sample_input=shape.sample_input,
+        required_colors=color.required_colors,
+    )
+
+
+_LEVEL_RULES: dict[int, Callable[[random.Random], Rule]] = {
+    0: _level0_rule,
+    1: _level1_rule,
+    2: _level2_rule,
+    3: _level3_rule,
+    4: _level4_rule,
+    5: _level5_rule,
+}
+
+
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
+
+
+def grid_colors(grid: Grid) -> set[int]:
+    return {cell for row in grid for cell in row}
+
+
+def rule_is_identifiable(rule: Rule, train_pairs: list[Pair]) -> bool:
+    """Is the rule pinned down by the few-shot pairs alone?
+
+    Only the *train* pairs count -- they are all the model is shown. A rule
+    whose parameter never appears in them is unsolvable however good the policy
+    is, and in a training run that reads as the model failing to learn.
+    """
+    return all(rule.required_colors <= grid_colors(inp) for inp, _ in train_pairs)
+
+
+def is_degenerate(rule: Rule, pairs: list[Pair]) -> bool:
+    """Does any stage of the rule leave any pair's grid unchanged?
+
+    Stricter than the "every example is unchanged" test in two ways, both
+    load-bearing:
+
+    - *Per pair.* One identity pair inside a non-identity task is itself an
+      ambiguity, and a task whose *test* pair is unchanged is solved by echoing
+      the input -- which is exactly the behavior four previous runs collapsed
+      into.
+    - *Per stage.* A composition hides a no-op that a whole-rule check would
+      miss: ``recolor(4->6)`` then ``flip_v`` on a grid of identical rows is a
+      recolor wearing a level-5 label, and the flip is not inferable from any
+      example.
+
+    Level 0 is exempt -- there, unchanged is the rule.
+    """
+    if rule.level == 0:
+        return False
+    for inp, _ in pairs:
+        current = inp
+        for stage in rule.trace(inp):
+            if stage == current:
+                return True
+            current = stage
+    return False
+
+
+def _fits(grid: Grid) -> bool:
+    return (
+        1 <= len(grid) <= MAX_GRID_DIM
+        and bool(grid[0])
+        and len(grid[0]) <= MAX_GRID_DIM
+    )
+
+
+# ---------------------------------------------------------------------------
+# Augmentation
+# ---------------------------------------------------------------------------
+
+
+def augment_task(rng: random.Random, pairs: list[Pair]) -> list[Pair]:
+    """Permute colors and apply a dihedral transform across the whole task.
+
+    Both are applied identically to every input and every output, so the task
+    stays a consistent function of its input -- for a color permutation the rule
+    is conjugated by a relabeling, for a dihedral transform by a symmetry of the
+    square. What they buy is that the model cannot memorize "color 3 is the one
+    that disappears" or "the answer is always wider than the input"; it has to
+    read the rule off the examples.
+    """
+    permuted = list(COLORS)
+    rng.shuffle(permuted)
+    mapping = dict(zip(COLORS, permuted))
+    mapping[BACKGROUND] = BACKGROUND
+    transform = DIHEDRAL[rng.choice(list(DIHEDRAL))]
+    return [
+        (
+            transform(apply_color_map(inp, mapping)),
+            transform(apply_color_map(out, mapping)),
+        )
+        for inp, out in pairs
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Task generation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SynthTask:
+    """One generated task, shaped like a row of the real ARC dataset."""
+
+    task_id: str
+    level: int
+    rule: str
+    train_pairs: list[dict[str, Grid]]
+    test_input: Grid
+    target: Grid
+
+
+def _task_seed(seed: int, index: int, level: int) -> int:
+    return (seed * 1_000_003 + index) * 131 + level
+
+
+def _sample_pairs(rng: random.Random, rule: Rule, count: int) -> list[Pair] | None:
+    pairs: list[Pair] = []
+    for _ in range(count):
+        inp = rule.sample_input(rng)
+        if inp is None or not _fits(inp):
+            return None
+        out = rule.apply(inp)
+        if not _fits(out):
+            return None
+        pairs.append((inp, out))
+    return pairs
+
+
+def generate_task(
+    seed: int, index: int, level: int, num_train_pairs: int | None = None
+) -> SynthTask:
+    """Generate the task at ``(seed, index, level)``.
+
+    Deterministic in its arguments and nothing else, so a run is reproducible
+    without materializing a dataset.
+
+    Rejection is the normal path: a rot180 that lands on a symmetric grid, a
+    "drop color 3" whose examples contain no 3, and a crop of a grid with no
+    background border are all generated and thrown away. Exhausting the attempt
+    budget means the level's rules and patterns disagree with each other, which
+    is a bug worth crashing on rather than a task worth returning.
+    """
+    if level not in _LEVEL_RULES:
+        raise ValueError(
+            f"unknown level {level}; expected one of {sorted(_LEVEL_RULES)}"
+        )
+    rng = random.Random(_task_seed(seed, index, level))
+
+    for _ in range(_MAX_ATTEMPTS):
+        rule = _LEVEL_RULES[level](rng)
+        count = (num_train_pairs or rng.randint(2, 4)) + 1
+        pairs = _sample_pairs(rng, rule, count)
+        if pairs is None:
+            continue
+        if not rule_is_identifiable(rule, pairs[:-1]):
+            continue
+        if is_degenerate(rule, pairs):
+            continue
+
+        pairs = augment_task(rng, pairs)
+        train, (test_input, target) = pairs[:-1], pairs[-1]
+        return SynthTask(
+            # The rule goes in the id so a dumped validation row says which
+            # transformation it was -- the difference between "level 3 is hard"
+            # and "tile is hard" -- without needing its own dataset column.
+            task_id=f"synth_L{level}_{rule.name}_{seed}_{index}",
+            level=level,
+            rule=rule.name,
+            train_pairs=[{"input": inp, "output": out} for inp, out in train],
+            test_input=test_input,
+            target=target,
+        )
+
+    raise RuntimeError(
+        f"no valid task at level {level} in {_MAX_ATTEMPTS} attempts "
+        f"(seed={seed}, index={index}) -- the level's rules and input patterns "
+        "are inconsistent"
+    )
+
+
+def generate_tasks(
+    seed: int, count: int, levels: list[int], num_train_pairs: int | None = None
+) -> list[SynthTask]:
+    """Generate ``count`` tasks, cycling through ``levels``.
+
+    Cycling rather than sampling: every batch then holds every level in exact
+    proportion. That matters more than it sounds -- GRPO's advantage is computed
+    within a group of rollouts on one prompt, so a batch whose levels are all
+    hopeless or all trivial contributes no gradient at all. Repeat a level in
+    ``levels`` to weight it.
+    """
+    if not levels:
+        raise ValueError("levels must not be empty")
+    return [
+        generate_task(seed, index, levels[index % len(levels)], num_train_pairs)
+        for index in range(count)
+    ]

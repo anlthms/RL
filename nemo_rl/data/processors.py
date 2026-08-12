@@ -451,24 +451,30 @@ def arc_agi_data_processor(
     max_seq_length: int,
     idx: int,
 ) -> DatumSpec:
-    """Process an ARC-AGI row (from response_datasets/arc_agi.py) into a DatumSpec."""
-    task_body = format_task_prompt(
-        datum_dict["train_pairs"], datum_dict["test_input"]
-    )
+    """Process an ARC row into a DatumSpec.
+
+    Serves both the real corpus (``response_datasets/arc_agi.py``) and the
+    synthetic ladder (``response_datasets/arc_synth.py``): the row schemas are
+    identical, so a second processor would be this one with a different name.
+    """
+    task_body = format_task_prompt(datum_dict["train_pairs"], datum_dict["test_input"])
     extra_env_info = {
         "target": datum_dict["target"],
         # The environment scores the similarity terms as gain over echoing the
         # test input, so it needs the input itself, not just the target.
         "test_input": datum_dict["test_input"],
         "task_id": datum_dict["task_id"],
+        # Carried so the environment can report per-level metrics. Both ARC
+        # row schemas always set it -- real rows as REAL_ARC_LEVEL -- so a
+        # missing key is a producer bug and should raise rather than quietly
+        # file the sample under the wrong bucket.
+        "level": datum_dict["level"],
         "terms": None,
     }
 
     message_list = []
     if task_data_spec.system_prompt:
-        message_list.append(
-            {"role": "system", "content": task_data_spec.system_prompt}
-        )
+        message_list.append({"role": "system", "content": task_data_spec.system_prompt})
     formatted_content = (
         task_data_spec.prompt.format(task_body) if task_data_spec.prompt else task_body
     )

@@ -940,6 +940,67 @@ model has genuinely solved *something*.
 - Level mixture: sampling N tasks yields every configured level, and generation is deterministic in
   `(seed, index)`.
 
+### M4.0 — the generator, built (code only, no run yet)
+
+Everything in the table above exists on `async_arc`. Six decisions the plan left open, and
+what was chosen:
+
+1. **The degeneracy guard is per pair and per stage**, not "every example is unchanged". A single
+   identity pair inside a non-identity task is itself an ambiguity, and a task whose *test* pair is
+   unchanged is solved by echoing the input — the behavior four runs collapsed into — so the plan's
+   separate echo guard is subsumed rather than written twice. The per-*stage* half was not
+   anticipated and is what a whole-rule check misses: `recolor(4->6)` then `flip_v` on a grid of
+   identical rows changes the grid, passes a whole-rule check, and teaches a flip that no example
+   demonstrates. Composition hides no-ops.
+2. **Level 5 is always a color op followed by a shape op**, sharing one palette, with the shape stage
+   supplying the input sampler. The other order is not identifiable: `drop_color(3)` then
+   `recolor(3->5)` leaves the second stage with nothing to act on. Shape ops are color-agnostic, so
+   this order can never do that, and the shape stage is the one with an opinion about size (tile and
+   scale bound the input so the output still fits 30x30) and structure (crop needs a background
+   border).
+3. **Input patterns are paired with the rules that need them**, since the sampler is what makes a
+   level satisfiable at all: crop gets the margin sampler, fill-enclosed the hollow-rectangle one,
+   denoise rectangles-plus-specks, symmetry completion a mirrored grid with one side erased. Every
+   sampler paints the whole palette, which is what makes identifiability hold by construction rather
+   than by rejection — the guard is then a real check, not a formality.
+4. **Per-level metrics ride on the per-sample `terms` dict.** Validation does not call
+   `global_post_process_and_metrics` at all (§8) — it averages each per-sample term over the samples
+   that reported it. So a key present only on one level's samples *is* that level's mean, with no
+   plumbing: `step()` copies `grid_match` and `cell_match` to `grid_match/level_3` and the
+   aggregation does the rest. `global_post_process_and_metrics` computes the same split explicitly
+   for training batches.
+5. **Real ARC rows now carry `level = -1`** and are reported as the `/real` bucket. Both validation
+   sources go through one dataloader, which concatenates them, and `concatenate_datasets` requires
+   identical features — so the column has to exist on both sides. The loader does not shuffle and
+   stops after `max_val_samples // val_batch_size` batches, hence `max_val_samples: 344` (172
+   synthetic held-out + all 172 real evaluation rows) at `val_batch_size: 43`. Getting this wrong
+   silently drops the real split, which is the measurement the phase exists for.
+6. **`CMP=1` with any ARC env is now a hard error in the launcher** rather than a comment. An
+   overlong prompt is not an error — the processor masks the row with `loss_multiplier=0` — so the
+   combination degrades a run silently, and it has been a footnote in this document twice.
+
+The rule name is folded into `task_id` (`synth_L3_tile(2x2)_0_41`) instead of getting its own
+dataset column, so a dumped validation row says *which* transformation it was — the difference
+between "level 3 is hard" and "tile is hard" — without a second schema for the real corpus to match.
+
+Prompt lengths, generated task bodies at 500 tasks per level: median ~2.1k characters, worst 8.8k,
+against 16.6k tokens for the worst real ARC row. Nothing is close to the context, and the real
+evaluation split is still the binding constraint on `max_total_sequence_length`.
+
+**Test status is uneven and worth stating precisely.** The 113 stdlib-only tests
+(`test_arc_agi_grid.py` + `test_arc_agi_generators.py`) pass on a login node. The dataset tests
+(`test_arc_synth_dataset.py`) and the new environment tests need HF `datasets` and Ray respectively
+and **have not been run** — the `nemo_rl_0804.sqsh` image has no working `uv` or venv interpreter
+under a bare `srun --container-image`, and four attempts at ~8 minutes each did not find one. What
+*was* verified out-of-container, in a scratch venv against the generator module directly, is the one
+thing most likely to fail at launch: 8000 synthetic rows materialize in 7.6 s, and a held-out
+synthetic split concatenates with the 172 real evaluation rows into one 344-row validation set with
+matching features and levels `[-1, 0, 1, 2, 3, 4, 5]`. Run the rest inside the container before M4.1.
+
+Not yet run. M4.1 (the identity gate, `levels: [0]`, 2 nodes, ~20 steps, go at `grid_match > 0.9`)
+is the next step and must pass before anything else: if a 1.7B model cannot learn to copy a grid it
+is shown, the problem is in the data path, the prompt, or the parser.
+
 ### Operational notes for whoever picks this up
 
 - Branch `async_arc`, currently at `806ab83d`. Both prior experiment branches are preserved under

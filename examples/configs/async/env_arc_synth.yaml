@@ -1,0 +1,105 @@
+# Synthetic ARC-ladder data/env layer. Model-agnostic: list AFTER a
+# <model>_<topology> config in a `defaults:` list.
+#
+# Parallel to env_arc.yaml, and everything not about the data source is
+# deliberately identical to it -- the point of this layer is to change *what the
+# model is asked to solve*, so that a difference in the result is attributable to
+# the curriculum and not to a second simultaneous change.
+#
+# Why it exists: four runs on real ARC-AGI-2 produced grid_match == 0.0000 at
+# every checkpoint. Every gradient the policy has ever received came from
+# shaping. The ladder supplies tasks a 1.7B model can actually solve, so exact
+# match has somewhere to move from.
+
+grpo:
+  # Validation is the synthetic held-out split followed by all 172 real
+  # ARC-AGI-2 evaluation rows, in that order, so max_val_samples has to cover
+  # both -- the loader does not shuffle and stops after
+  # max_val_samples // val_batch_size batches. 344 = 172 + 172, and 43 divides
+  # both exactly.
+  max_val_samples: 344
+  val_batch_size: 43
+
+policy:
+  megatron_cfg:
+    optimizer:
+      # See env_arc.yaml: 5e-6 moves the policy far enough per step that age-4
+      # trajectories wreck the update through importance-ratio variance.
+      lr: 2.0e-6
+  tokenizer:
+    chat_template_kwargs:
+      # Qwen3's thinking block ate the entire response budget before the model
+      # reached its answer. We want the reasoning in the *scored* response.
+      enable_thinking: false
+  # Synthetic prompts are smaller than real ARC ones (generated inputs are at
+  # most 20x20 before the geometric rules, against 30x30 in the real corpus),
+  # but the real evaluation split is still validated on, and its worst row is
+  # 16593 tokens. Same context as env_arc.yaml.
+  # NOTE: do not combine CMP=1 with this env -- it hard-sets 16384.
+  max_total_sequence_length: 32768
+  generation:
+    max_new_tokens: 8192
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: arc_synth
+    # Levels are mixed within every batch rather than ramped across steps.
+    # GRPO's advantage is computed within a group of rollouts on one prompt, so
+    # a phase where every task is uniformly hopeless -- or uniformly trivial --
+    # contributes no gradient. A ramp reintroduces exactly the degenerate-group
+    # failure the curriculum is meant to fix. Repeat a level here to weight it.
+    #
+    # M4.1 (the identity gate) overrides this to `[0]`; M4.2 to `[0, 1, 2]`.
+    levels: [0, 1, 2, 3, 4, 5]
+    # Materialized once at startup, so this trades startup seconds against
+    # repetition. 60 steps x 16 prompts is 960 prompts; 8000 is far past any
+    # run length we have used, so no task is ever seen twice.
+    num_tasks: 8000
+    num_val_tasks: 172
+    seed: ${grpo.seed}
+    # Must differ from `seed`, or the held-out split is the training tasks
+    # verbatim and validation measures memorization. The dataset raises if they
+    # match rather than silently reporting a train score.
+    val_seed: 1000000
+  validation:
+    # The real ARC-AGI-2 evaluation split, alongside the synthetic held-out
+    # rows. This is the measurement the whole phase exists for: whether solving
+    # generated tasks transfers to real ones at all. A null result here is a
+    # real answer. Reported separately as the `/real` bucket.
+    #
+    # split == validation_split so only the evaluation files are read; the
+    # 1000-task training file is not needed here.
+    - dataset_name: arc_agi
+      data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025
+      split: evaluation
+      validation_split: evaluation
+  default:
+    prompt_file: "examples/prompts/arc_agi.txt"
+    system_prompt_file: null
+    processor: "arc_agi_data_processor"
+    env_name: "arc_agi"
+
+env:
+  _override_: true
+  should_use_nemo_gym: false
+  arc_agi:
+    # Unchanged from env_arc.yaml. The shaped terms still earn their keep here:
+    # they break degenerate groups on the levels the policy cannot yet solve,
+    # while exact match -- which on this data is finally nonzero -- dominates on
+    # the ones it can.
+    exact_weight: 1.0
+    cell_weight: 0.20
+    edit_weight: 0.10
+    color_weight: 0.05
+    extraneous_color_weight: 0.05
+    shape_weight: 0.05
+    format_weight: 0.05
+
+logger:
+  monitor_gpus: true
+  num_val_samples_to_print: 4

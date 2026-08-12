@@ -29,6 +29,7 @@ from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.arc_agi_grid import (
     Grid,
     RewardWeights,
+    level_metric_suffix,
     score_response,
 )
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
@@ -78,6 +79,26 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
     format_weight: float = 0.05
 
 
+# Which terms get a per-level copy. Kept short on purpose: these keys multiply
+# by the number of levels in the mixture, and grid match is the one the whole
+# curriculum exists to move.
+_PER_LEVEL_TERMS = ("grid_match", "cell_match")
+
+
+def _add_per_level_terms(terms: dict[str, float], level: int) -> dict[str, float]:
+    """Copy the headline terms under a level-tagged key.
+
+    Validation aggregates each per-sample term by averaging over the samples
+    that *reported* it, so a key present only on one level's samples is exactly
+    that level's mean -- no extra plumbing, and it works the same way for the
+    real-ARC bucket carried alongside the synthetic ones.
+    """
+    suffix = level_metric_suffix(level)
+    for name in _PER_LEVEL_TERMS:
+        terms[f"{name}/{suffix}"] = terms[name]
+    return terms
+
+
 class ArcAgiEnvironmentMetadata(TypedDict):
     """Per-sample state carried through ``extra_env_info``.
 
@@ -86,12 +107,15 @@ class ArcAgiEnvironmentMetadata(TypedDict):
     can report the reward breakdown -- whether reward growth is real (exact
     match) or merely shaping is the diagnostic this whole environment is built
     around. ``test_input`` is carried because the similarity terms are scored
-    as gain over echoing it, which needs the input at scoring time.
+    as gain over echoing it, which needs the input at scoring time, and
+    ``level`` because an aggregate grid match cannot distinguish "solving level
+    0 and nothing else" from "uniformly mediocre".
     """
 
     target: Grid
     test_input: Grid
     task_id: str
+    level: int
     terms: dict[str, float] | None
 
 
@@ -148,8 +172,11 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         # inline rather than fanning out to verifier actors the way the math
         # environment must for math-verify.
         all_terms = [
-            score_response(
-                response, meta["target"], meta["test_input"], self.weights
+            _add_per_level_terms(
+                score_response(
+                    response, meta["target"], meta["test_input"], self.weights
+                ),
+                meta["level"],
             )
             for response, meta in zip(responses, metadata)
         ]
@@ -218,4 +245,20 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
             "generation_lengths": batch["generation_lengths"].float().mean().item(),
             "prompt_lengths": batch["prompt_lengths"].float().mean().item(),
         }
+
+        # Per-level breakdown. The aggregate cannot distinguish "solving level 0
+        # and nothing else" from "uniformly mediocre", and which of those is
+        # happening is the question the ladder was built to answer.
+        by_level: dict[str, list[dict[str, float]]] = {}
+        for meta in batch["extra_env_info"]:
+            if meta["terms"] is not None:
+                suffix = level_metric_suffix(meta["level"])
+                by_level.setdefault(suffix, []).append(meta["terms"])
+        for suffix, level_terms in sorted(by_level.items()):
+            for name in _PER_LEVEL_TERMS:
+                metrics[f"{name}/{suffix}"] = sum(
+                    terms[name] for terms in level_terms
+                ) / len(level_terms)
+            metrics[f"num_problems_in_batch/{suffix}"] = len(level_terms)
+
         return batch, metrics

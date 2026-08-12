@@ -18,6 +18,7 @@ import os
 from datasets import Dataset
 
 from nemo_rl.data.datasets.raw_dataset import RawDataset
+from nemo_rl.environments.arc_agi_grid import REAL_ARC_LEVEL
 
 # ARC releases challenges and solutions as separate files; a split is the pair.
 _CHALLENGES_SUFFIX = "_challenges.json"
@@ -52,6 +53,10 @@ def _load_split(data_dir: str, split: str) -> list[dict]:
                     "train_pairs": task["train"],
                     "test_input": test_pair["input"],
                     "target": solution,
+                    # Real tasks are off the synthetic ladder, but they carry
+                    # the column so the two can be concatenated into one
+                    # validation set and reported as separate buckets.
+                    "level": REAL_ARC_LEVEL,
                 }
             )
     return rows

@@ -33,6 +33,18 @@ ANSWER_CLOSE = "</answer>"
 MAX_GRID_DIM = 30
 NUM_COLORS = 10
 
+# Difficulty level carried by every row, so per-level metrics can separate
+# "solving level 0 and nothing else" from "uniformly mediocre" -- which is the
+# whole question the synthetic curriculum exists to answer. Real ARC-AGI-2 rows
+# are not on the ladder and get their own bucket.
+REAL_ARC_LEVEL = -1
+
+
+def level_metric_suffix(level: int) -> str:
+    """Metric-key suffix for a difficulty level."""
+    return "real" if level == REAL_ARC_LEVEL else f"level_{level}"
+
+
 # Row boundary marker for edit distance. Outside 0-9 so it can never match a cell.
 _ROW_SENTINEL = -1
 
