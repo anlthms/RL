@@ -6,7 +6,11 @@ import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.arc_agi_environment import ArcAgiEnvConfig
-from nemo_rl.environments.arc_agi_grid import REAL_ARC_LEVEL
+from nemo_rl.environments.arc_agi_grid import (
+    REAL_ARC_LEVEL,
+    RewardWeights,
+    score_response,
+)
 from nemo_rl.environments.utils import create_env
 
 TARGET = [[1, 2], [3, 4]]
@@ -146,22 +150,40 @@ def test_terms_are_tagged_with_the_difficulty_level(arc_env):
 
 
 def test_global_metrics_are_reported_per_level(arc_env):
+    # Terms come from the real scorer rather than a hand-written dict: the
+    # metrics function reads every term by name, so a partial dict tests the
+    # test rather than the code.
+    weights = RewardWeights(
+        exact=1.0,
+        cell=0.20,
+        edit=0.10,
+        color=0.05,
+        extraneous=0.05,
+        shape=0.05,
+        format=0.05,
+    )
     scored = []
-    for level, grid_match in ((0, 1.0), (0, 0.0), (1, 1.0)):
+    for level, response in ((0, "12\n34"), (0, "99\n99"), (1, "12\n34")):
         scored.append(
             {
                 "target": TARGET,
                 "test_input": TEST_INPUT,
                 "task_id": "t",
                 "level": level,
-                "terms": {"grid_match": grid_match, "cell_match": grid_match},
+                "terms": score_response(answer(response), TARGET, TEST_INPUT, weights),
             }
         )
+    # Two of the three are exact, and the one at level 1 is one of them, so the
+    # aggregate and the per-level split disagree -- which is the point.
+    assert [terms["terms"]["grid_match"] for terms in scored] == [1.0, 0.0, 1.0]
     batch = BatchedDataDict(
         {
             "rewards": torch.tensor([1.0, 0.0, 1.0]),
             "is_end": torch.ones(3),
-            "text": ["a", "b", "c"],
+            # (b, s) token ids, not strings: calculate_pass_rate_per_prompt
+            # groups rollouts by prompt with torch.unique(dim=0). The first two
+            # share a prompt, so this is one solved prompt out of two.
+            "text": torch.tensor([[1, 2], [1, 2], [3, 4]]),
             "generation_lengths": torch.tensor([10, 20, 30]),
             "prompt_lengths": torch.tensor([5, 5, 5]),
             "extra_env_info": scored,
@@ -174,3 +196,4 @@ def test_global_metrics_are_reported_per_level(arc_env):
     assert metrics["num_problems_in_batch/level_0"] == 2
     # No real-ARC rows in this batch, so no real bucket is invented for them.
     assert "grid_match/real" not in metrics
+    assert metrics["pass@samples_per_prompt"] == pytest.approx(1.0)

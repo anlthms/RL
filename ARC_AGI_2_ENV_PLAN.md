@@ -987,15 +987,26 @@ Prompt lengths, generated task bodies at 500 tasks per level: median ~2.1k chara
 against 16.6k tokens for the worst real ARC row. Nothing is close to the context, and the real
 evaluation split is still the binding constraint on `max_total_sequence_length`.
 
-**Test status is uneven and worth stating precisely.** The 113 stdlib-only tests
-(`test_arc_agi_grid.py` + `test_arc_agi_generators.py`) pass on a login node. The dataset tests
-(`test_arc_synth_dataset.py`) and the new environment tests need HF `datasets` and Ray respectively
-and **have not been run** — the `nemo_rl_0804.sqsh` image has no working `uv` or venv interpreter
-under a bare `srun --container-image`, and four attempts at ~8 minutes each did not find one. What
-*was* verified out-of-container, in a scratch venv against the generator module directly, is the one
-thing most likely to fail at launch: 8000 synthetic rows materialize in 7.6 s, and a held-out
-synthetic split concatenates with the 172 real evaluation rows into one 344-row validation set with
-matching features and levels `[-1, 0, 1, 2, 3, 4, 5]`. Run the rest inside the container before M4.1.
+**Tests: 127 pass in-container** (job 6069244), across all four ARC files. `.run_arc_tests.sub` is
+the runner. Two things it caught that a login-node run could not, both in the new test fixtures
+rather than the code, and both worth knowing before writing the next environment test:
+
+- `global_post_process_and_metrics` reads *every* reward term by name, so a hand-written partial
+  `terms` dict raises `KeyError` and tests the test. Build terms with `score_response`.
+- `batch["text"]` is a `(b, s)` tensor of token ids, not a list of strings —
+  `calculate_pass_rate_per_prompt` groups rollouts by prompt with `torch.unique(dim=0)`.
+
+Also verified out-of-container: 8000 synthetic rows materialize in 7.6 s, and a held-out synthetic
+split concatenates with the 172 real evaluation rows into one 344-row validation set with matching
+features and levels `[-1, 0, 1, 2, 3, 4, 5]`.
+
+**Running the tests in the container needs `--no-container-mount-home`.** Without it enroot mounts
+the caller's host home over the container's, which hides the image's `uv` and produces a
+`uv: command not found` that reads as a broken image — it is not. `UV_PYTHON` must stay unset
+(`launch_experiment.sh:76`): Ray compares cluster and worker interpreter versions exactly.
+`.run_arc_tests.sub` runs on the `cpu` partition rather than `batch`/`interactive`, because the
+interactive QOS caps a user at 4 nodes and a training run wants all of them — tests should never
+queue behind, or displace, an experiment.
 
 Not yet run. M4.1 (the identity gate, `levels: [0]`, 2 nodes, ~20 steps, go at `grid_match > 0.9`)
 is the next step and must pass before anything else: if a 1.7B model cannot learn to copy a grid it
