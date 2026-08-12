@@ -12,6 +12,16 @@ Branch: `async_arc`.
 
 ---
 
+> **Status, 2026-08-11 — start at §13.** The environment, reward, prompt, and data path are built and
+> have run four times end to end (§8, §11, §12). The model has learned the output contract and
+> nothing else: `grid_match` is **0.0000 at every checkpoint of every run**, so no gradient has ever
+> come from exact match. Two rounds of reward redesign moved presentation only. §13 is the current
+> plan — a synthetic task generator that produces solvable tasks so exact-match signal exists at all.
+> §1-§7 are the original design; §8-§12 are results, and where they contradict the design the results
+> win — §3's prompt and §4's reward have both been superseded, as flagged in place. §14 is open.
+
+---
+
 ## 1. The question up front: does inducing CoT require SFT?
 
 **No — GRPO alone can do it, and the CoT does not need to be human-readable.** But format is not
@@ -87,6 +97,10 @@ pairs as few-shot context. Grids are ≤30×30, symbols 0–9.
 
 ## 3. Prompt construction
 
+> **Superseded by §11.** Grids are now space-delimited, the prompt carries a color legend and a
+> five-step structure, and the `<answer>` tags live inside its final step. The layout below is the
+> original. The token-budget reasoning still holds, at roughly double the numbers.
+
 ### Layout
 
 ```
@@ -141,6 +155,11 @@ Confirm against the real tokenizer in Milestone 0 rather than trusting the chara
 ---
 
 ## 4. Reward design
+
+> **Superseded by §12.** The two similarity terms are now paid on their gain over echoing the test
+> input, an edit-distance term was added, and the cell alignment is searched rather than centered.
+> The rationale below — dense terms exist to break degenerate groups, exact match stays dominant —
+> is unchanged and is still the reason the reward has the shape it does.
 
 Scored on the extracted final grid only; the reasoning is never inspected. Let `T` be the target
 grid (`h_t × w_t`) and `P` the prediction (`h_p × w_p`).
@@ -765,17 +784,201 @@ that a 1.7B model can actually solve, so that `grid_match` has somewhere to move
 iteration on whatever it does solve. Shaping the reward further looks exhausted -- two rounds of it
 have moved presentation and nothing else.
 
-## 13. Open questions
+### Alignment is now chosen, not assumed (code-only, no run yet)
+
+`best_alignment_cell_accuracy` replaces the centered overlay as the alignment behind `cell_match`:
+slide the smaller grid entirely inside the larger (valid-mode cross-correlation) and take the best
+cell agreement. Colors are labels, not magnitudes, so the per-cell operator is equality — which is
+exactly what a product summed over one-hot channels computes, so the 3D-conv and XNOR formulations
+agree and neither needs the channels materialized.
+
+It **replaces** the centered overlay's alignment rather than adding a term beside it: on 419 real
+predictions from job 6056499 the two correlate at r = 0.978 (mean |diff| 0.034), so a separate
+weighted term would have been `cell_match` wearing a second weight, not new signal. What it buys is
+the end of an arbitrary convention — `(h_t - h_p) // 2` scores a 1x2 patch that exactly matches the
+right end of a 1x3 target as **0.0**; valid mode scores it 2/3. Where shapes are equal (123 of 172
+evaluation rows) there is one placement and the two agree by construction. Falls back to the
+centered overlay for the mixed-dimension cases (one grid taller, the other wider, 22 of 419) where
+valid mode has no placement. The max-area denominator is unchanged, and the copy baseline uses the
+same function so the relative scoring stays consistent.
+
+**This has not been trained with yet.** It landed after job 6056499 and is unmeasured.
+
+---
+
+## 13. Next: the synthetic generator ladder
+
+This section is the working plan for the next phase. Everything above is history; this is what to
+build.
+
+### Why
+
+Four runs, zero tasks solved. `grid_match` has been 0.0000 at every checkpoint of every run, so
+there has never been a single bit of exact-match signal — every gradient the policy has ever
+received came from shaping, and shaping has bought presentation (format validity 0.43 -> 0.91,
+grounded prose, no more drift into the echo) and nothing else. Two rounds of reward redesign have
+not changed that, and there is no obvious third round that is not just a fourth way to score
+near-misses.
+
+The missing ingredient is tasks the model can actually solve. ARC-AGI-2 is built so that frontier
+models score near zero; a 1.7B model on it is not a learning problem, it is a null signal. A
+generator gives us tasks of tunable difficulty, unlimited volume, and — critically — a regime where
+`grid_match` is nonzero and can therefore be optimized directly rather than approximated.
+
+### Difficulty is mixed within every batch, not ramped across steps
+
+**Decision: every batch samples across all levels.** Not a scheduled ramp.
+
+The reason is specific to GRPO rather than general curriculum lore. Advantage is computed within a
+group of `num_generations_per_prompt` rollouts on the same prompt; if every rollout in a group gets
+the same reward the advantage is zero and the group contributes no gradient. A ramp produces phases
+where every task is at one difficulty, so groups are uniformly hopeless early and uniformly trivial
+late — the degenerate-group failure §1 identified as the central risk, reintroduced by the
+curriculum meant to fix it. Mixing guarantees that some level in every batch sits at a solve rate
+strictly between 0 and 1.
+
+If a frontier-weighted mixture is wanted later (reweight toward levels whose solve rate is neither 0
+nor 1), it needs a feedback path from the environment back to the data generator across Ray actors.
+Do not build that first. Mixed-uniform is the baseline; earn the complexity.
+
+### The ladder
+
+Every task is generated from `(seed, index)` so a run is reproducible without a static dataset. Each
+task emits 2-4 few-shot pairs plus one test pair, matching real ARC's shape.
+
+| level | transformation |
+|---|---|
+| 0 | **identity** — output = input. The sanity gate: if this is not learned, something is broken upstream of the task |
+| 1 | **dihedral-8** — rot90 / rot180 / rot270 / flip-h / flip-v / transpose / anti-transpose |
+| 2 | **single-color ops** — drop color X to background; recolor X -> Y; keep only X |
+| 3 | **geometric** — tile k x m; crop to the bounding box of non-background; scale by integer k; add a border |
+| 4 | **structure** — denoise (remove isolated cells, keep shapes); complete a symmetry; fill enclosed regions |
+| 5 | **compositions** — two level-1..3 operations applied in sequence |
+
+Look at ARC-AGI-1's training split for more level-2/3 ideas; its tasks are markedly simpler than
+ARC-AGI-2's and several are close to one-liners in this vocabulary.
+
+### Input grids need structure, not noise
+
+This is the part that is easy to get wrong. Uniform random grids make several levels degenerate:
+crop-to-bounding-box needs a bounding box, denoising needs signal to distinguish from noise, and
+symmetry completion needs a symmetry. Generate inputs from a small library of *patterns* —
+scattered points, filled and hollow rectangles, lines and crosses, symmetric blobs, repeated motifs,
+a background with one or two foreground objects — with random sizes (3x3 up to ~20x20) and a random
+color palette drawn from 1-9 over background 0.
+
+### Two correctness properties the generator must enforce
+
+Both of these produce tasks that are unsolvable in principle, which in a training run is
+indistinguishable from the model failing to learn. Guard them explicitly and unit-test the guards.
+
+1. **Identifiability.** The rule must be inferable from the few-shot pairs alone. "Drop color 3" is
+   not identifiable unless color 3 appears in the examples; "recolor 3 -> 5" is not identifiable if
+   the examples never contain a 3. Reject and resample any task whose rule is not pinned down by its
+   own examples.
+2. **Non-degeneracy.** Reject any non-identity task where output == input on every example — rot180
+   of a symmetric grid, dropping a color that is absent, cropping a grid with no background border.
+   These are level-0 tasks wearing a level-3 label, and they inflate the solve rate of whatever
+   level they land in.
+
+Also reject tasks where echoing the input already solves the test pair, except at level 0 where that
+is the point.
+
+### Augmentation
+
+Free volume, and it blocks memorizing specific colors rather than the rule: permute the non-zero
+colors 1-9 consistently across a whole task, and apply a whole-task dihedral transform (both input
+and output of every pair). Both preserve the rule exactly, which is what makes them safe.
+
+### Where the code goes
+
+| File | Change |
+|---|---|
+| `nemo_rl/environments/arc_agi_generators.py` | **new.** Pure transformation and pattern-generation functions, numpy + stdlib only, mirroring `arc_agi_grid.py` so it is testable with no Ray/torch/GPU. Exports one `generate_task(rng, level) -> dict` plus the per-level primitives and the two rejection guards. |
+| `nemo_rl/data/datasets/response_datasets/arc_synth.py` | **new.** Dataset that materializes tasks from `(seed, index)` across a configured level mixture. Emits the same row schema as `arc_agi.py` (`train_pairs`, `test_input`, `target`, `task_id`) plus `level`. |
+| `nemo_rl/data/processors.py` | extend `arc_agi_data_processor` to carry `level` into `extra_env_info`; keep it one processor, the row schema is identical. |
+| `nemo_rl/environments/arc_agi_environment.py` | add `level` to `ArcAgiEnvironmentMetadata`, and report **per-level** `grid_match` from `global_post_process_and_metrics`. Without the per-level split an aggregate number cannot distinguish "solving level 0, nothing else" from "uniformly mediocre", which is the whole question. |
+| `examples/configs/async/env_arc_synth.yaml` | **new.** Parallel to `env_arc.yaml`; sets the generator seed, the level mixture, and both validation sources. |
+| `examples/configs/async/qwen3_1p7b_arcsynth_{colocated,non_colocated}.yaml` | **new.** `defaults: [qwen3_1p7b_<topology>.yaml, env_arc_synth.yaml]`. |
+| `launch_experiment.sh` | add `arcsynth` to the `ENV` axis -> `examples/run_grpo.py`. |
+| `tests/unit/environments/test_arc_agi_generators.py` | **new** — see below. |
+
+### Validation: both sources
+
+- **Synthetic held-out** (fresh seed, same mixture) — shows whether the curriculum is being learned
+  at all, per level. This is where `grid_match` should finally leave zero.
+- **Real ARC-AGI-2 evaluation, all 172 rows** — shows whether any of it transfers, and keeps the
+  headline metric comparable to all four prior runs.
+
+### Milestones
+
+**M4.0 — generator offline.** Tests green; eyeball a dump of generated tasks at every level with
+`tools/arc_agi_prompt_stats.py --dump`; confirm prompt lengths still fit. *Go:* both rejection
+guards demonstrably fire; no level emits a task solvable by echoing the input (except level 0).
+
+**M4.1 — the identity gate.** Level 0 only, 2 nodes, ~20 steps. *Go:* `grid_match` > 0.9. This is a
+plumbing test, not a research result: if a 1.7B model cannot learn to copy a grid it is shown, the
+problem is in the data path, the prompt, or the parser, and no amount of curriculum will help.
+**Do not proceed past a failure here.**
+
+**M4.2 — levels 0-2 mixed**, 8 nodes, 60 steps. *Go:* per-level `grid_match` rising on levels 1 and
+2, not only 0.
+
+**M4.3 — full ladder mixed**, 8 nodes. Report per-level `grid_match` and the real ARC-AGI-2 eval.
+The question this phase exists to answer is whether real-ARC cell match improves at all once the
+model has genuinely solved *something*.
+
+### Tests
+
+- Each transformation is its own inverse or has a known fixed point: `rot180(rot180(g)) == g`,
+  `transpose(transpose(g)) == g`, dihedral-8 forms a group of order 8 on a non-symmetric grid.
+- Identifiability guard rejects a "drop color X" task whose examples never contain X.
+- Non-degeneracy guard rejects rot180 of a symmetric grid and a crop with no background border.
+- Echo guard: for every level above 0, the generated test target != test input.
+- Color-permutation augmentation preserves the rule: applying the rule then permuting equals
+  permuting then applying the rule.
+- Level mixture: sampling N tasks yields every configured level, and generation is deterministic in
+  `(seed, index)`.
+
+### Operational notes for whoever picks this up
+
+- Branch `async_arc`, currently at `806ab83d`. Both prior experiment branches are preserved under
+  `autoresearch/2026-08-10-arc-prompt/`. Ledger: `reports/auto_research/arc-prompt/experiments.tsv`.
+- Launch: `SUBMIT_ACCOUNT=nemotron_sw_post QOS=normal MODEL=qwen3_1p7b ENV=arcsynth NUM_ACTOR_NODES=8
+  MAX_STEPS=60 TIMEOUT_MIN=180 RUN_TAG=<tag> EXTRA_OVERRIDES="grpo.val_at_start=true
+  grpo.val_period=10" bash launch_experiment.sh colocated`. Each launch needs explicit approval.
+- **Never combine `CMP=1` with an ARC env** — it hard-sets `max_total_sequence_length=16384` after
+  the config layer, and ARC prompts reach 16593 tokens.
+- Runs write to `logs/exp_NNN/`, incrementing per run, and every validation chat lands in
+  `val_data_step<N>.jsonl` there. `tools/arc_agi_score_val_dumps.py <log_dir>` re-scores a finished
+  run offline, including the copy-the-input check.
+- The grid and generator modules avoid Ray/torch/GPU, so their tests run on a login node with
+  `PYTHONPATH=. python3 -m pytest <copy of the test file outside tests/>` — `tests/unit/conftest.py`
+  imports Ray, so run the file from a scratch directory to skip it. Everything else needs the
+  container.
+- 8-node jobs have queued for 30-90 minutes; a 60-step ARC run takes ~40 minutes once started.
+
+## 14. Open questions
 
 1. **Eval-set size.** 120 tasks / 172 rows is small; step-to-step validation noise will swamp real
    movement. Consider holding out a slice of the 1000 training tasks as the online validation signal
    and reserving the official evaluation split for milestone reporting.
 2. **Where partial credit stops helping.** Shaped reward is a bootstrap; there may be a point where
    it teaches near-miss behavior. Annealing `w_cell` toward 0 as grid match rises is the obvious
-   knob, untested.
-3. **Centering convention.** `(h_t - h_p) // 2` floors; for odd deltas the alternative alignment
-   scores differently. Taking the max over both roundings is more forgiving but doubles scorer cost
-   — cheap enough that it's worth measuring whether it matters.
+   knob, untested — and newly testable, because the generator is the first setting where grid match
+   is nonzero and therefore has something to anneal against.
+3. ~~**Centering convention.**~~ **Closed** by `best_alignment_cell_accuracy` (§12): the alignment
+   is now searched in valid mode rather than assumed, so the `//2` rounding no longer decides
+   near-misses. Untrained-with as of `806ab83d`.
 4. **Multiple test inputs per task.** 1076 train rows come from 1000 tasks, so some tasks appear
    more than once with different test inputs and the same few-shot context. Fine for training;
    worth noting it makes rows within a task non-independent.
+5. **Does the edit-distance term earn its weight?** It shipped together with the copy-relative
+   re-baselining in job 6056499, so its individual contribution has never been isolated. Cheap to
+   ablate (`edit_weight: 0.0`) once there is a setting where the result would be legible — which
+   means after the generator produces nonzero `grid_match`, not on ARC-AGI-2.
+6. **Does solving synthetic tasks transfer to real ARC at all?** The premise of §13 is that exact-match
+   signal on solvable tasks teaches something that shaping cannot. That premise is untested and is
+   the main risk of the whole phase: it is entirely possible the model learns the generator's
+   vocabulary and transfers nothing. M4.3's real-ARC validation is the measurement, and a null
+   result there is a real answer, not a failed run.
