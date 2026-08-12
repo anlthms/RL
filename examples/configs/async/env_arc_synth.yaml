@@ -48,6 +48,30 @@ policy:
   max_total_sequence_length: 32768
   generation:
     max_new_tokens: 8192
+    mcore_generation_config:
+      # The KV cache buffer, and with it how many rollouts can decode at once.
+      # The inherited 10 comes from grpo_math_1B.yaml -- a 1B *math* exemplar
+      # with short prompts and short answers. ARC prompts reach 16.6k tokens
+      # against an 8k response budget, and mcore sizes concurrency from this
+      # buffer and max_sequence_length together (`max_requests` is "primarily
+      # limited by the combination of buffer_size_gb and max_sequence_length",
+      # megatron/core/inference/config.py). At max_model_len 32768 and Qwen3's
+      # GQA -- 8 KV heads x 128 dim x 28 layers, ~115 KB/token -- a full-length
+      # sequence reserves ~3.8 GB, so 10 GB admits very few concurrent requests.
+      #
+      # Measured on job 6070328 (M4.1, 2 nodes): the trainer sat in
+      # idle/buffer_starvation for 40-50% of every step, waiting on the
+      # collector, while policy_training used only ~20% of the step. Peak GPU
+      # memory was ~22 GB of the ~186 GB a GB200 has, so the buffer was the
+      # binding constraint and not the hardware. nanov3_base.yaml already runs
+      # 80 here on a far larger model.
+      #
+      # This is throughput-only: same groups, same global batch, identical
+      # gradient math. It changes how fast rollouts are produced, nothing about
+      # what is learned from them. Watch `weight_sync` -- kv_cache_management_mode
+      # is `offload`, so a bigger buffer is more to move at each training pause
+      # (it was 0.72s of a 17s step before this change).
+      buffer_size_gb: 40
 
 data:
   _override_: true
