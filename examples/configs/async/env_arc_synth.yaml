@@ -12,6 +12,15 @@
 # match has somewhere to move from.
 
 grpo:
+  # Validation on, in the same layer that configures what to validate against.
+  # The model bases ship `val_period: 0` / `val_at_start: false`, so without
+  # these a run silently trains to completion having never scored a single
+  # validation row -- while this file carefully sets up two validation sources
+  # and a batch size for them. Every prior ARC launch passed these through
+  # EXTRA_OVERRIDES, which works right up until someone forgets.
+  val_at_start: true
+  val_period: 10
+
   # Validation is the synthetic held-out split followed by all 172 real
   # ARC-AGI-2 evaluation rows, in that order, so max_val_samples has to cover
   # both -- the loader does not shuffle and stops after
