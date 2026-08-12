@@ -1065,6 +1065,59 @@ evidence above. M4.2's step times against M4.1's are the free comparison. Watch 
 `kv_cache_management_mode` is `offload`, so a 4x buffer is 4x more to move at each training pause
 (0.72 s of a 17 s step before the change).
 
+### M4.2 — levels 0-2 mixed: **NO GO. The run learned to echo the input.** (job 6072073, 4 nodes, 60 steps)
+
+Go criterion was per-level `grid_match` rising on levels 1 and 2, not only 0. It is not met.
+
+| step | L0 grid | L1 grid | L2 grid | real grid |
+|---|---|---|---|---|
+| 0 | 0.586 | 0.000 | 0.018 | 0.0000 |
+| 20 | 0.759 | 0.000 | 0.088 | 0.0000 |
+| 40 | 0.879 | 0.000 | 0.000 | 0.0000 |
+| 60 | **0.897** | **0.000** | **0.000** | 0.0000 |
+
+Level 0 crossed 0.9 at step 30 and plateaued, which retroactively settles M4.1's gate. Levels 1 and
+2 never moved: L1 is 0.000 at six of seven checkpoints, and L2 bounces 0.000-0.088 with no trend
+(n=57, so one solved task is 0.0175 -- the whole range is a few tasks).
+
+**The cause, and it is a curriculum-design error rather than a training failure.** Re-scoring the
+dumps with `tools/arc_synth_score_val_dumps.py`:
+
+| step | level | grid | **echoed** | cell(pred) | cell(echo) | shape_ok |
+|---|---|---|---|---|---|---|
+| 0 | 1 | 0.000 | 0.242 | 0.509 | 0.555 | 0.212 |
+| 60 | 1 | 0.000 | **0.789** | 0.543 | 0.555 | 0.368 |
+| 0 | 2 | 0.018 | 0.190 | 0.700 | 0.898 | 0.238 |
+| 60 | 2 | 0.000 | **0.768** | 0.885 | 0.898 | 0.857 |
+
+By step 60, **77-79% of level-1 and level-2 answers are the test input copied verbatim**, up from
+19-24% at step 0, and `cell(pred)` has converged on `cell(echo)` at both levels (0.543 vs 0.555;
+0.885 vs 0.898). The policy is not approximating the transformation badly — it has *become* the echo.
+
+**Mixing level 0 with harder levels created a dominant degenerate strategy.** Echoing scores the full
++1.4 on level 0, which is a third of every batch, and the copy-relative reward (§12) makes it worth
+about zero on levels 1-2 rather than negative. So "always echo" beats "attempt the transformation and
+fail", and GRPO found it. §13 called level 0 "the sanity gate" and *also* listed it as a rung of the
+ladder, and the mixing decision then swept it into the training mixture; those two choices are
+individually reasonable and jointly fatal. **Level 0 is a gate, not a curriculum level.**
+
+The fix is one line: drop level 0 from the training mixture (`levels: [1, 2]`, later `[1,2,3,4,5]`),
+keeping it only as M4.1's plumbing check. Then no level rewards echoing and the degenerate strategy
+is gone. This has not been run yet.
+
+**A second, independent finding: exact match is brutal on large grids.** Bucketing the final
+checkpoint by target area, level 0 scores 1.000 under 150 cells, 0.792 at 150-300, 0.750 above 300 --
+at 0.99 per-cell accuracy a 300-cell grid matches exactly only ~5% of the time. But this does *not*
+explain levels 1-2: level 2 is 0.000 even in the under-60-cell bucket, where it echoes. Grid size is
+a real second difficulty axis the ladder never controlled, and it is worth adding as a knob, but it
+is not the reason M4.2 failed.
+
+Throughput, for the record: the `buffer_size_gb` 10 -> 40 change worked. `idle/buffer_starvation`
+fell from 40-50% of every step (M4.1) to 2-11%, `policy_training` rose from 19-22% to 25-32%, and
+`weight_sync` stayed flat in absolute terms (0.72s -> 0.71-1.09s), so the offload cost the change
+risked did not materialize. Node count differs between the two runs, but starvation is a *ratio* of
+collector to trainer speed and both scale with nodes, so the fraction is the comparable number.
+
 ### Operational notes for whoever picks this up
 
 - Branch `async_arc`, currently at `806ab83d`. Both prior experiment branches are preserved under
