@@ -1,5 +1,5 @@
 # nano-v3 30B-A3B, math env, non_colocated async GRPO (Megatron inference).
-# Launch: MODEL=nanov3 ENV=math bash launch_experiment.sh non_colocated
+# Launch: ENV=math bash launch_experiment.sh non_colocated
 defaults:
   - nanov3_non_colocated.yaml
   - env_math.yaml

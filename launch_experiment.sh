@@ -15,15 +15,14 @@
 #
 # Launch an async GRPO experiment (Megatron inference) via submit_nemorl.sh.
 #
-# The experiment is three orthogonal axes; every combination has a config at
-# examples/configs/async/<model>_<env>_<topology>.yaml.
+# The experiment is two orthogonal axes; every combination has a config at
+# examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
-#   MODEL     qwen3_1p7b | nanov3         which policy to train
 #   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
-#   SUBMIT_ACCOUNT=<account> [MODEL=...] [ENV=...] \
+#   SUBMIT_ACCOUNT=<account> [ENV=...] \
 #     bash launch_experiment.sh {colocated|non_colocated}
 #
 # Common env:
@@ -51,12 +50,6 @@ case "${TOPOLOGY}" in
   *) die "usage: bash launch_experiment.sh colocated|non_colocated" ;;
 esac
 
-MODEL="${MODEL:-qwen3_1p7b}"
-case "${MODEL}" in
-  qwen3_1p7b | nanov3) ;;
-  *) die "invalid MODEL: ${MODEL} (expected qwen3_1p7b or nanov3)" ;;
-esac
-
 ENV="${ENV:-gym}"
 case "${ENV}" in
   gym | math) ;;
@@ -75,7 +68,7 @@ USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 unset UV_PYTHON
 
 # One name for both slurm and wandb, so a job id always maps to a run.
-RUN_NAME="async_${TOPOLOGY}_${MODEL}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
+RUN_NAME="async_${TOPOLOGY}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
 export JOB_NAME="${RUN_NAME}"
 
 # ------------------------------------------------- override accumulator ----
@@ -129,8 +122,8 @@ case "${ENV}" in
   gym)  ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
   math) ENTRYPOINT="examples/run_grpo.py" ;;
 esac
-CONFIG="examples/configs/async/${MODEL}_${ENV}_${TOPOLOGY}.yaml"
-[[ -f "${CONFIG}" ]] || die "no config for ${MODEL} x ${ENV} x ${TOPOLOGY}: ${CONFIG}"
+CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
+[[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
 
 printf -v SETUP_JOINED '%s && ' "${SETUP_PARTS[@]}"
 export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"

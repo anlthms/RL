@@ -13,7 +13,7 @@ policy:
       # Only the non-colocated arm refits, so only it reaches MCore's NVSHMEM copy
       # service. That service now hard-errors unless NVSHMEM_MAX_CTAS is exactly
       # "2", and NVSHMEM's 128-team default is exhausted building the cross-world
-      # refit group. qwen3_1p7b_base.yaml has carried these for the same reason.
+      # refit group.
       NVSHMEM_MAX_TEAMS: "512"
       NVSHMEM_MAX_CTAS: "2"
 
