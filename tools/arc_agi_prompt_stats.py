@@ -40,6 +40,9 @@ from nemo_rl.environments.arc_agi_generators import LEVELS, generate_task
 from nemo_rl.environments.arc_agi_grid import format_task_prompt, serialize_grid
 
 DEFAULT_DATA_DIR = "/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025"
+# The model the async arm trains; prompt lengths are tokenizer-specific, so the
+# published numbers have to be re-measured whenever this changes.
+DEFAULT_MODEL = "/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
 
 
 def percentile(values: list[int], fraction: float) -> int:
@@ -49,7 +52,7 @@ def percentile(values: list[int], fraction: float) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
-    parser.add_argument("--model-name", default="Qwen/Qwen3-1.7B")
+    parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--prompt-file", default="examples/prompts/arc_agi.txt")
     parser.add_argument("--max-seq-length", type=int, default=32768)
     parser.add_argument(
