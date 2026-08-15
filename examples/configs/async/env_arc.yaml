@@ -1,0 +1,95 @@
+# ARC-AGI data/env layer. Model-agnostic: list AFTER a <model>_<topology>
+# config in a `defaults:` list to run that model on ARC-AGI.
+#
+# `_override_: true` fully replaces the data/env blocks the model base
+# inherited, so this composes onto a gym-native base as well as a math-native
+# one. Runs under the standard examples/run_grpo.py entrypoint -- no NeMo-Gym
+# server and no gym venv.
+
+grpo:
+  # Async settings are inherited (in_flight_weight_updates: true,
+  # max_trajectory_age_steps: 4). ARC's early training moves the policy fast
+  # -- format validity 0.43 -> 0.85 in ten steps -- so the per-token importance
+  # ratios are large but *unbiased*: each denominator is the probability of the
+  # distribution that actually sampled that token. The problem is variance, so
+  # it is controlled below rather than by throttling the collector.
+
+  # The ARC-AGI-2 public evaluation split is 120 tasks -> 172 test-pair rows.
+  # Score all of them; 43 divides 172 exactly (validate() floors the ratio).
+  max_val_samples: 172
+  val_batch_size: 43
+
+policy:
+  # No optimizer or tokenizer settings here on purpose. The qwen3-1.7B arm that
+  # this layer was originally written against tuned `lr: 2.0e-6` (§9) and set
+  # Qwen3's `enable_thinking: false`; both are model-specific, and leaving them
+  # in a layer documented as model-agnostic is what killed job 6103023 --
+  # nano-v3 ships `min_lr: 3e-6`, so a shared `lr: 2e-6` drove every policy
+  # worker into `assert self.max_lr >= self.min_lr` at construction.
+  # ARC prompts are large, and space-delimiting the cells roughly doubled them:
+  # measured at the real Qwen3-1.7B tokenizer, p99 is 12.3k (training) / 14.9k
+  # (evaluation) tokens and the worst row in either split is 16593. Nothing
+  # overflows 32k, and 32768 - 16593 - 8192 still leaves headroom.
+  # NOTE: launch_experiment.sh's CMP=1 preset hard-sets 16384 and is applied
+  # after this layer -- do not combine CMP=1 with ENV=arc.
+  max_total_sequence_length: 32768
+  generation:
+    # Cap the response. The context is sized for the *prompt*, not for
+    # unbounded reasoning: with the default 32768 budget rollouts run to the
+    # cap, the async buffer never fills, and no training step ever starts.
+    #
+    # 8192 rather than 4096 because the prompt now asks the model to check its
+    # rule against every example before answering, which means re-deriving
+    # several grids. Running out of budget before reaching `<answer>` is a
+    # failure mode we have already hit once (every rollout at the reward floor,
+    # reward std 0.0), and it looks like a reward bug rather than a length one.
+    max_new_tokens: 8192
+
+data:
+  _override_: true
+  # Non-null required: the processor does `length >= max_seq_length`.
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: arc_agi
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025
+    split: training
+    # The ARC `test` split ships no solutions file (competition holdout), so
+    # `evaluation` is the only usable validation source.
+    validation_split: evaluation
+    seed: ${grpo.seed}
+  validation: null  # ArcAgiDataset supplies val_dataset from validation_split
+  default:
+    prompt_file: "examples/prompts/arc_agi.txt"
+    system_prompt_file: null
+    processor: "arc_agi_data_processor"
+    env_name: "arc_agi"
+
+env:
+  _override_: true
+  should_use_nemo_gym: false
+  arc_agi:
+    # Dense terms exist to break degenerate GRPO groups; exact match stays
+    # dominant so shaping is never the cheaper path. See ArcAgiEnvConfig.
+    #
+    # cell_weight and edit_weight are paid on the gain over echoing the test
+    # input, not on absolute similarity: an echo scores ~0.61 absolute cell
+    # accuracy on this eval split, which is more than any run has earned by
+    # reasoning, and job 6041201 duly converged on it (58% of validation
+    # answers by step 60). Against the copy baseline an echo is worth 0.
+    exact_weight: 1.0
+    cell_weight: 0.20
+    edit_weight: 0.10
+    color_weight: 0.05
+    extraneous_color_weight: 0.05
+    shape_weight: 0.05
+    format_weight: 0.05
+
+logger:
+  monitor_gpus: true
+  # Every validation chat is already written to `val_data_step<N>.jsonl` in the
+  # log dir; this additionally pretty-prints a few into the driver log, which is
+  # the fastest way to see what the prompt is actually producing.
+  num_val_samples_to_print: 4

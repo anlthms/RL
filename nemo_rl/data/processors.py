@@ -30,6 +30,7 @@ from nemo_rl.data.interfaces import (
     VLMMessageLogType,
 )
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
+from nemo_rl.environments.arc_agi_grid import format_task_prompt
 
 TokenizerType = PreTrainedTokenizerBase
 
@@ -443,6 +444,79 @@ def math_hf_data_processor(
     return output
 
 
+def arc_agi_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int,
+    idx: int,
+) -> DatumSpec:
+    """Process an ARC row into a DatumSpec.
+
+    Serves both the real corpus (``response_datasets/arc_agi.py``) and the
+    synthetic ladder (``response_datasets/arc_synth.py``): the row schemas are
+    identical, so a second processor would be this one with a different name.
+    """
+    task_body = format_task_prompt(datum_dict["train_pairs"], datum_dict["test_input"])
+    extra_env_info = {
+        "target": datum_dict["target"],
+        # The environment scores the similarity terms as gain over echoing the
+        # test input, so it needs the input itself, not just the target.
+        "test_input": datum_dict["test_input"],
+        "task_id": datum_dict["task_id"],
+        # Carried so the environment can report per-level metrics. Both ARC
+        # row schemas always set it -- real rows as REAL_ARC_LEVEL -- so a
+        # missing key is a producer bug and should raise rather than quietly
+        # file the sample under the wrong bucket.
+        "level": datum_dict["level"],
+        "terms": None,
+    }
+
+    message_list = []
+    if task_data_spec.system_prompt:
+        message_list.append({"role": "system", "content": task_data_spec.system_prompt})
+    formatted_content = (
+        task_data_spec.prompt.format(task_body) if task_data_spec.prompt else task_body
+    )
+    message_list.append({"role": "user", "content": formatted_content})
+
+    message: str = tokenizer.apply_chat_template(  # type: ignore
+        message_list,
+        tokenize=False,
+        add_generation_prompt=True,
+        add_special_tokens=False,
+    )
+    token_ids = tokenizer(
+        message,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )["input_ids"][0]
+    message_log: LLMMessageLogType = [
+        {"role": "user", "content": message, "token_ids": token_ids}
+    ]
+
+    length = sum(len(m["token_ids"]) for m in message_log)
+
+    loss_multiplier = 1.0
+    if length >= max_seq_length:
+        # make smaller and mask out
+        for chat_message in message_log:
+            chat_message["token_ids"] = chat_message["token_ids"][
+                : min(4, max_seq_length // len(message_log))
+            ]
+        loss_multiplier = 0.0
+
+    output: DatumSpec = {
+        "message_log": message_log,
+        "length": length,
+        "extra_env_info": extra_env_info,
+        "loss_multiplier": loss_multiplier,
+        "idx": idx,
+        "task_name": datum_dict["task_name"],
+    }
+    return output
+
+
 def vlm_hf_data_processor(
     datum_dict: dict[str, Any],
     task_data_spec: TaskDataSpec,
@@ -819,6 +893,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
         "helpsteer3_data_processor": helpsteer3_data_processor,
         "kd_data_processor": kd_data_processor,
         "math_data_processor": math_data_processor,
+        "arc_agi_data_processor": arc_agi_data_processor,
         "math_hf_data_processor": math_hf_data_processor,
         "multichoice_qa_processor": multichoice_qa_processor,
         "sft_processor": sft_processor,
