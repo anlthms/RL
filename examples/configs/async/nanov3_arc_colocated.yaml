@@ -1,0 +1,5 @@
+# nano-v3 30B-A3B, real ARC-AGI-2 env, colocated async GRPO (Megatron inference).
+# Launch: ENV=arc bash launch_experiment.sh colocated
+defaults:
+  - nanov3_colocated.yaml
+  - env_arc.yaml

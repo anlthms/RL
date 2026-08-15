@@ -29,6 +29,10 @@ class EnvRegistryEntry(TypedDict, total=False):
 
 # Environment registry. Key is the env name, value is a dictionary with the actor class FQN and optional default processor.
 ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
+    "arc_agi": {
+        "actor_class_fqn": "nemo_rl.environments.arc_agi_environment.ArcAgiEnvironment",
+        "default_processor": "arc_agi_data_processor",
+    },
     "math_default": {
         "actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment",
     },

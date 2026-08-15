@@ -18,7 +18,8 @@
 # The experiment is two orthogonal axes; every combination has a config at
 # examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
-#   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
+#   ENV       gym | math | arc | arcsynth NeMo-Gym servers, the built-in math env, real
+#                                         ARC-AGI-2, or the synthetic ARC difficulty ladder
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
@@ -52,8 +53,8 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | math) ;;
-  *) die "invalid ENV: ${ENV} (expected gym or math)" ;;
+  gym | math | arc | arcsynth) ;;
+  *) die "invalid ENV: ${ENV} (expected gym, math, arc, or arcsynth)" ;;
 esac
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
@@ -107,6 +108,14 @@ fi
 
 # Layer 3: CMP preset -- validation off, weights-only checkpoints, fixed seq.
 if [[ "${CMP:-0}" == 1 ]]; then
+  # The preset's fixed 16384 is applied after the config layer and so wins over
+  # env_arc*.yaml's 32768. The worst real ARC evaluation prompt is 16593 tokens,
+  # and an overlong prompt is not an error -- the processor masks the row with
+  # loss_multiplier=0 -- so the combination degrades the run silently. Refuse it
+  # rather than leaving it as a comment nobody reads at 2am.
+  case "${ENV}" in
+    arc*) die "CMP=1 forces max_total_sequence_length=16384, below the 16593-token worst-case ARC prompt; do not combine it with ENV=${ENV}" ;;
+  esac
   add_override "grpo.val_period=0 grpo.val_at_start=false grpo.val_at_end=false"
   add_override "checkpointing.enabled=true checkpointing.save_period=5 checkpointing.save_optimizer=false"
   add_override "policy.max_total_sequence_length=16384"
@@ -120,7 +129,7 @@ fi
 # entrypoint; math runs on the standard one.
 case "${ENV}" in
   gym)  ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  math) ENTRYPOINT="examples/run_grpo.py" ;;
+  math | arc | arcsynth) ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"

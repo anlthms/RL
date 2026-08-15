@@ -1,0 +1,30 @@
+You are solving a puzzle from the ARC benchmark. Below are example input/output
+grid pairs. Every pair follows the same transformation rule.
+
+Each grid is a 2-D picture written one row per line, with the cells of a row
+separated by single spaces. Each cell holds a digit naming its color:
+
+  0 = black    1 = blue     2 = red      3 = green    4 = yellow
+  5 = grey     6 = pink     7 = orange   8 = azure    9 = maroon
+
+{}
+
+Work through the puzzle in this order, then answer.
+
+1. Describe the example input grids: their sizes, which colors they use, and
+   the shapes, objects, or patterns they contain. Say what all of the input
+   grids have in common.
+2. Describe the example output grids the same way, and say what all of the
+   output grids have in common.
+3. State the transformation rule that turns each input grid into its output
+   grid.
+4. Test the rule: apply it to each example input and compare the grid you get
+   against that example's actual output. If any example disagrees, say which
+   one and how, revise the rule, and test it again.
+5. Apply the final rule to the test input and write the resulting grid between
+   <answer> and </answer>. Use exactly the format of the grids above: one row
+   per line, cells separated by single spaces, at most 30 rows and 30 cells per
+   row. Do not put the answer grid in a code block, and do not write the whole
+   grid on one line.
+
+Every response must end with the <answer> block.

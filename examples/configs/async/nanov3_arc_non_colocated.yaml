@@ -1,0 +1,5 @@
+# nano-v3 30B-A3B, real ARC-AGI-2 env, non_colocated async GRPO.
+# Launch: ENV=arc bash launch_experiment.sh non_colocated
+defaults:
+  - nanov3_non_colocated.yaml
+  - env_arc.yaml
