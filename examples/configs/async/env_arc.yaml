@@ -20,12 +20,10 @@ grpo:
   val_batch_size: 43
 
 policy:
-  # No optimizer or tokenizer settings here on purpose. The qwen3-1.7B arm that
-  # this layer was originally written against tuned `lr: 2.0e-6` (§9) and set
-  # Qwen3's `enable_thinking: false`; both are model-specific, and leaving them
-  # in a layer documented as model-agnostic is what killed job 6103023 --
-  # nano-v3 ships `min_lr: 3e-6`, so a shared `lr: 2e-6` drove every policy
-  # worker into `assert self.max_lr >= self.min_lr` at construction.
+  # No optimizer or tokenizer settings here on purpose -- this layer is
+  # model-agnostic. Learning rates and chat-template flags belong with the
+  # model: a shared `lr` can land under a model's own `min_lr`, and every
+  # policy worker then asserts `max_lr >= min_lr` at construction.
   # ARC prompts are large, and space-delimiting the cells roughly doubled them:
   # measured at the real Qwen3-1.7B tokenizer, p99 is 12.3k (training) / 14.9k
   # (evaluation) tokens and the worst row in either split is 16593. Nothing
