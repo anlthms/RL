@@ -70,9 +70,9 @@ data:
     # Level 0 is the identity, and it is the M4.1 *gate* rather than a rung:
     # mixing it in gives the policy a dominant degenerate strategy, because
     # echoing the input scores the full +1.4 there while the copy-relative
-    # reward originally made an echo worth ~0 everywhere else. M4.2
-    # (job 6072073) duly converged on it: 77-79% of level-1 and level-2 answers
-    # were the test input copied verbatim by step 60, up from 19-24%, and
+    # reward originally made an echo worth ~0 everywhere else. M4.2 duly
+    # converged on it: 77-79% of level-1 and level-2 answers were the test
+    # input copied verbatim by step 60, up from 19-24%, and
     # neither level ever solved a task. Non-answer echoes now receive the
     # unparseable floor as an additional guard, but level 0 is still deliberately
     # absent: there an echo is the correct +1.4 answer by definition.
@@ -174,7 +174,7 @@ checkpointing:
   enabled: false
   # Corrected rather than left to the model base, and kept even though
   # checkpointing is off: nano-v3 inherits `val:total_reward/mean` from that gym
-  # base, which the ARC environment never emits, and job 6124839 died at its
+  # base, which the ARC environment never emits, and a run died at its
   # step-20 validation with "Metric total_reward/mean not found in val metrics"
   # after 2 hours. Which metrics exist is environment-owned knowledge, so it
   # belongs in the environment layer.

@@ -40,7 +40,10 @@
 #   TIMEOUT_MIN       slurm wall clock in minutes (default 240)
 #   CMP=1             comparison preset: validation off, periodic weights-only
 #                     checkpoints, and a fixed comparison sequence length
-#   COLL_TRACE=1      dump NCCL flight-recorder traces to ./nccl_traces on timeout
+#   COLL_TRACE=0      disable the NCCL flight recorder (on by default; dumps each
+#                     rank's recent collectives to ./nccl_traces on a timeout)
+#   WATCHDOG=0        do not arm the GPU-idleness watchdog (armed by default)
+#   WATCHDOG_INTERVAL seconds between watchdog polls (default 300)
 #   EXTRA_OVERRIDES   ad-hoc Hydra overrides, applied last, e.g. "a=1 b=2"
 #
 # Driver log: <jobid>-logs/ray-driver.log.
@@ -133,8 +136,8 @@ fi
 # Fold any newline in the caller's value to a space first. ray.sub writes
 # ${COMMAND} to driver_command.sh verbatim and runs it with `bash`, so an
 # embedded newline does not continue the command -- it *ends* it, and everything
-# after becomes a second shell command that never reaches the entrypoint. Job
-# 6211877 lost `grpo.val_period=20` exactly this way (a multi-line
+# after becomes a second shell command that never reaches the entrypoint.
+# A run once lost `grpo.val_period=20` exactly this way (a multi-line
 # EXTRA_OVERRIDES pasted without continuations) and validated every 10 steps
 # while its log claimed 20. Silent, and only visible by diffing the resolved
 # config against the submit command.
@@ -155,10 +158,22 @@ CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 printf -v SETUP_JOINED '%s && ' "${SETUP_PARTS[@]}"
 export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"
 
-# COLL_TRACE=1 enables torch's NCCL flight recorder: dumps each rank's last
-# collectives to ./nccl_traces/ on a watchdog timeout (shows the stuck collective).
+# torch's NCCL flight recorder, on by default: a ring buffer of each rank's
+# recent collectives, dumped to ./nccl_traces/ when a collective times out. It
+# names the stuck collective, which is the one thing a hang post-mortem needs
+# and the one thing that cannot be recovered afterwards -- a hang caught without
+# it can only ever be localised to a phase, never explained.
+#
+# Default-on because the cost is a fixed per-rank buffer (20k entries) and a
+# pointer bump per collective; nothing is written unless a timeout fires. Set
+# COLL_TRACE=0 to disable.
+#
+# NCCL_DEBUG is deliberately left at the driver's default rather than forced to
+# INFO: INFO prints per-communicator setup for every rank and would bury the
+# driver log on a large job. Raise it by hand (NCCL_DEBUG=INFO) when reproducing
+# a known hang, where the verbosity is the point.
 COLL_TRACE_ENV=""
-if [[ "${COLL_TRACE:-0}" == 1 ]]; then
+if [[ "${COLL_TRACE:-1}" == 1 ]]; then
   mkdir -p "$(pwd)/nccl_traces"
   COLL_TRACE_ENV="TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-20000} TORCH_NCCL_DUMP_ON_TIMEOUT=1 TORCH_NCCL_DEBUG_INFO_TEMP_FILE=$(pwd)/nccl_traces/trace_"
 fi
@@ -195,4 +210,37 @@ echo "run:      ${RUN_NAME}"
 echo "config:   ${CONFIG}"
 echo "nodes:    ${NUM_ACTOR_NODES}${NUM_GEN_NODES:+ (${NUM_GEN_NODES} generation)}, ${TIMEOUT_MIN} min"
 
-bash submit_nemorl.sh
+# Capture the job id so the watchdog can be armed against it. Captured rather
+# than tee'd: there is no controlling terminal under nohup, cron or CI, and
+# `tee /dev/tty` fails there -- which under `set -e` aborts the launcher *after*
+# sbatch has already queued the job, leaving it running with no watchdog.
+if ! SUBMIT_OUTPUT="$(bash submit_nemorl.sh 2>&1)"; then
+  echo "${SUBMIT_OUTPUT}" >&2
+  die "submission failed"
+fi
+echo "${SUBMIT_OUTPUT}"
+JOB_ID="$(grep -oE 'Submitted batch job [0-9]+' <<<"${SUBMIT_OUTPUT}" | grep -oE '[0-9]+$' | tail -1)"
+
+# ------------------------------------------------------------- watchdog -----
+# Armed by default. A hung job holds its whole allocation until the cluster's
+# idle-GPU reaper collects it -- hours of GPUs producing nothing, and the reaper
+# takes the process state with it, so the hang cannot be explained afterwards.
+# The watchdog kills it far sooner and snapshots the evidence first.
+#
+# It runs here on the submit host, not as a Slurm job: it only shells out to
+# sacct/srun/scancel, so it needs the Slurm client and nothing else. Queueing a
+# CPU job to run `sleep` would be slower to start and no more reliable.
+# setsid+nohup so it outlives this shell and the ssh session that started it.
+#
+# WATCHDOG=0 disables it.
+if [[ -n "${JOB_ID}" && "${WATCHDOG:-1}" != 0 ]]; then
+  WATCHDOG_LOG="${JOB_ID}-watchdog.log"
+  setsid nohup python3 tools/run_watchdog.py "${JOB_ID}" \
+    --root "$(pwd)" \
+    --log-dir "$(pwd)/${JOB_ID}-logs" \
+    --interval "${WATCHDOG_INTERVAL:-300}" \
+    >"${WATCHDOG_LOG}" 2>&1 < /dev/null &
+  echo "watchdog: armed on ${JOB_ID} (pid $!), log ${WATCHDOG_LOG}"
+elif [[ -z "${JOB_ID}" ]]; then
+  echo "watchdog: NOT armed -- could not parse a job id from the submission" >&2
+fi
