@@ -197,5 +197,4 @@ same code path the dataset used, so it cannot drift.
 
 `ARC_AGI_2_ENV_PLAN.md` in the repo root is the design and operating manual:
 what was measured, which choices exist because a run demonstrated something, and
-the open questions. `ARC_CLEANUP_PLAN.md` records the difficulty axes that were
-removed and why they need a definition before they need code.
+the open questions.

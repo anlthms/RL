@@ -25,8 +25,8 @@ from nemo_rl.environments.arc_agi_generators import (
 
 TASK_NAME = "arc_synth"
 
-# Axes removed with the Option B cleanup (see ARC_CLEANUP_PLAN.md section 8).
-# They are named rather than ignored: `extra="allow"` is needed so the merged
+# Difficulty axes that were tried and removed for being inert or contradictory
+# on most levels. They are named rather than ignored: `extra="allow"` is needed so the merged
 # `data.default` keys pass through, and it would otherwise swallow these
 # silently, leaving a recipe that reads as configured and does nothing.
 _REMOVED_KEYS = {

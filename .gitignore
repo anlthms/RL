@@ -51,3 +51,6 @@ code_snapshots*/
 # Auto-research experiment ledgers are per-campaign working notes, not
 # source. The auto-research workflow calls for an untracked TSV log.
 reports/auto_research/
+
+# Working notes from a one-off cleanup pass, not a design doc.
+ARC_CLEANUP_PLAN.md

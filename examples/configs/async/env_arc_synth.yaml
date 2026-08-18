@@ -119,8 +119,8 @@ data:
     # more demonstrations are easier, hence the descending list. This is the one
     # axis beyond transform and grid size that is wired end to end. Five others
     # (palette size, object count, density, composition depth, distractors)
-    # shipped half-wired and were removed -- see ARC_CLEANUP_PLAN.md section 8.
-    # Setting any of them here now raises rather than being ignored.
+    # shipped half-wired and were removed; each was inert or contradictory on
+    # most levels. Setting any of them here now raises rather than being ignored.
     num_train_pairs: [4, 3, 2]
     # Materialized once at startup, so this trades startup seconds against
     # repetition. 60 steps x 16 prompts is 960 prompts; 8000 is far past any

@@ -358,8 +358,9 @@ def _color_cycle(rng: random.Random, palette: list[int], count: int) -> list[int
 
 
 # Fraction of a scattered grid's cells that are painted. A difficulty axis in
-# principle, but not a wired one: see ARC_CLEANUP_PLAN.md 1.6 for why the
-# previous attempt to drive it from config made it mean two opposite things.
+# principle, but not a wired one: driving it from config previously made it mean
+# two opposite things, since the motif sampler reads the same number as a
+# keep-probability, where higher is *easier*.
 _SCATTER_DENSITY = 0.2
 # Probability that a motif cell is painted rather than left as background.
 _MOTIF_KEEP_PROB = 0.7
@@ -440,8 +441,8 @@ def objects_pattern(
 
     One color per rectangle, so a rectangle is one object under any reading --
     the object count is therefore the palette size, give or take one, rather
-    than an axis of its own. See ARC_CLEANUP_PLAN.md 1.7 and 8.2.4: separating
-    the two needs a definition of "object" that this ladder does not yet have.
+    than an axis of its own. Separating the two needs a definition of "object"
+    that this ladder does not yet have.
     """
 
     def sample(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
@@ -512,8 +513,8 @@ def pattern_noisy_objects(
     their own cells is.
 
     The specks are the transformation's *signal*, not distractors: denoise is
-    the rule "remove exactly these". Do not wire a distractor axis to them --
-    see ARC_CLEANUP_PLAN.md 8.2.5.
+    the rule "remove exactly these". Do not wire a distractor axis to them: a
+    distractor is something the rule ignores, which these are not.
     """
     grid = objects_pattern(margin=1)(rng, palette, max_dim)
     if grid is None:
@@ -1006,8 +1007,9 @@ def generate_tasks(
 
     ``num_train_pairs`` may be a list ordered easy -> hard (more demonstrations
     are easier); it is selected by the same joint difficulty rank. It is the one
-    axis beyond transform and size that is wired end to end -- see
-    ARC_CLEANUP_PLAN.md section 8 for the five that were removed and why.
+    axis beyond transform and size that is wired end to end. Five others
+    (palette size, object count, density, composition depth, distractors) were
+    tried and removed for being inert or contradictory on most levels.
     """
     if not levels:
         raise ValueError("levels must not be empty")

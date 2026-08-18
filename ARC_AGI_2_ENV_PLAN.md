@@ -154,7 +154,7 @@ measured order L3, L2, L1, L4, L5 and are crossed with sizes `[6, 12, 20]`; ever
 contains all 15 combinations while extra mass shifts easy → hard. The same joint rank selects
 few-shot count `[4,3,2]` — the only axis beyond transform and size that is wired end to end. Five
 others (palette size, object count, density, composition depth, distractors) shipped half-wired and
-were removed; setting one now raises. See `ARC_CLEANUP_PLAN.md` §8–9. A level repeated in `levels` is
+were removed; setting one now raises. A level repeated in `levels` is
 weighted proportionally on both splits. The schedule lives in row order (`data.shuffle: false`),
 spans `grpo.max_num_steps`, and the 8000-row dataset is large enough that a 60-step run never
 repeats a task.
@@ -312,7 +312,7 @@ Gotchas:
    in one sampler and "keep this cell" in another. Two of them need a definition before they need
    code: what an *object* is when a rectangle can hold several colors, and what a *distractor* is on
    a level where the specks are the signal. Reintroduce them through item 7's DSL, one at a time,
-   each with a test that shows it moves difficulty. Details in `ARC_CLEANUP_PLAN.md` §1, §8.
+   each with a test that shows it moves difficulty.
 7. **Make the generator genuinely ARC-like.** The ladder is six hand-written families over a fixed
    vocabulary, and a policy can learn that vocabulary rather than the skill. Sample rules from a small
    DSL instead of enumerating them, and add the classes real ARC leans on: object-centric rules (move,
