@@ -1,4 +1,5 @@
-# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 8 nodes.
+# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 8 nodes
+# and 32K-token sequences.
 # Launch: ENV=arcsynth_8n NUM_ACTOR_NODES=8 QOS=normal bash launch_experiment.sh colocated
 #
 # The run's shape lives here rather than in an EXTRA_OVERRIDES string. The
@@ -7,8 +8,7 @@
 # -- job 6211877 in fact ran with one of them silently dropped. A named recipe
 # is the single source both the launch and the preflight read.
 #
-# 8 nodes = 32 GPUs, and nano's parallelism still divides cleanly: TP2 x PP1 x
-# CP1 -> DP 16, ETP1 x EP4 -> EDP 8.
+# 8 nodes = 32 GPUs: TP4 x PP1 x CP1 -> DP 8, ETP1 x EP4 -> EDP 8.
 #
 # NOTE: 8 nodes is above the 4-node interactive-QOS limit, so QOS=normal is
 # required and the job sits in the normal queue. QOS= (empty) does NOT work:
@@ -20,20 +20,27 @@ defaults:
   - env_arc_synth.yaml
 
 grpo:
-  # Intended allocation. launch_experiment.sh overrides cluster.num_nodes from
-  # NUM_ACTOR_NODES, so this is what the preflight checks the submission against
-  # -- YAML cannot constrain a Slurm allocation by itself.
-  max_num_steps: 80
+  # Sized from *steady state*, not from a pipecleaner. A 3-step smoke run
+  # measured 70 s/step (job 6243365); the real figure on a full run is 152 s
+  # (job 6248118, 19 steps), 2.2x higher, because a short run starts with an
+  # empty replay buffer and at the easy end of the difficulty ramp -- small
+  # grids and short responses. Never size a run from a pipecleaner's step time.
+  #
+  # 20 min setup + 3 x 14 min validation + 50 x 152 s = ~189 min of the 240 min
+  # cap. The earlier 100 would have needed 344 min and been cut off near step 55.
+  max_num_steps: 50
 
-  # Half of nano's default 128/2048 rather than the 4-node campaign's quarter.
-  # Nano's lr was tuned at 2048, so every reduction makes gradients noisier than
-  # its config assumes; twice the nodes buys back half of that gap at the same
-  # wall clock. 60 steps took 2h42m on 4 nodes at 32 prompts, so 80 steps at 64
-  # prompts on 8 nodes lands in a comparable time with more steps and less noise.
+  # 64 x 16 = 1024, half of nano's tuned 2048 rather than the quarter the 4-node
+  # campaign ran; the extra nodes buy back gradient quality instead of wall
+  # clock. Note this is *not* an OOM lever: with packing on, peak activation is
+  # set by the microbatch (one train_mb_tokens bin), and the global batch only
+  # sets how many bins accumulate per optimizer step. 1024 / DP8 = 128 per rank.
   num_prompts_per_step: 64
-  # Validation is 344 rows over both sources. Four passes (0, 20, 40, 60, 80)
-  # fit; the 4-node run's seven did not, and cost it 15-20 minutes each.
-  val_period: 20
+  # Validation generates at the same 24576-token cap over 344 rows: ~14 min here
+  # against 27.8 min measured at 4 nodes, since it scales with node count rather
+  # than with the training batch. Three passes (0, 25, 50), the last landing
+  # exactly on the final step.
+  val_period: 25
 
 policy:
   # MUST equal num_prompts_per_step x num_generations_per_prompt (64 x 16).
@@ -43,12 +50,47 @@ policy:
   # had already been paid for. The preflight now checks this relationship.
   train_global_batch_size: 1024
 
+  # --- 32K sequences -------------------------------------------------------
+  # Sequence packing puts every sequence in exactly one bin, so bin capacity is
+  # a hard floor at the longest sequence, not a tuning knob: train_mb_tokens
+  # must be >= max_total_sequence_length. The previous 16384 was under-sized
+  # even for the old 8192-token response cap (max synthetic prompt 7254 + 8192
+  # + template = 16396 observed), which is why job 6228195 died at step 14 of
+  # 80 rather than at step 1 -- it needed the ramp to draw a long enough prompt.
+  sequence_packing:
+    train_mb_tokens: ${policy.max_total_sequence_length}
+
+  # 32768-token bins double per-rank activations. Measured at 16384 bins under
+  # TP2: alloc 79 GB - private 41 GB = 38 GB transient, so ~76 GB at 32768, and
+  # 41 + 76 + KV is what OOMed job 6210750.
+  #
+  # Measured after the change (job 6243365, 4 nodes, TP4, 32768-token bins):
+  # peak dev_mem 79.4 GB, private 24.1 GB, peak alloc 53.3 GB -- *lower* than
+  # the 102.3 GB the old TP2/16384 config peaked at, because TP4 halves the
+  # weight shard as well as the activations. The 32K budget is comfortable.
+  #
+  # Context parallelism is the textbook lever for long sequences, but it is
+  # incompatible with this colocated stack: one dual-mode model both trains and
+  # generates, so raising megatron_cfg.context_parallel_size desynchronised the
+  # inference tensor layout and the generation engine died with
+  # `split_with_sizes expects split_sizes to sum exactly to 5152 ... got
+  # [1024, 1536, 16]` (job 6233114) -- a clean 2x mismatch. No recipe in this
+  # repo combines CP with colocated inference_optimized generation.
+  #
+  # TP4 reaches the same place by a supported route: sequence_parallel is on, so
+  # doubling TP halves per-rank activations and 32768-token bins cost about what
+  # 16384 cost at TP2. Generation TP moves with it -- it is the same model.
+  make_sequence_length_divisible_by: 8
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+
   generation:
     mcore_generation_config:
-      # 80 GB of KV buffer plus the training state does not fit alongside the
-      # 32768-token context; 40 was measured safe on the 4-node runs at ~31 GB
-      # per GPU of ~186 GB, and per-GPU memory does not change with node count.
-      buffer_size_gb: 40
+      tensor_model_parallel_size: 4
+      # The KV cache is resident alongside training memory at the
+      # finish_generation boundary, where dev_mem peaked at 102 GB with 40. A
+      # smaller buffer holds fewer concurrent sequences; it does not fail.
+      buffer_size_gb: 24
 
 cluster:
   num_nodes: 8

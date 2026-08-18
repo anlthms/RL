@@ -68,8 +68,9 @@ tags live **inside step 5** — stranded in a trailing paragraph the model emits
 and no tags; delimiters are **plain text**, since added vocabulary needs embeddings trained from
 scratch and GRPO's signal is far too sparse for that.
 
-The baseline uses `max_new_tokens: 8192`, but job 6211877 frequently ran to that cap and spent
-15–20 minutes per validation. The follow-up prompt `arc_agi_early_answer.txt` requires a provisional
+`max_new_tokens: 24576`, sized against the measured worst synthetic prompt (7254 tokens) so that
+prompt + response stays inside the 32768 context: 7254 + 24576 = 31830. The earlier 8192 baseline
+was frequently exhausted, and job 6211877 spent 15–20 minutes per validation against it. The follow-up prompt `arc_agi_early_answer.txt` requires a provisional
 answer within 1200 tokens and permits a corrected final block; its dedicated recipe safely reduces
 the cap to 4096. Prompt lengths are tokenizer-specific — re-measure with
 `tools/arc_agi_prompt_stats.py`.
@@ -224,14 +225,27 @@ in that script saying otherwise is wrong.
 Why the 4-node numbers:
 
 - **4 nodes = 16 GPUs, and nano's parallelism divides cleanly** — TP2 × PP1 × CP1 → DP 8, and
-  ETP1 × EP4 → EDP 4. No parallelism change is needed, and memory is not the constraint (~31 GB/GPU
-  of ~186 GB observed).
+  ETP1 × EP4 → EDP 4 at TP2. Both ARC recipes now run **TP4** instead, which is what makes 32K
+  sequences fit — see below.
 - **`num_prompts_per_step` 128 → 32** (global batch 2048 → 512) is what makes 60 steps fit. At nano's
   default batch a 4-node run needs ~7 h against the `batch` partition's hard **4 h** cap. Caveat:
   nano's `lr` was tuned for 2048, so gradients are noisier than its config assumes.
 - **`val_period: 20`** — validation is 344 rows and ~11 min a checkpoint; four fit, seven do not.
-- **Training packs are 16384 tokens; context/logprob remain 32768.** Job 6210750 OOMed on its first
-  backward pass with 32768-token training packs; job 6211877 completed all 60 steps after this change.
+- **Training packs are the full 32768 tokens, at TP4.** Sequence packing puts every sequence in one
+  bin, so `train_mb_tokens` is a hard floor at the longest sequence, not a knob. The 16384 stopgap
+  was under-sized even for the old 8192-token response cap (max synthetic prompt 7254 + 8192 +
+  template = 16396), and job 6228195 duly died at step 14 of 80 — late, because the ramp had to draw
+  a long enough prompt first.
+  Measured memory per GPU: TP2 with 16384-token bins peaked at **102.3 GB** (`private` 41.0, `alloc`
+  79.0); TP4 with 32768-token bins peaks at **79.4 GB** (`private` 24.1, `alloc` 53.3, job 6243365).
+  Doubling the sequence budget *lowered* peak memory, because TP4 halves the weight shard as well as
+  the activations.
+- **Context parallelism does not work on this stack.** CP is the textbook lever for long sequences,
+  but the colocated design runs one dual-mode model for both training and generation, so raising
+  `megatron_cfg.context_parallel_size` desynchronises the inference tensor layout: job 6233114 died
+  with `split_with_sizes expects split_sizes to sum exactly to 5152 ... got [1024, 1536, 16]`, an
+  exact 2× mismatch. Every CP recipe in this repo is either non-colocated or off the
+  `inference_optimized` path. Raise TP instead, and move the generation TP with it.
 - ≤4 nodes gets **interactive QOS**, which allocates in ~90 s. Above that, `QOS=normal` has queued
   for over 2 h. This is the single biggest lever on iteration speed.
 

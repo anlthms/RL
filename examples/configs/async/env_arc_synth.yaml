@@ -38,16 +38,15 @@ policy:
   # NOTE: do not combine CMP=1 with this env -- it hard-sets 16384.
   max_total_sequence_length: 32768
   generation:
-    max_new_tokens: 8192
-
-  # Rich 20x20/four-shot prompts can fill a 32768-token packed training
-  # microbatch. Nano-v3's colocated inference state then leaves too little room
-  # for the backward pass: job 6210750 completed logprobs but OOMed during the
-  # first gradient finalization. Synthetic prompts plus the 8192-token response
-  # cap fit within 16384; limiting only the training pack halves peak activation
-  # memory while retaining the 32768 model context and logprob budget.
-  sequence_packing:
-    train_mb_tokens: 16384
+    # Sized against the measured worst synthetic prompt (7254 tokens, level 3,
+    # tools/arc_agi_prompt_stats.py --synth) so that prompt + response stays
+    # inside max_total_sequence_length with ~940 tokens of margin for the chat
+    # template and length rounding: 7254 + 24576 = 31830 <= 32768.
+    #
+    # Real ARC validation prompts reach 16593 tokens and will simply get a
+    # shorter response budget from the engine; they are never trained on, so
+    # they do not constrain the training pack.
+    max_new_tokens: 24576
 
 data:
   _override_: true

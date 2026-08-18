@@ -69,6 +69,22 @@ def main() -> None:
     # step-0 validation has already been paid for, and the async loop catches it
     # and exits COMPLETED with status 0. Job 6226427 lost 30 minutes on 8 nodes
     # to exactly this, having halved prompts-per-step without halving the batch.
+    # Sequence packing puts every sequence in exactly one bin, so a bin smaller
+    # than the longest possible sequence is not a tight fit -- it is a crash,
+    # and a *late* one, because it needs the curriculum to draw a long enough
+    # prompt. Job 6228195 died at step 14 of 80 this way with 16384-token bins.
+    packing = policy["sequence_packing"]
+    seq_len = policy["max_total_sequence_length"]
+    if packing["enabled"] and packing["train_mb_tokens"] < seq_len:
+        message = (
+            f"train_mb_tokens {packing['train_mb_tokens']} < "
+            f"max_total_sequence_length {seq_len} -- a sequence longer than the "
+            "bin cannot be packed at all, and this fails mid-run rather than at "
+            "step 1"
+        )
+        print(f"  !! {message}")
+        errors.append(message)
+
     rollouts = grpo["num_prompts_per_step"] * grpo["num_generations_per_prompt"]
     global_batch = policy["train_global_batch_size"]
     print(
