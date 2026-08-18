@@ -1,38 +1,60 @@
-# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 4 nodes.
+# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 4 nodes
+# and 32K-token sequences.
 # Launch: ENV=arcsynth_4n NUM_ACTOR_NODES=4 bash launch_experiment.sh colocated
 #
-# The known-good campaign shape (job 6174618: 60 steps + 4 validations in 2h01m,
-# ~73 s/step), previously carried as an EXTRA_OVERRIDES string in both the plan
-# doc and run_arc_preflight.sub. Job 6211877 is why it lives here instead: a
-# newline in that string truncated the driver command and silently dropped
-# val_period, and nothing resolved the same config twice to notice.
+# The known-good campaign shape (job 6174618: 60 steps + 4 validations in 2h01m
+# at the old 8192-token response cap), previously carried as an EXTRA_OVERRIDES
+# string in both the plan doc and run_arc_preflight.sub. Job 6211877 is why it
+# lives here instead: a newline in that string truncated the driver command and
+# silently dropped val_period, and nothing resolved the same config twice to
+# notice.
 #
-# 4 nodes = 16 GPUs and nano's parallelism divides cleanly: TP2 x PP1 x CP1 ->
-# DP 8, ETP1 x EP4 -> EDP 4. Memory is not the constraint (~31 GB/GPU of ~186).
+# 4 nodes = 16 GPUs: TP4 x PP1 x CP1 -> DP 4, ETP1 x EP4 -> EDP 4.
 # <=4 nodes also gets interactive QOS, which allocates in ~90s -- the single
 # biggest lever on iteration speed, and the reason this size still exists
-# alongside the 8-node recipe.
+# alongside the 8-node recipe. It is the pipecleaner for 8-node changes.
 defaults:
   - nanov3_colocated.yaml
   - env_arc_synth.yaml
 
 grpo:
-  # 60 steps is what fits the batch partition's hard 4h cap at this size.
-  max_num_steps: 60
-  # 128 -> 32 (global batch 2048 -> 512) is what makes 60 steps fit; at nano's
-  # default batch a 4-node run needs ~7h. Caveat: nano's lr was tuned for 2048,
-  # so gradients are noisier here than its config assumes.
+  # Both terms measured on a full run (job 6248118), not on a pipecleaner:
+  #   step       152 s   -- a 3-step smoke run said 70 s, 2.2x too low, because
+  #                         it starts with an empty replay buffer and at the
+  #                         easy end of the ramp. Never size from a pipecleaner.
+  #   validation 27.8 min -- 1665 s for 344 rows; scales with node count, not
+  #                         with the training batch, so the 8-node arm pays
+  #                         about half.
+  #
+  # 17 min setup + 3 x 27.8 min validation + 40 x 152 s = ~202 min of the 240
+  # min cap, with the last validation landing exactly on the final step.
+  max_num_steps: 40
+  # 32 x 16 = 512, half the 8-node arm's 1024. Running the two together makes
+  # this the batch-size contrast at a fixed curriculum. Not an OOM lever: with
+  # packing on, peak activation is set by the microbatch (one train_mb_tokens
+  # bin), not the global batch. 512 / DP4 = 128 samples per rank.
   num_prompts_per_step: 32
-  # Validation is 344 rows and ~11 min a checkpoint; four fit, seven do not.
   val_period: 20
 
 policy:
   train_global_batch_size: 512
+
+  # --- 32K sequences -------------------------------------------------------
+  # See nanov3_arcsynth_8n_colocated.yaml for the full derivation. In short:
+  # packing needs train_mb_tokens >= max_total_sequence_length; 32768-token bins
+  # double per-rank activations against the measured-safe 16384; TP4 halves them
+  # back. CP2 would be the textbook lever for long sequences but breaks the
+  # colocated dual-mode generation engine (job 6233114).
+  sequence_packing:
+    train_mb_tokens: ${policy.max_total_sequence_length}
+  make_sequence_length_divisible_by: 8
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+
   generation:
     mcore_generation_config:
-      # 80 GB of KV buffer plus training state does not fit alongside the
-      # 32768-token context.
-      buffer_size_gb: 40
+      tensor_model_parallel_size: 4
+      buffer_size_gb: 24
 
 cluster:
   num_nodes: 4
