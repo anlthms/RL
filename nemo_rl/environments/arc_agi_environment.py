@@ -49,7 +49,7 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
     rather than on their absolute value. Scored absolutely, a copy of the input
     earns ~0.61 cell accuracy on the ARC-AGI-2 evaluation split -- more than any
     run has yet earned by reasoning -- and training duly converged on the echo
-    (58% of validation answers by step 60 of job 6041201). Measured against a
+    (58% of validation answers by step 60 of one run). Measured against a
     copy of the same task's input, its similarity contribution is exactly zero.
     A non-answer echo is additionally placed on the unparseable reward floor:
     otherwise color recall and valid formatting still make it a positive safe

@@ -5,8 +5,8 @@
 # The run's shape lives here rather than in an EXTRA_OVERRIDES string. The
 # 4-node campaign carried five overrides on the command line and a second copy
 # of them in run_arc_preflight.sub, and the two could not be kept in agreement
-# -- job 6211877 in fact ran with one of them silently dropped. A named recipe
-# is the single source both the launch and the preflight read.
+# -- one campaign run in fact went out with one of them silently dropped. A
+# named recipe is the single source both the launch and the preflight read.
 #
 # 8 nodes = 32 GPUs: TP4 x PP1 x CP1 -> DP 8, ETP1 x EP4 -> EDP 8.
 #
@@ -21,10 +21,10 @@ defaults:
 
 grpo:
   # Sized from *steady state*, not from a pipecleaner. A 3-step smoke run
-  # measured 70 s/step (job 6243365); the real figure on a full run is 152 s
-  # (job 6248118, 19 steps), 2.2x higher, because a short run starts with an
-  # empty replay buffer and at the easy end of the difficulty ramp -- small
-  # grids and short responses. Never size a run from a pipecleaner's step time.
+  # measured 70 s/step; the real figure on a full run is 152 s, 2.2x higher,
+  # because a short run starts with an empty replay buffer and at the easy end
+  # of the difficulty ramp -- small grids and short responses. Never size a run
+  # from a pipecleaner's step time.
   #
   # 20 min setup + 3 x 14 min validation + 50 x 152 s = ~189 min of the 240 min
   # cap. The earlier 100 would have needed 344 min and been cut off near step 55.
@@ -45,7 +45,7 @@ grpo:
 policy:
   # MUST equal num_prompts_per_step x num_generations_per_prompt (64 x 16).
   # Leaving this at nano's 2048 while halving prompts-per-step is what killed
-  # job 6226427: 1024 rollouts arrived for a 2048-sample optimizer step and
+  # an earlier run: 1024 rollouts arrived for a 2048-sample optimizer step and
   # shard_by_batch_size asserted at Step 1, after a 10-minute step-0 validation
   # had already been paid for. The preflight now checks this relationship.
   train_global_batch_size: 1024
@@ -55,16 +55,16 @@ policy:
   # a hard floor at the longest sequence, not a tuning knob: train_mb_tokens
   # must be >= max_total_sequence_length. The previous 16384 was under-sized
   # even for the old 8192-token response cap (max synthetic prompt 7254 + 8192
-  # + template = 16396 observed), which is why job 6228195 died at step 14 of
-  # 80 rather than at step 1 -- it needed the ramp to draw a long enough prompt.
+  # + template = 16396 observed), which is why a run died at step 14 of 80
+  # rather than at step 1 -- it needed the ramp to draw a long enough prompt.
   sequence_packing:
     train_mb_tokens: ${policy.max_total_sequence_length}
 
   # 32768-token bins double per-rank activations. Measured at 16384 bins under
   # TP2: alloc 79 GB - private 41 GB = 38 GB transient, so ~76 GB at 32768, and
-  # 41 + 76 + KV is what OOMed job 6210750.
+  # 41 + 76 + KV is what OOMed an earlier attempt.
   #
-  # Measured after the change (job 6243365, 4 nodes, TP4, 32768-token bins):
+  # Measured after the change (4 nodes, TP4, 32768-token bins):
   # peak dev_mem 79.4 GB, private 24.1 GB, peak alloc 53.3 GB -- *lower* than
   # the 102.3 GB the old TP2/16384 config peaked at, because TP4 halves the
   # weight shard as well as the activations. The 32K budget is comfortable.
@@ -74,8 +74,8 @@ policy:
   # generates, so raising megatron_cfg.context_parallel_size desynchronised the
   # inference tensor layout and the generation engine died with
   # `split_with_sizes expects split_sizes to sum exactly to 5152 ... got
-  # [1024, 1536, 16]` (job 6233114) -- a clean 2x mismatch. No recipe in this
-  # repo combines CP with colocated inference_optimized generation.
+  # [1024, 1536, 16]` -- a clean 2x mismatch. No recipe in this repo combines
+  # CP with colocated inference_optimized generation.
   #
   # TP4 reaches the same place by a supported route: sequence_parallel is on, so
   # doubling TP halves per-rank activations and 32768-token bins cost about what

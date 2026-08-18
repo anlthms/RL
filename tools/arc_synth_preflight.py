@@ -67,12 +67,12 @@ def main() -> None:
     # samples, and the optimizer step consumes train_global_batch_size of them.
     # If they disagree, shard_by_batch_size asserts at *Step 1* -- after the
     # step-0 validation has already been paid for, and the async loop catches it
-    # and exits COMPLETED with status 0. Job 6226427 lost 30 minutes on 8 nodes
+    # and exits COMPLETED with status 0. One run lost 30 minutes on 8 nodes
     # to exactly this, having halved prompts-per-step without halving the batch.
     # Sequence packing puts every sequence in exactly one bin, so a bin smaller
     # than the longest possible sequence is not a tight fit -- it is a crash,
     # and a *late* one, because it needs the curriculum to draw a long enough
-    # prompt. Job 6228195 died at step 14 of 80 this way with 16384-token bins.
+    # prompt. A run died at step 14 of 80 this way with 16384-token bins.
     packing = policy["sequence_packing"]
     seq_len = policy["max_total_sequence_length"]
     if packing["enabled"] and packing["train_mb_tokens"] < seq_len:
@@ -162,8 +162,8 @@ def main() -> None:
 
     # Every policy worker asserts max_lr >= min_lr at construction, and a
     # shared layer that sets only `lr` can drive it under a model's own
-    # `min_lr` -- which killed all 32 nano-v3 workers on job 6103023 six
-    # minutes in, after the 8-node queue wait.
+    # `min_lr` -- which once killed all 32 nano-v3 workers six minutes in,
+    # after the 8-node queue wait.
     optimizer = policy.get("megatron_cfg", {}).get("optimizer", {})
     lr, min_lr = optimizer.get("lr"), optimizer.get("min_lr")
     print(f"  lr / min_lr             {lr} / {min_lr}")

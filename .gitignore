@@ -47,3 +47,7 @@ code_snapshots*/
 
 # Claude Code review memory (local only)
 .claude/review-memory/
+
+# Auto-research experiment ledgers are per-campaign working notes, not
+# source. The auto-research workflow calls for an untracked TSV log.
+reports/auto_research/

@@ -2,12 +2,11 @@
 # and 32K-token sequences.
 # Launch: ENV=arcsynth_4n NUM_ACTOR_NODES=4 bash launch_experiment.sh colocated
 #
-# The known-good campaign shape (job 6174618: 60 steps + 4 validations in 2h01m
-# at the old 8192-token response cap), previously carried as an EXTRA_OVERRIDES
-# string in both the plan doc and run_arc_preflight.sub. Job 6211877 is why it
-# lives here instead: a newline in that string truncated the driver command and
-# silently dropped val_period, and nothing resolved the same config twice to
-# notice.
+# The known-good campaign shape (60 steps + 4 validations in 2h01m at the old
+# 8192-token response cap), previously carried as an EXTRA_OVERRIDES string in
+# both the plan doc and run_arc_preflight.sub. It lives here instead because a
+# newline in that string once truncated the driver command and silently dropped
+# val_period, with nothing resolving the same config twice to notice.
 #
 # 4 nodes = 16 GPUs: TP4 x PP1 x CP1 -> DP 4, ETP1 x EP4 -> EDP 4.
 # <=4 nodes also gets interactive QOS, which allocates in ~90s -- the single
@@ -18,7 +17,7 @@ defaults:
   - env_arc_synth.yaml
 
 grpo:
-  # Both terms measured on a full run (job 6248118), not on a pipecleaner:
+  # Both terms measured on a full run, not on a pipecleaner:
   #   step       152 s   -- a 3-step smoke run said 70 s, 2.2x too low, because
   #                         it starts with an empty replay buffer and at the
   #                         easy end of the ramp. Never size from a pipecleaner.
@@ -44,7 +43,7 @@ policy:
   # packing needs train_mb_tokens >= max_total_sequence_length; 32768-token bins
   # double per-rank activations against the measured-safe 16384; TP4 halves them
   # back. CP2 would be the textbook lever for long sequences but breaks the
-  # colocated dual-mode generation engine (job 6233114).
+  # colocated dual-mode generation engine.
   sequence_packing:
     train_mb_tokens: ${policy.max_total_sequence_length}
   make_sequence_length_divisible_by: 8
