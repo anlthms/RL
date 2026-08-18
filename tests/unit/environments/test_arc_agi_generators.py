@@ -1,12 +1,16 @@
 import random
 import statistics as st
+from collections import Counter
 from itertools import product
 
 import pytest
 
 from nemo_rl.environments.arc_agi_generators import (
     BACKGROUND,
-    _ramped_sizes,
+    COLORS,
+    _joint_level_size_schedule,
+    _PALETTE_RANGE,
+    _SPARE_COLOR_LEVELS,
     DIHEDRAL,
     LEVELS,
     MAX_GRID_DIM,
@@ -390,31 +394,92 @@ class TestSizeMixing:
                 assert pair["output"] != pair["input"]
 
 
-class TestSizeRamp:
-    """Mean difficulty rises over the run, but the spread never narrows.
+class TestJointDifficultyRamp:
+    LEVEL_ORDER = [0, 3, 2, 1, 4, 5]
 
-    A plain ramp would put every task in a batch at one difficulty, and a group
-    of rollouts that is uniformly hopeless or uniformly trivial has zero
-    advantage and contributes no gradient. Reweighting a mixture keeps every
-    size present in every batch while shifting where the mass sits.
-    """
+    def test_every_window_keeps_every_level_size_combination(self):
+        schedule, _ = _joint_level_size_schedule(
+            count=32 * 10,
+            levels=[1, 2, 3, 4, 5],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=32,
+            ramp_windows=10,
+        )
+        expected = set(product([1, 2, 3, 4, 5], [6, 12, 20]))
+        for window_index in range(10):
+            window = schedule[window_index * 32 : (window_index + 1) * 32]
+            assert set(window) == expected
+
+    def test_joint_mean_difficulty_moves_from_easy_to_hard(self):
+        _, difficulty = _joint_level_size_schedule(
+            count=32 * 20,
+            levels=[1, 2, 3, 4, 5],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=32,
+            ramp_windows=20,
+        )
+        means = [
+            st.mean(difficulty[index * 32 : (index + 1) * 32]) for index in range(20)
+        ]
+        assert means[0] < means[-1]
+        assert all(left <= right for left, right in zip(means, means[1:]))
+
+    def test_measured_level_rank_breaks_the_authored_order(self):
+        schedule, _ = _joint_level_size_schedule(
+            count=15,
+            levels=[1, 2, 3, 4, 5],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=None,
+            ramp_windows=None,
+        )
+        assert schedule[0] == (3, 6)
+        assert schedule[-1] == (5, 20)
+
+    def test_window_must_fit_the_full_cross_product(self):
+        with pytest.raises(ValueError, match="15 level/size"):
+            _joint_level_size_schedule(
+                count=32,
+                levels=[1, 2, 3, 4, 5],
+                dims=[6, 12, 20],
+                level_difficulty_order=self.LEVEL_ORDER,
+                window=14,
+                ramp_windows=10,
+            )
+
+    # The four invariants below were written for the size-only `_ramped_sizes`,
+    # which the joint scheduler replaced. They are the reason the ramp is a
+    # reweighting rather than a ramp, so they move rather than retire.
 
     def test_every_window_keeps_every_size(self):
-        sizes = _ramped_sizes(16 * 30, [6, 12, 20], 16)
-        for w in range(30):
-            window = sizes[w * 16 : (w + 1) * 16]
+        schedule, _ = _joint_level_size_schedule(
+            count=16 * 30,
+            levels=[1, 2],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=16,
+            ramp_windows=30,
+        )
+        for index in range(30):
+            window = schedule[index * 16 : (index + 1) * 16]
             assert len(window) == 16
-            assert set(window) == {6, 12, 20}, f"window {w} lost a size"
-
-    def test_mean_size_increases_over_the_run(self):
-        sizes = _ramped_sizes(16 * 30, [6, 12, 20], 16)
-        means = [sum(sizes[w * 16 : (w + 1) * 16]) / 16 for w in range(30)]
-        assert means[0] < means[-1]
-        assert all(a <= b + 1e-9 for a, b in zip(means, means[1:])), "not monotone"
+            assert {dim for _, dim in window} == {6, 12, 20}, (
+                f"window {index} lost a size"
+            )
 
     def test_it_starts_small_heavy_and_ends_large_heavy(self):
-        sizes = _ramped_sizes(16 * 30, [6, 12, 20], 16)
-        first, last = sizes[:16], sizes[-16:]
+        schedule, _ = _joint_level_size_schedule(
+            count=16 * 30,
+            levels=[1, 2],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=16,
+            ramp_windows=30,
+        )
+        first = [dim for _, dim in schedule[:16]]
+        last = [dim for _, dim in schedule[-16:]]
         assert first.count(6) > first.count(20)
         assert last.count(20) > last.count(6)
 
@@ -422,33 +487,95 @@ class TestSizeRamp:
         # The dataset is many times larger than any run so no task repeats. A
         # ramp spread over the dataset leaves the run barely moved -- inert, but
         # still looking configured.
-        rows, window, steps = 16 * 500, 16, 60
-        sizes = _ramped_sizes(rows, [6, 12, 20], window, steps)
-        run = [sum(sizes[w * window : (w + 1) * window]) / window for w in range(steps)]
-        assert run[-1] - run[0] > 3.0, "ramp barely moved over the run"
+        window, steps = 16, 60
+        _, difficulty = _joint_level_size_schedule(
+            count=window * 500,
+            levels=[1, 2],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=window,
+            ramp_windows=steps,
+        )
+        run = [
+            st.mean(difficulty[index * window : (index + 1) * window])
+            for index in range(steps)
+        ]
+        assert run[-1] - run[0] > 0.2, "ramp barely moved over the run"
         # Past the ramp the mixture stays at its hardest rather than resetting.
-        tail = sizes[400 * window : 401 * window]
-        assert sum(tail) / window == pytest.approx(run[-1])
-
-    def test_a_single_size_is_a_no_op(self):
-        assert _ramped_sizes(40, [8], 16) == [8] * 40
+        tail = difficulty[400 * window : 401 * window]
+        assert st.mean(tail) == pytest.approx(run[-1])
 
     def test_a_partial_final_window_is_still_filled(self):
-        sizes = _ramped_sizes(20, [6, 12, 20], 16)
-        assert len(sizes) == 20
-
-    def test_generate_tasks_honors_the_ramp(self):
-        tasks = generate_tasks(
-            5, 16 * 12, [1, 2], max_input_dim=[6, 20], size_ramp_window=16
+        schedule, _ = _joint_level_size_schedule(
+            count=20,
+            levels=[1, 2],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=16,
+            ramp_windows=2,
         )
-        small = lambda ts: sum("_d6_" in t.task_id for t in ts)
-        assert small(tasks[:16]) > small(tasks[-16:])
-        # Still every size in every window, and the guards still hold.
-        for w in range(12):
-            window = tasks[w * 16 : (w + 1) * 16]
-            assert {"_d6_" in t.task_id for t in window} == {True, False}
-        for task in tasks:
-            assert task.target != task.test_input
+        assert len(schedule) == 20
+
+    def test_a_repeated_level_takes_a_larger_share_of_the_ramp(self):
+        def share(levels):
+            schedule, _ = _joint_level_size_schedule(
+                count=32 * 6,
+                levels=levels,
+                dims=[6, 12, 20],
+                level_difficulty_order=self.LEVEL_ORDER,
+                window=32,
+                ramp_windows=6,
+            )
+            counts = Counter(level for level, _ in schedule)
+            return counts[1] / sum(counts.values())
+
+        assert share([1, 1, 2, 3]) > share([1, 2, 3])
+
+    def test_a_repeated_level_still_keeps_every_combination_present(self):
+        # Weighting must not cost the degenerate-group property: a window that
+        # dropped a combination is a window that can be uniformly hopeless.
+        schedule, _ = _joint_level_size_schedule(
+            count=32 * 6,
+            levels=[1, 1, 2, 3],
+            dims=[6, 12, 20],
+            level_difficulty_order=self.LEVEL_ORDER,
+            window=32,
+            ramp_windows=6,
+        )
+        expected = set(product([1, 2, 3], [6, 12, 20]))
+        for index in range(6):
+            assert set(schedule[index * 32 : (index + 1) * 32]) == expected
+
+
+class TestLevelPalettes:
+    """Every level must be able to draw the colors its rules need.
+
+    `palette_size` used to be a config key whose documented range crashed four
+    levels: recolor needs a destination outside the palette, add_border a frame
+    color, fill_enclosed a fill, and at nine colors there is none. The axis is
+    gone, but the constraint it violated is permanent, so it is pinned here.
+    """
+
+    @pytest.mark.parametrize("level", sorted(LEVELS))
+    def test_a_levels_palette_leaves_room_for_the_colors_its_rules_add(self, level):
+        _, high = _PALETTE_RANGE[level]
+        if level in _SPARE_COLOR_LEVELS:
+            assert high < len(COLORS)
+        assert high <= len(COLORS)
+
+    @pytest.mark.parametrize("level", sorted(LEVELS))
+    def test_generation_never_leaks_a_raw_indexerror(self, level):
+        # The module's contract is that a sampler returns None and the caller
+        # redraws. A helper that raises instead escapes `generate_task`
+        # entirely, which is how a bare IndexError reached the dataset build.
+        for index in range(40):
+            generate_task(seed=4242, index=index, level=level, max_input_dim=10)
+
+    def test_a_palette_with_no_spare_color_is_rejected_with_a_reason(self):
+        from nemo_rl.environments.arc_agi_generators import _spare_color
+
+        with pytest.raises(ValueError, match="none for a rule"):
+            _spare_color(random.Random(0), list(COLORS))
 
 
 class TestGenerateTasks:

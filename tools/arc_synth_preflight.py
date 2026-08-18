@@ -30,6 +30,7 @@ import collections
 from omegaconf import OmegaConf
 
 from nemo_rl.data.datasets.response_datasets import load_response_dataset
+from nemo_rl.data.datasets.response_datasets.arc_synth import SynthCurriculumConfig
 from nemo_rl.data.datasets.utils import update_single_dataset_config
 from nemo_rl.environments.arc_agi_grid import REAL_ARC_LEVEL, level_metric_suffix
 from nemo_rl.utils.config import (
@@ -42,6 +43,12 @@ from nemo_rl.utils.config import (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--nodes",
+        type=int,
+        help="node count the run will actually be submitted with, checked "
+        "against the recipe's cluster.num_nodes",
+    )
     args, overrides = parser.parse_known_args()
 
     register_omegaconf_resolvers()
@@ -52,32 +59,90 @@ def main() -> None:
     config = OmegaConf.to_container(config, resolve=True)
 
     grpo, data, policy = config["grpo"], config["data"], config["policy"]
+    errors: list[str] = []
     print("\n=== resolved ===")
     print(f"  max_num_steps           {grpo['max_num_steps']}")
     print(f"  num_prompts_per_step    {grpo['num_prompts_per_step']}")
+    # A rollout step produces num_prompts_per_step x num_generations_per_prompt
+    # samples, and the optimizer step consumes train_global_batch_size of them.
+    # If they disagree, shard_by_batch_size asserts at *Step 1* -- after the
+    # step-0 validation has already been paid for, and the async loop catches it
+    # and exits COMPLETED with status 0. Job 6226427 lost 30 minutes on 8 nodes
+    # to exactly this, having halved prompts-per-step without halving the batch.
+    rollouts = grpo["num_prompts_per_step"] * grpo["num_generations_per_prompt"]
+    global_batch = policy["train_global_batch_size"]
+    print(
+        f"  rollouts/step           {rollouts} "
+        f"({grpo['num_prompts_per_step']} x {grpo['num_generations_per_prompt']})"
+    )
+    print(f"  train_global_batch_size {global_batch}")
+    if rollouts != global_batch:
+        message = (
+            f"train_global_batch_size {global_batch} != num_prompts_per_step x "
+            f"num_generations_per_prompt ({rollouts}) -- training will assert at "
+            "step 1, after paying for the step-0 validation"
+        )
+        print(f"  !! {message}")
+        errors.append(message)
     print(f"  val_at_start/period     {grpo['val_at_start']} / {grpo['val_period']}")
     print(f"  max_val_samples         {grpo['max_val_samples']}")
     print(f"  val_batch_size          {grpo['val_batch_size']}")
     print(f"  max_total_sequence_len  {policy['max_total_sequence_length']}")
     print(f"  max_new_tokens          {policy['generation']['max_new_tokens']}")
-    print(f"  train.levels            {data['train'].get('levels')}")
-    print(f"  train.max_input_dim     {data['train'].get('max_input_dim')}")
-    # The size schedule advances one window per trainer step, so the window has
-    # to be the trainer's prompts-per-step. A mismatch runs the ramp at the
+    print(f"  prompt_file             {data['default']['prompt_file']}")
+    print(
+        "  train/logprob mb tokens "
+        f"{policy['sequence_packing']['train_mb_tokens']} / "
+        f"{policy['sequence_packing']['logprob_mb_tokens']}"
+    )
+    # The recipe declares the allocation it was sized for, but only the launcher
+    # can set it -- cluster.num_nodes arrives as an override from
+    # NUM_ACTOR_NODES, so a recipe tuned for 8 nodes submitted onto 4 resolves
+    # cleanly and simply runs at half the intended throughput.
+    intended_nodes = config["cluster"]["num_nodes"]
+    print(f"  cluster.num_nodes       {intended_nodes}")
+    if args.nodes is not None and args.nodes != intended_nodes:
+        message = (
+            f"--nodes {args.nodes} does not match the recipe's "
+            f"cluster.num_nodes {intended_nodes}; the batch and cadence in this "
+            "recipe were sized for the latter"
+        )
+        print(f"  !! {message}")
+        errors.append(message)
+
+    # Every curriculum field, straight off the schema, so a field added there
+    # shows up here without editing this list.
+    for axis in SynthCurriculumConfig.model_fields:
+        print(f"  train.{axis:22} {data['train'].get(axis)}")
+    # The joint schedule advances one window per trainer step, so the window
+    # has to be the trainer's prompts-per-step. A mismatch runs the ramp at the
     # wrong rate and nothing anywhere complains.
-    window = data["train"].get("size_ramp_window")
-    print(f"  train.size_ramp_window  {window}")
+    window = data["train"].get("difficulty_ramp_window")
     if window and window != grpo["num_prompts_per_step"]:
-        print(
-            f"  !! size_ramp_window {window} != num_prompts_per_step "
-            f"{grpo['num_prompts_per_step']} -- the size schedule will advance at "
-            "the wrong rate"
+        message = (
+            f"difficulty_ramp_window {window} != num_prompts_per_step "
+            f"{grpo['num_prompts_per_step']} -- the joint schedule will advance "
+            "at the wrong rate"
         )
+        print(f"  !! {message}")
+        errors.append(message)
     if window and data.get("shuffle"):
-        print(
-            "  !! size_ramp_window is set but data.shuffle is true -- the schedule "
-            "lives in the row order and shuffling destroys it"
+        message = (
+            "difficulty_ramp_window is set but data.shuffle is true -- the "
+            "schedule lives in the row order and shuffling destroys it"
         )
+        print(f"  !! {message}")
+        errors.append(message)
+    # Everything the curriculum schema can decide for itself -- removed keys,
+    # seed separation, window capacity -- it decides, so this tool and the
+    # dataset cannot disagree. Reported rather than raised, so one preflight
+    # surfaces every problem instead of only the first.
+    try:
+        SynthCurriculumConfig(**data["train"])
+    except ValueError as error:
+        message = f"invalid data.train curriculum: {error}"
+        print(f"  !! {message}")
+        errors.append(message)
 
     # Every policy worker asserts max_lr >= min_lr at construction, and a
     # shared layer that sets only `lr` can drive it under a model's own
@@ -87,9 +152,11 @@ def main() -> None:
     lr, min_lr = optimizer.get("lr"), optimizer.get("min_lr")
     print(f"  lr / min_lr             {lr} / {min_lr}")
     if lr is not None and min_lr is not None and lr < min_lr:
-        print(
-            f"  !! lr {lr} < min_lr {min_lr} -- every policy worker will assert on startup"
+        message = (
+            f"lr {lr} < min_lr {min_lr} -- every policy worker will assert on startup"
         )
+        print(f"  !! {message}")
+        errors.append(message)
 
     # The ARC environment reports these; a checkpoint metric outside the set
     # raises mid-run, at the first validation that tries to select on it.
@@ -100,10 +167,12 @@ def main() -> None:
         f"  checkpointing           enabled={ckpt.get('enabled')} metric={metric or None}"
     )
     if ckpt.get("enabled") and metric not in ARC_VAL_METRICS:
-        print(
-            f"  !! checkpointing metric {metric!r} is not one the ARC env emits "
+        message = (
+            f"checkpointing metric {metric!r} is not one the ARC env emits "
             f"({sorted(ARC_VAL_METRICS)}) -- validation will raise mid-run"
         )
+        print(f"  !! {message}")
+        errors.append(message)
 
     train_cfg = dict(data["train"])
     update_single_dataset_config(train_cfg, data["default"])
@@ -138,14 +207,19 @@ def main() -> None:
         f"  validation scores {scored} of them (max_val_samples // val_batch_size * val_batch_size)"
     )
     if scored < total:
-        print(
-            f"  !! {total - scored} rows never scored -- the loader does not shuffle, "
+        message = (
+            f"{total - scored} rows never scored -- the loader does not shuffle, "
             "so this silently drops the tail of the validation set"
         )
+        print(f"  !! {message}")
+        errors.append(message)
     if not any(REAL_ARC_LEVEL in set(part["level"]) for _, part in val_parts):
-        print(
-            "  !! no real ARC-AGI-2 rows in validation -- transfer cannot be measured"
-        )
+        message = "no real ARC-AGI-2 rows in validation -- transfer cannot be measured"
+        print(f"  !! {message}")
+        errors.append(message)
+
+    if errors:
+        raise SystemExit("preflight failed:\n- " + "\n- ".join(errors))
 
 
 if __name__ == "__main__":

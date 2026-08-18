@@ -9,8 +9,10 @@
 #SBATCH --account=nemotron_sw_post
 #SBATCH --output=%j-arc-preflight.log
 
+set -euo pipefail
+
 # Resolve the M4.1 config and build its datasets on a CPU node, before the
-# launch spends GPU nodes on them. See .run_arc_tests.sub for why
+# launch spends GPU nodes on them. See run_arc_tests.sub for why
 # `--no-container-mount-home` and the `cpu` partition are load-bearing.
 
 REPO=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/RL5
@@ -22,10 +24,15 @@ srun --no-container-mount-home \
      --container-mounts="$MOUNTS" \
      --container-workdir="$REPO" \
      bash -c '
-for cfg in qwen3_1p7b_arcsynth_colocated nanov3_arcsynth_colocated; do
-  echo "===== $cfg ====="
+# Each recipe carries the batch and cadence it was sized for, so the preflight
+# resolves exactly what the launch will resolve -- no second copy of the run
+# configuration to keep in agreement. --nodes is the one thing YAML cannot
+# constrain, since the launcher sets cluster.num_nodes from NUM_ACTOR_NODES.
+for spec in "nanov3_arcsynth_4n_colocated 4" "nanov3_arcsynth_8n_colocated 8"; do
+  set -- $spec
+  echo "===== $1 (on $2 nodes) ====="
   uv run tools/arc_synth_preflight.py \
-    --config "examples/configs/async/$cfg.yaml" 2>&1 | tail -32
+    --config "examples/configs/async/$1.yaml" --nodes "$2" 2>&1 | tail -40
   echo
 done
 '

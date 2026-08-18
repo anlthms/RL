@@ -1,0 +1,4 @@
+# Nano-v3 MoE, early-answer synthetic ARC follow-up, colocated async GRPO.
+defaults:
+  - nanov3_colocated.yaml
+  - env_arc_synth_early_answer.yaml

@@ -28,8 +28,10 @@ exercised on a login node. See ``arc_agi_grid.py``, which this mirrors.
 """
 
 import random
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from nemo_rl.environments.arc_agi_grid import MAX_GRID_DIM, Grid
 
@@ -63,6 +65,39 @@ _MAX_ATTEMPTS = 200
 _MAX_PLACEMENT_TRIES = 40
 
 Pair = tuple[Grid, Grid]
+AxisT = TypeVar("AxisT")
+ChoiceT = TypeVar("ChoiceT")
+
+# How many non-background colors each level's rules want, low to high. Levels 2
+# and 5 need at least two so that a color op is identifiable at all -- "drop the
+# 3s" cannot be read off examples that contain only 3s. Level 4's structural
+# rules stay near-monochrome so the structure is what varies.
+_PALETTE_RANGE: dict[int, tuple[int, int]] = {
+    0: (1, 3),
+    1: (1, 3),
+    2: (2, 4),
+    3: (1, 3),
+    4: (1, 2),
+    5: (2, 4),
+}
+
+# Levels whose rules draw a color from *outside* the palette: recolor needs a
+# destination, add_border a frame color, fill_enclosed a fill. Every range above
+# leaves at least five spare colors, so `_spare_color` cannot come up empty --
+# but it checks, because a future range that forgets this would otherwise fail
+# as a bare `IndexError` from `rng.choice` deep inside a sampler.
+_SPARE_COLOR_LEVELS = frozenset({2, 3, 4, 5})
+
+
+def _spare_color(rng: random.Random, palette: list[int]) -> int:
+    """A color the palette does not use, for rules that must introduce one."""
+    spare = [color for color in COLORS if color not in palette]
+    if not spare:
+        raise ValueError(
+            f"palette {sorted(palette)} uses every one of the {len(COLORS)} "
+            "non-background colors, leaving none for a rule that must introduce one"
+        )
+    return rng.choice(spare)
 
 
 # ---------------------------------------------------------------------------
@@ -322,12 +357,20 @@ def _color_cycle(rng: random.Random, palette: list[int], count: int) -> list[int
     return colors
 
 
+# Fraction of a scattered grid's cells that are painted. A difficulty axis in
+# principle, but not a wired one: see ARC_CLEANUP_PLAN.md 1.6 for why the
+# previous attempt to drive it from config made it mean two opposite things.
+_SCATTER_DENSITY = 0.2
+# Probability that a motif cell is painted rather than left as background.
+_MOTIF_KEEP_PROB = 0.7
+
+
 def pattern_scatter(
     rng: random.Random, palette: list[int], max_dim: int
 ) -> Grid | None:
     """Loose points on a background."""
     height, width = _size(rng, max_dim)
-    count = max(len(palette), int(round(0.2 * height * width)))
+    count = max(len(palette), int(round(_SCATTER_DENSITY * height * width)))
     if count > height * width:
         return None
     cells = rng.sample([(r, c) for r in range(height) for c in range(width)], count)
@@ -394,6 +437,11 @@ def objects_pattern(
     ``margin`` > 0 leaves a background frame, which is what makes
     crop-to-bounding-box a real transformation. ``hollow`` produces rectangles
     with an interior, which is what makes fill-enclosed one.
+
+    One color per rectangle, so a rectangle is one object under any reading --
+    the object count is therefore the palette size, give or take one, rather
+    than an axis of its own. See ARC_CLEANUP_PLAN.md 1.7 and 8.2.4: separating
+    the two needs a definition of "object" that this ladder does not yet have.
     """
 
     def sample(rng: random.Random, palette: list[int], max_dim: int) -> Grid | None:
@@ -440,7 +488,7 @@ def pattern_motif(rng: random.Random, palette: list[int], max_dim: int) -> Grid 
     colors = _color_cycle(rng, palette, count)
     motif = [
         [
-            colors[r * motif_w + c] if rng.random() < 0.7 else BACKGROUND
+            colors[r * motif_w + c] if rng.random() < _MOTIF_KEEP_PROB else BACKGROUND
             for c in range(motif_w)
         ]
         for r in range(motif_h)
@@ -462,6 +510,10 @@ def pattern_noisy_objects(
     The specks are placed with a one-cell margin so they are genuinely isolated
     under the 4-neighbor rule, and the rectangles are at least 2x2 so none of
     their own cells is.
+
+    The specks are the transformation's *signal*, not distractors: denoise is
+    the rule "remove exactly these". Do not wire a distractor axis to them --
+    see ARC_CLEANUP_PLAN.md 8.2.5.
     """
     grid = objects_pattern(margin=1)(rng, palette, max_dim)
     if grid is None:
@@ -574,45 +626,26 @@ def _generic_sampler(rng: random.Random) -> Callable[..., Grid | None]:
     )
 
 
-def _sample_palette(rng: random.Random, low: int = 1, high: int = 3) -> list[int]:
-    return rng.sample(COLORS, rng.randint(low, high))
-
-
-def _level0_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
-    palette = palette or _sample_palette(rng)
+def _level0_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     return Rule(
         name="identity",
         level=0,
         stages=(identity,),
-        sample_input=_bind(_generic_sampler(rng), palette, max_input_dim),
+        sample_input=_bind(_generic_sampler(rng), palette, max_dim),
     )
 
 
-def _level1_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
-    palette = palette or _sample_palette(rng)
+def _level1_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     name = rng.choice([key for key in DIHEDRAL if key != "identity"])
     return Rule(
         name=name,
         level=1,
         stages=(DIHEDRAL[name],),
-        sample_input=_bind(_generic_sampler(rng), palette, max_input_dim),
+        sample_input=_bind(_generic_sampler(rng), palette, max_dim),
     )
 
 
-def _level2_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
-    palette = palette or _sample_palette(rng, low=2, high=4)
+def _level2_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     source = rng.choice(palette)
     kind = rng.choice(["drop_color", "recolor", "keep_only"])
     if kind == "drop_color":
@@ -623,34 +656,32 @@ def _level2_rule(
         # Recolor to a color the input never uses: mapping onto an existing one
         # merges two objects, and then the examples no longer say which of the
         # two the rule was about.
-        destination = rng.choice([c for c in COLORS if c not in palette])
+        destination = _spare_color(rng, palette)
         name, apply = f"recolor({source}->{destination})", recolor(source, destination)
     return Rule(
         name=name,
         level=2,
         stages=(apply,),
-        sample_input=_bind(_generic_sampler(rng), palette, max_input_dim),
+        sample_input=_bind(_generic_sampler(rng), palette, max_dim),
         required_colors=frozenset({source}),
     )
 
 
-def _level3_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
-    palette = palette or _sample_palette(rng)
+def _level3_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     kind = rng.choice(["tile", "crop", "scale", "border"])
     if kind == "tile":
         vertical, horizontal = rng.randint(1, 3), rng.randint(1, 3)
         if (vertical, horizontal) == (1, 1):
             vertical = 2
-        max_dim = min(max_input_dim, MAX_GRID_DIM // max(vertical, horizontal))
         return Rule(
             name=f"tile({vertical}x{horizontal})",
             level=3,
             stages=(tile(vertical, horizontal),),
-            sample_input=_bind(_generic_sampler(rng), palette, max_dim),
+            sample_input=_bind(
+                _generic_sampler(rng),
+                palette,
+                min(max_dim, MAX_GRID_DIM // max(vertical, horizontal)),
+            ),
         )
     if kind == "scale":
         factor = rng.randint(2, 3)
@@ -659,19 +690,17 @@ def _level3_rule(
             level=3,
             stages=(scale(factor),),
             sample_input=_bind(
-                _generic_sampler(rng),
-                palette,
-                min(max_input_dim, MAX_GRID_DIM // factor),
+                _generic_sampler(rng), palette, min(max_dim, MAX_GRID_DIM // factor)
             ),
         )
     if kind == "border":
-        color = rng.choice([c for c in COLORS if c not in palette])
+        color = _spare_color(rng, palette)
         return Rule(
             name=f"add_border({color})",
             level=3,
             stages=(add_border(color),),
             sample_input=_bind(
-                _generic_sampler(rng), palette, min(max_input_dim, MAX_GRID_DIM - 2)
+                _generic_sampler(rng), palette, min(max_dim, MAX_GRID_DIM - 2)
             ),
         )
     # Crop needs a background frame to crop away, so it gets the margin sampler
@@ -680,23 +709,18 @@ def _level3_rule(
         name="crop_to_bbox",
         level=3,
         stages=(crop_to_bbox,),
-        sample_input=_bind(objects_pattern(margin=1), palette, max_input_dim),
+        sample_input=_bind(objects_pattern(margin=1), palette, max_dim),
     )
 
 
-def _level4_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
-    palette = palette or _sample_palette(rng, low=1, high=2)
+def _level4_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     kind = rng.choice(["denoise", "symmetry", "fill"])
     if kind == "denoise":
         return Rule(
             name="denoise",
             level=4,
             stages=(denoise,),
-            sample_input=_bind(pattern_noisy_objects, palette, max_input_dim),
+            sample_input=_bind(pattern_noisy_objects, palette, max_dim),
         )
     if kind == "symmetry":
         axis = rng.choice(["horizontal", "vertical"])
@@ -704,24 +728,18 @@ def _level4_rule(
             name=f"complete_symmetry({axis})",
             level=4,
             stages=(complete_symmetry(axis),),
-            sample_input=_bind(symmetric_holes_pattern(axis), palette, max_input_dim),
+            sample_input=_bind(symmetric_holes_pattern(axis), palette, max_dim),
         )
-    color = rng.choice([c for c in COLORS if c not in palette])
+    color = _spare_color(rng, palette)
     return Rule(
         name=f"fill_enclosed({color})",
         level=4,
         stages=(fill_enclosed(color),),
-        sample_input=_bind(
-            objects_pattern(margin=1, hollow=True), palette, max_input_dim
-        ),
+        sample_input=_bind(objects_pattern(margin=1, hollow=True), palette, max_dim),
     )
 
 
-def _level5_rule(
-    rng: random.Random,
-    palette: list[int] | None = None,
-    max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-) -> Rule:
+def _level5_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     """A color op followed by a shape op.
 
     Always in that order, and never shape-then-color: a color op can erase the
@@ -734,9 +752,8 @@ def _level5_rule(
     the input so the output still fits) and about structure (crop needs a
     background border to crop away).
     """
-    palette = palette or _sample_palette(rng, low=2, high=4)
-    shape = rng.choice([_level1_rule, _level3_rule])(rng, palette, max_input_dim)
-    color = _level2_rule(rng, palette, max_input_dim)
+    color = _level2_rule(rng, palette, max_dim)
+    shape = rng.choice([_level1_rule, _level3_rule])(rng, palette, max_dim)
     return Rule(
         name=f"{color.name}+{shape.name}",
         level=5,
@@ -746,7 +763,7 @@ def _level5_rule(
     )
 
 
-_LEVEL_RULES: dict[int, Callable[[random.Random], Rule]] = {
+_LEVEL_RULES: dict[int, Callable[[random.Random, list[int], int], Rule]] = {
     0: _level0_rule,
     1: _level1_rule,
     2: _level2_rule,
@@ -878,6 +895,7 @@ def generate_task(
     seed: int,
     index: int,
     level: int,
+    *,
     num_train_pairs: int | None = None,
     max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
 ) -> SynthTask:
@@ -896,10 +914,22 @@ def generate_task(
         raise ValueError(
             f"unknown level {level}; expected one of {sorted(_LEVEL_RULES)}"
         )
+    if num_train_pairs is not None and not 2 <= num_train_pairs <= 4:
+        raise ValueError("num_train_pairs must be between 2 and 4")
+    if max_input_dim < MIN_GRID_DIM:
+        raise ValueError(f"max_input_dim must be at least {MIN_GRID_DIM}")
     rng = random.Random(_task_seed(seed, index, level))
 
+    low, high = _PALETTE_RANGE[level]
+    if level in _SPARE_COLOR_LEVELS and high >= len(COLORS):
+        raise ValueError(
+            f"level {level} draws a color outside its palette, so its palette "
+            f"range {(low, high)} must stay below {len(COLORS)}"
+        )
+
     for _ in range(_MAX_ATTEMPTS):
-        rule = _LEVEL_RULES[level](rng, None, max_input_dim)
+        palette = rng.sample(COLORS, rng.randint(low, high))
+        rule = _LEVEL_RULES[level](rng, palette, max_input_dim)
         count = (num_train_pairs or rng.randint(2, 4)) + 1
         pairs = _sample_pairs(rng, rule, count)
         if pairs is None:
@@ -915,7 +945,10 @@ def generate_task(
             # The rule goes in the id so a dumped validation row says which
             # transformation it was -- the difference between "level 3 is hard"
             # and "tile is hard" -- without needing its own dataset column.
-            task_id=f"synth_L{level}_d{max_input_dim}_{rule.name}_{seed}_{index}",
+            task_id=(
+                f"synth_L{level}_d{max_input_dim}_f{count - 1}"
+                f"_{rule.name}_{seed}_{index}"
+            ),
             level=level,
             rule=rule.name,
             train_pairs=[{"input": inp, "output": out} for inp, out in train],
@@ -934,111 +967,212 @@ def generate_tasks(
     seed: int,
     count: int,
     levels: list[int],
-    num_train_pairs: int | None = None,
+    *,
+    num_train_pairs: int | list[int] | None = None,
     max_input_dim: int | list[int] = DEFAULT_MAX_INPUT_DIM,
-    size_ramp_window: int | None = None,
-    size_ramp_steps: int | None = None,
+    level_difficulty_order: list[int] | None = None,
+    difficulty_ramp_window: int | None = None,
+    difficulty_ramp_steps: int | None = None,
 ) -> list[SynthTask]:
-    """Generate ``count`` tasks, cycling through ``levels``.
+    """Generate ``count`` tasks over the joint transform x size schedule.
 
-    ``max_input_dim`` may be a list, and then grid size is *mixed* across the
-    batch the same way levels are. With ``size_ramp_window`` set to the number
-    of prompts per step, the mixture is additionally *reweighted* over the run:
-    every batch still holds every size, but the proportions shift from
-    small-heavy to large-heavy so mean difficulty rises step over step. Set
-    ``size_ramp_steps`` to the run's step count so the schedule spans the run
-    rather than the dataset -- the dataset is many times larger on purpose, and
-    a ramp spread over it barely moves. That only works if the dataloader reads
-    rows in order, so it needs ``data.shuffle: false``.
+    ``level_difficulty_order`` ranks the levels by *measured* solve rate rather
+    than authored index -- the numbering is a guess, and M4.2 measured level 2 as
+    easier than level 1. That rank is crossed with every ``max_input_dim``, and
+    the resulting combinations are reweighted from easy to hard across
+    ``difficulty_ramp_steps`` while every complete ``difficulty_ramp_window``
+    still contains all of them.
 
-    Reweighting is applied to size and not to level on purpose: size is
-    monotone in difficulty, and the level indices are not. M4.2 measured level 2
-    (single-colour ops) as *easier* than level 1 (dihedral) -- 0.088 against
-    0.000 -- so ordering a ramp by level number would have been ordering it by a
-    guess. Both choices
-    are the same argument: a phase in which every task shares a difficulty gives
-    groups that are uniformly hopeless or uniformly trivial, and those
-    contribute no gradient at all. Mixing puts the small grids where exact match
-    is actually reachable into *every* batch instead of only an early phase, and
-    it needs no feedback path from the environment back to the generator across
-    Ray actors -- which is the expensive part of an adaptive ramp, and which §13
-    deferred on purpose.
+    Keeping the full range in every window is the point. GRPO's advantage is
+    computed within a group of rollouts on one prompt, so a phase whose tasks
+    are uniformly hopeless -- or uniformly trivial -- contributes no gradient,
+    which is the same degenerate-group failure the curriculum exists to fix. A
+    plain ramp reintroduces it; reweighting a mixture does not.
 
-    Cycling rather than sampling: every batch then holds every level in exact
-    proportion. That matters more than it sounds -- GRPO's advantage is computed
-    within a group of rollouts on one prompt, so a batch whose levels are all
-    hopeless or all trivial contributes no gradient at all. Repeat a level in
-    ``levels`` to weight it.
+    ``difficulty_ramp_steps`` must be the *run* length, not the dataset length.
+    The dataset is deliberately many times larger than any run so that no task
+    repeats, so a ramp spread over it leaves a 60-step run at 12% of its
+    schedule -- inert, but still reading as configured. Rows past the end of the
+    ramp stay at the final, hardest mixture.
+
+    The schedule lives in the row order, so it needs ``data.shuffle: false``.
+    Omit ``difficulty_ramp_window`` (as validation does) and the cross product is
+    cycled at fixed weights instead, so the held-out mixture does not move
+    between checkpoints.
+
+    A level repeated in ``levels`` is weighted proportionally: it keeps one slot
+    per window like every other combination, and takes that multiple of the
+    remaining mass.
+
+    ``num_train_pairs`` may be a list ordered easy -> hard (more demonstrations
+    are easier); it is selected by the same joint difficulty rank. It is the one
+    axis beyond transform and size that is wired end to end -- see
+    ARC_CLEANUP_PLAN.md section 8 for the five that were removed and why.
     """
     if not levels:
         raise ValueError("levels must not be empty")
+    unknown = sorted(set(levels) - set(LEVELS))
+    if unknown:
+        raise ValueError(f"unknown levels {unknown}; the ladder has {list(LEVELS)}")
     dims = [max_input_dim] if isinstance(max_input_dim, int) else list(max_input_dim)
     if not dims:
         raise ValueError("max_input_dim must not be an empty list")
+    if level_difficulty_order is None:
+        # Authored index is the fallback ranking, and it is explicitly a guess.
+        level_difficulty_order = list(LEVELS)
 
-    if size_ramp_window:
-        sizes = _ramped_sizes(count, sorted(dims), size_ramp_window, size_ramp_steps)
-    else:
-        # Level cycles on the index, size on the index divided by the level
-        # count, so every (level, size) pair appears rather than one size being
-        # welded to one level forever.
-        sizes = [dims[(i // len(levels)) % len(dims)] for i in range(count)]
+    level_sizes, difficulty_fractions = _joint_level_size_schedule(
+        count=count,
+        levels=levels,
+        dims=dims,
+        level_difficulty_order=level_difficulty_order,
+        window=difficulty_ramp_window,
+        ramp_windows=difficulty_ramp_steps,
+    )
+    train_pair_values = _axis_values(num_train_pairs)
 
     return [
         generate_task(
             seed,
             index,
-            levels[index % len(levels)],
-            num_train_pairs,
-            sizes[index],
+            level,
+            num_train_pairs=_difficulty_axis_value(train_pair_values, difficulty),
+            max_input_dim=size,
         )
-        for index in range(count)
+        for index, ((level, size), difficulty) in enumerate(
+            zip(level_sizes, difficulty_fractions)
+        )
     ]
 
 
-def _ramped_sizes(
-    count: int, dims: list[int], window: int, ramp_windows: int | None = None
-) -> list[int]:
-    """Size for each row, reweighted across the run but never narrowed.
+def _axis_values(value: AxisT | list[AxisT] | None) -> list[AxisT | None]:
+    """An axis as the list of values it takes, easiest first.
 
-    Every window keeps at least one task of every size, so no batch is ever
-    uniformly hopeless or uniformly trivial -- that is the degenerate-group
-    property the mixing decision exists to protect, and a plain ramp destroys
-    it. What moves is the *weighting*: the remaining slots follow a hump centred
-    on the smallest size at the start of the run and the largest at the end, so
-    mean difficulty rises step over step while the spread stays.
-
-    The window is the number of prompts the trainer consumes per step, and the
-    schedule only lands if the dataloader reads rows in order -- set
-    ``data.shuffle: false``.
-
-    ``ramp_windows`` is how many steps the schedule spans, and it must be the
-    *run* length rather than the dataset length. The dataset is deliberately
-    many times larger than any run so that no task repeats, so spreading the
-    ramp across it leaves a 60-step run at 12% of the schedule with the mixture
-    barely moved -- an inert ramp that still looks configured. Rows past the end
-    of the ramp stay at the final, hardest mixture.
+    ``None`` is a value, not an absence: it is how "let the level decide" is
+    spelled for ``num_train_pairs``, so a one-element ``[None]`` is correct.
     """
-    if len(dims) == 1:
-        return [dims[0]] * count
+    if value is None:
+        return [None]
+    values = list(value) if isinstance(value, list) else [value]
+    if not values:
+        raise ValueError("difficulty-axis lists must not be empty")
+    return values
+
+
+def _difficulty_axis_value(
+    values: list[AxisT | None], difficulty: float
+) -> AxisT | None:
+    """The value this axis takes at a joint difficulty in [0, 1]."""
+    return values[round(difficulty * (len(values) - 1))]
+
+
+def _joint_level_size_schedule(
+    *,
+    count: int,
+    levels: list[int],
+    dims: list[int],
+    level_difficulty_order: list[int],
+    window: int | None,
+    ramp_windows: int | None,
+) -> tuple[list[tuple[int, int]], list[float]]:
+    """Cross measured transform difficulty with grid size into one schedule.
+
+    Returns the ``(level, size)`` for each row and that row's joint difficulty in
+    [0, 1], which the remaining axes are selected by.
+    """
+    if len(set(level_difficulty_order)) != len(level_difficulty_order):
+        raise ValueError("level_difficulty_order must not contain duplicates")
+    missing = sorted(set(levels) - set(level_difficulty_order))
+    if missing:
+        raise ValueError(f"level_difficulty_order is missing active levels {missing}")
+
+    # A repeated level is a weight, not a second combination: the cross product
+    # is built from the distinct levels and the multiplicity scales the mass
+    # that level receives.
+    multiplicity = Counter(levels)
+    active_order = [level for level in level_difficulty_order if level in multiplicity]
+    unique_dims = sorted(set(dims))
+    level_rank = {level: rank for rank, level in enumerate(active_order)}
+    dim_rank = {dim: rank for rank, dim in enumerate(unique_dims)}
+    level_denominator = max(len(active_order) - 1, 1)
+    dim_denominator = max(len(unique_dims) - 1, 1)
+
+    choices = [(level, dim) for level in active_order for dim in unique_dims]
+    scores = {
+        (level, dim): (
+            level_rank[level] / level_denominator + dim_rank[dim] / dim_denominator
+        )
+        / 2.0
+        for level, dim in choices
+    }
+    choices.sort(key=lambda choice: (scores[choice], level_rank[choice[0]], choice[1]))
+    weights = [float(multiplicity[level]) for level, _ in choices]
+
+    if window:
+        scheduled = _ramped_choices(
+            count=count,
+            choices=choices,
+            multipliers=weights,
+            window=window,
+            ramp_windows=ramp_windows,
+        )
+    else:
+        # No ramp: cycle at fixed weights, which is what the held-out split
+        # wants -- its mixture must not move between checkpoints. Multiplicity
+        # is honored here too, by giving a repeated level that many slots in the
+        # cycle, so `levels` means the same thing on both splits.
+        cycle = [choice for choice in choices for _ in range(multiplicity[choice[0]])]
+        scheduled = [cycle[index % len(cycle)] for index in range(count)]
+    return scheduled, [scores[choice] for choice in scheduled]
+
+
+def _ramped_choices(
+    *,
+    count: int,
+    choices: list[ChoiceT],
+    multipliers: list[float],
+    window: int,
+    ramp_windows: int | None = None,
+) -> list[ChoiceT]:
+    """Reweight ordered choices while retaining all of them in every window.
+
+    Every window keeps at least one of every choice, so no batch is ever
+    uniformly hopeless or uniformly trivial. What moves is the *weighting* of
+    the remaining slots: a hump centred on the easiest choice at the start of
+    the run and the hardest at the end, scaled by each choice's multiplier.
+
+    ``window`` is the number of prompts the trainer consumes per step;
+    ``ramp_windows`` is how many steps the schedule spans. Largest-remainder
+    apportionment, so the counts sum to the window exactly.
+    """
+    if window < len(choices):
+        raise ValueError(
+            f"difficulty_ramp_window {window} is smaller than the "
+            f"{len(choices)} level/size combinations"
+        )
     windows = max(1, -(-count // window))
     span = max(1, ramp_windows or windows)
-    out: list[int] = []
-    for w in range(windows):
-        progress = min(w, span - 1) / max(span - 1, 1)
-        centre = progress * (len(dims) - 1)
-        weights = [2.0 ** -abs(j - centre) for j in range(len(dims))]
+    out: list[ChoiceT] = []
+    for window_index in range(windows):
+        progress = min(window_index, span - 1) / max(span - 1, 1)
+        centre = progress * (len(choices) - 1)
+        weights = [
+            multiplier * 2.0 ** -abs(index - centre)
+            for index, multiplier in enumerate(multipliers)
+        ]
         total = sum(weights)
-        # One of every size first; the rest go to the hump. Largest-remainder so
-        # the counts sum to the window exactly.
-        counts = [1] * len(dims)
-        spare = max(0, min(window, count - w * window) - len(dims))
+        current_size = min(window, count - window_index * window)
+        spare = max(0, current_size - len(choices))
         exact = [spare * weight / total for weight in weights]
-        counts = [c + int(e) for c, e in zip(counts, exact)]
-        for j in sorted(
-            range(len(dims)), key=lambda j: exact[j] - int(exact[j]), reverse=True
-        )[: spare - sum(int(e) for e in exact)]:
-            counts[j] += 1
-        row = [dim for dim, c in zip(dims, counts) for _ in range(c)]
-        out.extend(row[: min(window, count - w * window)])
+        counts = [1 + int(extra) for extra in exact]
+        remainder = spare - sum(int(extra) for extra in exact)
+        order = sorted(
+            range(len(choices)),
+            key=lambda index: exact[index] - int(exact[index]),
+            reverse=True,
+        )
+        for index in order[:remainder]:
+            counts[index] += 1
+        row = [choice for choice, copies in zip(choices, counts) for _ in range(copies)]
+        out.extend(row[:current_size])
     return out[:count]

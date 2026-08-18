@@ -18,9 +18,15 @@
 # The experiment is two orthogonal axes; every combination has a config at
 # examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
-#   ENV       gym | math | arc | arcsynth NeMo-Gym servers, the built-in math env, real
-#                                         ARC-AGI-2, or the synthetic ARC difficulty ladder
+#   ENV       gym                         NeMo-Gym servers
+#             arcsynth[_4n|_8n]           the synthetic ARC difficulty ladder, generic or
+#                                         sized for a specific allocation
+#             arcsynth_early_answer       that ladder with the early-answer prompt
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
+#
+# The real-ARC-only (`arc`) and math arms are gone. Real ARC-AGI-2 is still
+# validated on at every checkpoint -- it is the campaign metric -- but as a
+# validation source inside env_arc_synth.yaml, not a training arm of its own.
 #
 # Usage:
 #   SUBMIT_ACCOUNT=<account> [ENV=...] \
@@ -53,8 +59,8 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | math | arc | arcsynth) ;;
-  *) die "invalid ENV: ${ENV} (expected gym, math, arc, or arcsynth)" ;;
+  gym | arcsynth | arcsynth_4n | arcsynth_8n | arcsynth_early_answer) ;;
+  *) die "invalid ENV: ${ENV} (expected gym, arcsynth, arcsynth_{4n,8n}, or arcsynth_early_answer)" ;;
 esac
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
@@ -109,12 +115,13 @@ fi
 # Layer 3: CMP preset -- validation off, weights-only checkpoints, fixed seq.
 if [[ "${CMP:-0}" == 1 ]]; then
   # The preset's fixed 16384 is applied after the config layer and so wins over
-  # env_arc*.yaml's 32768. The worst real ARC evaluation prompt is 16593 tokens,
-  # and an overlong prompt is not an error -- the processor masks the row with
-  # loss_multiplier=0 -- so the combination degrades the run silently. Refuse it
-  # rather than leaving it as a comment nobody reads at 2am.
+  # env_arc_synth.yaml's 32768. The synthetic prompts are smaller, but every
+  # checkpoint still validates on the real ARC-AGI-2 split, whose worst row is
+  # 16593 tokens -- and an overlong prompt is not an error, the processor masks
+  # the row with loss_multiplier=0, so the combination degrades the run
+  # silently. Refuse it rather than leaving it as a comment nobody reads at 2am.
   case "${ENV}" in
-    arc*) die "CMP=1 forces max_total_sequence_length=16384, below the 16593-token worst-case ARC prompt; do not combine it with ENV=${ENV}" ;;
+    arcsynth*) die "CMP=1 forces max_total_sequence_length=16384, below the 16593-token worst-case real ARC validation prompt; do not combine it with ENV=${ENV}" ;;
   esac
   add_override "grpo.val_period=0 grpo.val_at_start=false grpo.val_at_end=false"
   add_override "checkpointing.enabled=true checkpointing.save_period=5 checkpointing.save_optimizer=false"
@@ -122,14 +129,25 @@ if [[ "${CMP:-0}" == 1 ]]; then
 fi
 
 # Layer 4: caller overrides, last so they win.
-[[ -n "${EXTRA_OVERRIDES:-}" ]] && add_override "${EXTRA_OVERRIDES}"
+#
+# Fold any newline in the caller's value to a space first. ray.sub writes
+# ${COMMAND} to driver_command.sh verbatim and runs it with `bash`, so an
+# embedded newline does not continue the command -- it *ends* it, and everything
+# after becomes a second shell command that never reaches the entrypoint. Job
+# 6211877 lost `grpo.val_period=20` exactly this way (a multi-line
+# EXTRA_OVERRIDES pasted without continuations) and validated every 10 steps
+# while its log claimed 20. Silent, and only visible by diffing the resolved
+# config against the submit command.
+if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
+  add_override "$(tr '\n' ' ' <<<"${EXTRA_OVERRIDES}")"
+fi
 
 # ------------------------------------------- entrypoint, config, setup -----
 # The gym path drives rollouts through NeMo-Gym HTTP servers and needs its own
-# entrypoint; math runs on the standard one.
+# entrypoint; everything else runs on the standard one.
 case "${ENV}" in
-  gym)  ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  math | arc | arcsynth) ENTRYPOINT="examples/run_grpo.py" ;;
+  gym) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
+  *)   ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
@@ -167,6 +185,11 @@ ${COLL_TRACE_ENV} \
 uv run ${ENTRYPOINT} \
   --config ${CONFIG} \
     ${OVERRIDES}"
+
+# Belt and braces on the above: whatever assembled it, a newline anywhere in the
+# driver command truncates it at that point. Refuse to submit rather than run a
+# job whose overrides are quietly half-applied.
+[[ "${COMMAND}" == *$'\n'* ]] && die "driver command contains a newline; it would be truncated there by ray.sub"
 
 echo "run:      ${RUN_NAME}"
 echo "config:   ${CONFIG}"

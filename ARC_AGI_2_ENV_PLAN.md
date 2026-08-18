@@ -6,10 +6,17 @@ transformation before emitting the answer grid. The description is never scored 
 
 Model: **nano-v3 30B-A3B**. Context **32768**. Branch `async_arc2`, off `async_colo_verify2`.
 
-> Design and operating manual only. Results live in `reports/auto_research/arc-prompt/experiments.tsv`;
+> Design and operating manual. Results live in `reports/auto_research/arc-curriculum/experiments.tsv`;
 > per-commit history is on `async_arc`. Where a choice exists because a run demonstrated something,
 > the reason is stated inline. Numbers quoted as scale references came from a 1.7B-class model since
 > dropped from the async arm — re-measure before relying on them.
+
+**Current result (2026-08-16).** The campaign target is at least **9/172 exact solves (5%) on the
+real ARC-AGI-2 evaluation rows**; synthetic rows do not count. Job 6211877 completed 60 steps in
+2h42m: synthetic exact rose **17 → 51/172**, but real exact stayed **0/172** at every checkpoint.
+Best real diagnostics were 18.55% cell match and 45.35% valid format at step 50. This is evidence
+that the current generator is learnable but does not transfer exact solves. The next prepared run is
+`early_answer_4k_v3`, which targets responses that exhaust the token budget before emitting a grid.
 
 ---
 
@@ -61,9 +68,10 @@ tags live **inside step 5** — stranded in a trailing paragraph the model emits
 and no tags; delimiters are **plain text**, since added vocabulary needs embeddings trained from
 scratch and GRPO's signal is far too sparse for that.
 
-`max_new_tokens: 8192`. The context is sized for the prompt; an unbounded response budget means
-rollouts run to the cap, the async buffer never fills, and no training step starts. 4096 is too small
-once step 4 means re-deriving several grids. Prompt lengths are tokenizer-specific — re-measure with
+The baseline uses `max_new_tokens: 8192`, but job 6211877 frequently ran to that cap and spent
+15–20 minutes per validation. The follow-up prompt `arc_agi_early_answer.txt` requires a provisional
+answer within 1200 tokens and permits a corrected final block; its dedicated recipe safely reduces
+the cap to 4096. Prompt lengths are tokenizer-specific — re-measure with
 `tools/arc_agi_prompt_stats.py`.
 
 ## 3. Reward
@@ -96,6 +104,8 @@ exact match or shaping is the primary diagnostic.
   must sit strictly below the worst parseable answer, or the format term cannot bootstrap.
 - **`copied_input` is logged** as the hack detector: a run whose cell accuracy merely tracks the copy
   baseline is hacked, not learning. Never reward CoT length — paying for tokens buys tokens.
+- **A non-answer echo receives the unparseable floor.** True identity solutions remain exact, but
+  copying the test input when it is not the target can no longer beat a genuine imperfect attempt.
 
 **Validation** reports `grid_match` (the honest score), `cell_match`, `copied_input`, `format_valid`
 and the per-term breakdown, **each also per level** (`grid_match/level_3`, `grid_match/real`) — an
@@ -138,15 +148,15 @@ regenerable for offline scoring rather than stored.
 - **Augmentation**: permute non-zero colors and apply a dihedral transform, identically across a
   whole task. Both conjugate the rule rather than change it, and block memorizing "color 3 disappears".
 
-**Difficulty is mixed within every batch, and reweighted across the run.** A phase where every task
-shares a difficulty gives uniformly hopeless or uniformly trivial groups, which contribute no
-gradient — the exact failure the curriculum exists to fix. So `max_input_dim` takes a list
-(`[6, 12, 20]`) and the mixture shifts small-heavy → large-heavy while every window keeps at least one
-task of every size. `size_ramp_steps` must be the **run** length, not the dataset length: the dataset
-is deliberately much larger so no task repeats, and a ramp spread over it is inert while still reading
-as configured. The schedule lives in row order, so `data.shuffle: false`. Both knobs interpolate from
-`grpo.*`. Applied to **size, not level** — size is monotone in difficulty, the level index is not
-(single-color ops measured *easier* than dihedral).
+**Difficulty is mixed within every batch, and reweighted jointly across the run.** Levels use the
+measured order L3, L2, L1, L4, L5 and are crossed with sizes `[6, 12, 20]`; every optimizer window
+contains all 15 combinations while extra mass shifts easy → hard. The same joint rank selects
+few-shot count `[4,3,2]` — the only axis beyond transform and size that is wired end to end. Five
+others (palette size, object count, density, composition depth, distractors) shipped half-wired and
+were removed; setting one now raises. See `ARC_CLEANUP_PLAN.md` §8–9. A level repeated in `levels` is
+weighted proportionally on both splits. The schedule lives in row order (`data.shuffle: false`),
+spans `grpo.max_num_steps`, and the 8000-row dataset is large enough that a 60-step run never
+repeats a task.
 
 ## 5. Code
 
@@ -155,10 +165,10 @@ as configured. The schedule lives in row order, so `data.shuffle: false`. Both k
 | `nemo_rl/environments/arc_agi_grid.py` | serializer, parser, scorers, reward (numpy + stdlib) |
 | `nemo_rl/environments/arc_agi_generators.py` | ladder, patterns, guards, augmentation, size schedule (stdlib) |
 | `nemo_rl/environments/arc_agi_environment.py` | Ray actor, `ArcAgiEnvConfig`, per-level metrics |
-| `nemo_rl/data/datasets/response_datasets/arc_{agi,synth}.py` | real / synthetic datasets, identical row schema |
+| `nemo_rl/data/datasets/response_datasets/arc_{agi,synth}.py` | real / synthetic datasets, identical row schema. Real ARC is a **validation** source only — the arm that trained on it is gone, having produced `grid_match == 0.0000` four times |
 | `nemo_rl/data/processors.py` | `arc_agi_data_processor`, serves both |
-| `examples/prompts/arc_agi.txt`, `examples/configs/async/env_arc{,_synth}.yaml` | prompt, model-agnostic env layers |
-| `examples/configs/async/nanov3_arc{,synth}_{colocated,non_colocated}.yaml` | recipes |
+| `examples/prompts/arc_agi{,_early_answer}.txt`, `examples/configs/async/env_arc_synth{,_early_answer}.yaml` | prompts and model-agnostic env layers |
+| `examples/configs/async/nanov3_arcsynth{,_4n,_8n,_early_answer}_{colocated,non_colocated}.yaml` | recipes, one per allocation the run was sized for |
 | `tools/arc_agi_prompt_stats.py` | prompt lengths at the real tokenizer (`--synth` for the ladder) |
 | `tools/arc_synth_preflight.py` | resolves a recipe and builds its datasets, on CPU |
 | `tools/arc{_agi,_synth}_score_val_dumps.py` | offline re-scorers |
@@ -172,27 +182,46 @@ at construction.
 `tests/unit/environments/test_arc_agi_{grid,generators,environment}.py` and
 `tests/unit/data/datasets/test_arc_synth_dataset.py`: parser rejections, scorer edge cases, each
 reward term plus the copy-input and flood-colors hacks scoring below a genuine partial solve, the
-`step()` contract, the dihedral group, both guards, augmentation commuting with the rule, and the
-size schedule keeping every size per window while the mean rises. Ray actors get `# pragma: no cover`.
+`step()` contract, the dihedral group, both guards, augmentation commuting with the rule, the joint
+curriculum invariants (every window keeps every combination, mean difficulty rises, the ramp spans
+the run not the dataset, a repeated level is weighted without dropping a combination), that every
+level's palette leaves room for the colors its rules add, and that removed config keys raise rather
+than being ignored. Ray actors get `# pragma: no cover`.
 
 Grid and generator modules are Ray/torch/GPU-free, so they run on a login node —
 `PYTHONPATH=. python3 -m pytest <copy outside tests/>`, since `tests/unit/conftest.py` imports Ray.
-Everything else: `.run_arc_tests.sub`.
+Everything else: `run_arc_tests.sub`.
 
 ## 7. Running it
 
-**4-node nano recipe — known good** (job 6174618: 60 steps + 4 validations in 2h01m, ~73 s/step,
-~11 min per validation):
+**The run's shape lives in the recipe, not in `EXTRA_OVERRIDES`.** Every recipe named for an
+allocation (`nanov3_arcsynth_8n_colocated.yaml`) carries the batch, cadence and KV budget it was
+sized for, and declares `cluster.num_nodes` so the preflight can check the submission against it.
+The 4-node campaign instead carried five overrides on the command line plus a second copy in
+`run_arc_preflight.sub`, and the two could not be kept in agreement — see the override-transport
+gotcha below for what that cost.
+
+**4-node — known good** (job 6174618: 60 steps + 4 validations in 2h01m, ~73 s/step, ~11 min per
+validation). 60 steps at 32 prompts; interactive QOS allocates in ~90 s:
 
 ```
-SUBMIT_ACCOUNT=nemotron_sw_post ENV=arcsynth NUM_ACTOR_NODES=4 \
-  MAX_STEPS=60 TIMEOUT_MIN=240 RUN_TAG=<tag> \
-  EXTRA_OVERRIDES="grpo.num_prompts_per_step=32 policy.train_global_batch_size=512 \
-                   policy.generation.mcore_generation_config.buffer_size_gb=40 grpo.val_period=20" \
-  bash launch_experiment.sh colocated
+SUBMIT_ACCOUNT=nemotron_sw_post ENV=arcsynth_4n NUM_ACTOR_NODES=4 \
+  TIMEOUT_MIN=240 RUN_TAG=<tag> bash launch_experiment.sh colocated
 ```
 
-Why those overrides:
+**8-node** — 80 steps at 64 prompts, half of nano's tuned batch rather than a quarter:
+
+```
+SUBMIT_ACCOUNT=nemotron_sw_post ENV=arcsynth_8n NUM_ACTOR_NODES=8 QOS=normal \
+  TIMEOUT_MIN=240 RUN_TAG=<tag> bash launch_experiment.sh colocated
+```
+
+`QOS=normal` is required above 4 nodes and **`QOS=` (empty) does not work**: `submit_nemorl.sh`
+does `QOS=${QOS:-interactive}`, and `:-` substitutes on empty as well as unset, so an empty value
+resolves back to `interactive` and the job is rejected for exceeding its 4-node limit. The comment
+in that script saying otherwise is wrong.
+
+Why the 4-node numbers:
 
 - **4 nodes = 16 GPUs, and nano's parallelism divides cleanly** — TP2 × PP1 × CP1 → DP 8, and
   ETP1 × EP4 → EDP 4. No parallelism change is needed, and memory is not the constraint (~31 GB/GPU
@@ -201,21 +230,33 @@ Why those overrides:
   default batch a 4-node run needs ~7 h against the `batch` partition's hard **4 h** cap. Caveat:
   nano's `lr` was tuned for 2048, so gradients are noisier than its config assumes.
 - **`val_period: 20`** — validation is 344 rows and ~11 min a checkpoint; four fit, seven do not.
+- **Training packs are 16384 tokens; context/logprob remain 32768.** Job 6210750 OOMed on its first
+  backward pass with 32768-token training packs; job 6211877 completed all 60 steps after this change.
 - ≤4 nodes gets **interactive QOS**, which allocates in ~90 s. Above that, `QOS=normal` has queued
-  for over 24 h. This is the single biggest lever on iteration speed.
+  for over 2 h. This is the single biggest lever on iteration speed.
 
 Gotchas:
 
-- **Pre-flight first** — `.run_arc_preflight.sub` resolves a recipe and builds its datasets on CPU.
-  Its four guards each exist because a bug surfaced only at runtime and cost cluster time: ramp
+- **A newline in `EXTRA_OVERRIDES` truncates the run silently.** `ray.sub` writes `$COMMAND` to
+  `driver_command.sh` and runs it with `bash`, so an embedded newline does not continue the command —
+  it *ends* it, and everything after becomes a second shell command that never reaches the
+  entrypoint. Job 6211877 lost `grpo.val_period=20` this way and validated every 10 steps while its
+  log claimed 20; the loss is visible only by diffing `driver_command.sh` against what was typed.
+  `launch_experiment.sh` now folds newlines to spaces and refuses to submit a command containing
+  one. Prefer putting run shape in a recipe over passing it on the command line.
+- **Pre-flight first** — `run_arc_preflight.sub` resolves each recipe and builds its datasets on
+  CPU. Its guards each exist because a bug surfaced only at runtime and cost cluster time: ramp
   window vs prompts-per-step, ramp vs `shuffle`, `lr` vs `min_lr`, checkpoint metric vs the metrics
-  the ARC env emits.
+  the ARC env emits, submitted node count vs the recipe's `cluster.num_nodes`, and everything
+  `SynthCurriculumConfig` validates (removed keys, seed separation, window capacity). It exits
+  non-zero rather than printing warnings and returning 0.
 - **Never `CMP=1` with an ARC env** — it forces `max_total_sequence_length=16384`, below the
   worst-case ARC prompt, and an overlong prompt is *masked*, not raised. The launcher refuses it.
 - **`--no-container-mount-home`** for anything run in the container by hand, or enroot mounts your
   home over the container's and hides `uv`.
 - Validation chats land in `logs/exp_NNN/val_data_step<N>.jsonl`; both re-scorers work offline from
-  them, and the synthetic one regenerates targets from the run's `val_seed`.
+  them, and the synthetic one regenerates targets by rebuilding the run's `SynthCurriculumConfig`
+  from its recipe (`--config <recipe>`), through the same code path the dataset used.
 - **A caught async error still exits `COMPLETED` with status 0.** Read the driver log, not `sacct`.
 - Slurm's projected start is a backfill estimate, not a reservation, and can recede indefinitely.
 
@@ -248,13 +289,16 @@ Gotchas:
 4. **Rank levels by measured difficulty, not authored index.** The numbering is a guess and already
    known wrong in one place. Score a fixed policy per level and order by solve rate. Prerequisite for
    the next item.
-5. **Ramp transform complexity jointly with size.** With levels ranked, define `d = f(level_rank,
-   grid_size)` and reweight along `d` using the machinery `_ramped_sizes` already implements — every
-   window spans the range, the mass moves. Needs a second input and a joint schedule, not a new design.
-6. **Add the axes the ladder lacks**: few-shot count (2 pairs is much harder than 4), palette size,
-   object count and density, composition depth (level 5 is depth 2; `Rule.stages` already generalizes
-   over a tuple), and **distractors** — elements the rule ignores, which are most of what makes real
-   ARC hard and which the ladder has none of.
+5. **DONE — ramp transform complexity jointly with size.** Measured level rank × grid size is mixed
+   within every optimizer window and reweighted easy → hard across the run.
+6. **PARTIAL — add the missing axes.** Few-shot count is wired end to end and recorded in task IDs.
+   Palette size, object count, density, composition depth and distractors were shipped, found to be
+   inert or contradictory on most levels, and **removed** — palette size crashed four levels at its
+   own documented maximum; distractors were zeroed on four of six; density meant "fraction painted"
+   in one sampler and "keep this cell" in another. Two of them need a definition before they need
+   code: what an *object* is when a rectangle can hold several colors, and what a *distractor* is on
+   a level where the specks are the signal. Reintroduce them through item 7's DSL, one at a time,
+   each with a test that shows it moves difficulty. Details in `ARC_CLEANUP_PLAN.md` §1, §8.
 7. **Make the generator genuinely ARC-like.** The ladder is six hand-written families over a fixed
    vocabulary, and a policy can learn that vocabulary rather than the skill. Sample rules from a small
    DSL instead of enumerating them, and add the classes real ARC leans on: object-centric rules (move,
@@ -266,12 +310,8 @@ Gotchas:
 
 **Reward and objective**
 
-9. **Make the echo strictly worse than a genuine attempt.** An echo still collects `color_recall` and
-   `format_valid` and dodges the extraneous-color and shape penalties, so it sits at a small
-   *positive* floor while a real attempt that misses scores a negative gain. On any task the policy
-   cannot solve, echoing is therefore reward-maximizing. Re-baselining moved the zero point but did
-   not invert that ordering. Fix: score `pred == test_input` at or below the unparseable floor
-   wherever it is not the answer.
+9. **DONE — make the echo strictly worse than a genuine attempt.** A non-answer
+   `pred == test_input` now receives the unparseable floor; a true identity solution remains exact.
 10. **Question whether exact match is the right objective.** It needs every cell right, so a rule the
     model understands still scores zero on a large grid. Small grids are the cheap test and are
     already supported. If solve rates stay at zero there, the objective — not the curriculum — is what
@@ -282,9 +322,9 @@ Gotchas:
 1. **Eval-set size.** 172 rows is small; step-to-step noise swamps real movement. Consider holding out
    a slice of the 1000 training tasks for online validation and reserving the official split for
    milestone reporting.
-2. **Does synthetic transfer to real ARC at all?** The generator's premise is that exact-match signal
-   on solvable tasks teaches what shaping cannot. The model may instead learn the generator's
-   vocabulary and transfer nothing. Real-ARC validation runs at every checkpoint to measure this; a
-   null result is an answer, not a failed run.
+2. **Does synthetic transfer to real ARC at all?** Current answer: not with this generator/run.
+   Job 6211877 improved synthetic exact 17 → 51/172 while real exact stayed 0/172. Item 7 (a broader
+   object/relational DSL) is now the main curriculum question; `early_answer_4k_v3` first isolates
+   the measured output-format/token-exhaustion failure.
 3. **Does the edit-distance term earn its weight?** It shipped with the copy-relative re-baselining
    and has never been isolated. Cheap to ablate (`edit_weight: 0.0`) once `grid_match` is nonzero.
