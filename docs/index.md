@@ -114,6 +114,13 @@ Post-train Nemotron 3 Ultra with RLVR, teacher training, and MOPD stages on GB20
 Create custom reward environments and integrate them with NeMo RL training pipelines.
 :::
 
+:::{grid-item-card} {octicon}`squirrel` GRPO on ARC-AGI-2
+:link: guides/grpo-arc-agi
+:link-type: doc
+
+Grid-puzzle environment with a synthetic curriculum of tunable difficulty, shaped rewards, and per-level metrics.
+:::
+
 :::{grid-item-card} {octicon}`rocket` Eagle3 Speculative Decoding
 :link: guides/eagle3-speculative-decoding
 :link-type: doc
@@ -307,6 +314,7 @@ guides/grpo-deepscaler.md
 guides/grpo-sliding-puzzle.md
 guides/grpo-audio.md
 guides/grpo-audio-visual.md
+guides/grpo-arc-agi.md
 guides/rm.md
 guides/environments.md
 guides/eval.md
