@@ -18,7 +18,7 @@ cluster whose idle-GPU reaper allows two hours, that is a large number of
 GPU-hours spent producing nothing -- and the reaper takes the process state with
 it, so the hang cannot be explained afterwards.
 
-**GPU utilisation is the progress signal.** Not log output: a job can be quiet
+**GPU utilization is the progress signal.** Not log output: a job can be quiet
 for many minutes while doing real work (a long evaluation pass, a slow
 checkpoint), and treating silence as failure kills healthy runs. Busy GPUs mean
 progress no matter what is or is not being written to a log, which also keeps
@@ -45,7 +45,7 @@ import subprocess
 import time
 from pathlib import Path
 
-# A GPU reporting at or below this percent of utilisation is doing nothing worth
+# A GPU reporting at or below this percent of utilization is doing nothing worth
 # counting. Kernel launches and memory traffic keep a working GPU well above it.
 G_BUSY_PERCENT = 5
 
@@ -62,7 +62,7 @@ G_IDLE_POLLS = 4
 # Minutes from job start during which idleness is ignored. A job's GPUs are
 # legitimately idle while it starts up: pulling a container, converting weights,
 # loading a model across ranks. That is indistinguishable from a hang by
-# utilisation alone, and it is long -- a large model takes tens of minutes to
+# utilization alone, and it is long -- a large model takes tens of minutes to
 # reach its first GPU work. Without this the watchdog kills every job it is
 # armed on, a few minutes after launch.
 G_GRACE_MINUTES = 45

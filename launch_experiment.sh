@@ -162,7 +162,7 @@ export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }
 # recent collectives, dumped to ./nccl_traces/ when a collective times out. It
 # names the stuck collective, which is the one thing a hang post-mortem needs
 # and the one thing that cannot be recovered afterwards -- a hang caught without
-# it can only ever be localised to a phase, never explained.
+# it can only ever be localized to a phase, never explained.
 #
 # Default-on because the cost is a fixed per-rank buffer (20k entries) and a
 # pointer bump per collective; nothing is written unless a timeout fires. Set

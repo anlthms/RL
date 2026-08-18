@@ -93,7 +93,7 @@ next occurrence explicable:
 
 - Confirm the flight recorder was enabled (`COLL_TRACE`, on by default in
   `launch_experiment.sh`) and that `./nccl_traces/` was populated. A dump names
-  the stuck collective; without one, a hang can only be localised, never
+  the stuck collective; without one, a hang can only be localized, never
   explained.
 - Raise communication-library verbosity **for the reproduction only**
   (`NCCL_DEBUG=INFO`). It is too verbose to leave on: it prints per-communicator
@@ -111,8 +111,8 @@ anything. Required sections:
 2. **Where it stopped** — the marker comparison against a healthy run.
 3. **Discriminating matrix** — every run against the suspect axis.
 4. **Evidence** — what the bundle showed, or explicitly that none was captured.
-5. **Root cause** — with honest confidence. "Localised to worker
-   initialisation; mechanism unknown pending traces" is a good finding. A guess
+5. **Root cause** — with honest confidence. "Localized to worker
+   initialization; mechanism unknown pending traces" is a good finding. A guess
    dressed as a cause is not.
 6. **Recommended next step** — a specific code fix with file and line, or the
    exact instrumented reproduction command. Include the command.
