@@ -9,6 +9,8 @@
 #SBATCH --account=nemotron_sw_post
 #SBATCH --output=%j-arc-tests.log
 
+set -euo pipefail
+
 # The ARC unit tests, in the container. The grid and generator modules are
 # stdlib-only and run on a login node, but the dataset tests need HF `datasets`
 # and the environment tests need Ray, so those two files only run here.

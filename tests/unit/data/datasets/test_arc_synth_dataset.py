@@ -57,6 +57,72 @@ def test_reproducible_from_the_seed():
     assert first.dataset["target"] == second.dataset["target"]
 
 
+def test_joint_curriculum_axes_are_threaded_to_both_splits():
+    configured = ArcSynthDataset(
+        levels=[1, 2, 3, 4, 5],
+        num_tasks=32,
+        num_val_tasks=30,
+        seed=15,
+        val_seed=16,
+        num_train_pairs=[4, 3, 2],
+        max_input_dim=[6, 12, 20],
+        level_difficulty_order=[0, 3, 2, 1, 4, 5],
+        difficulty_ramp_window=32,
+        difficulty_ramp_steps=1,
+    )
+    train_ids = configured.dataset["task_id"]
+    val_ids = configured.val_dataset["task_id"]
+    # Task IDs report what was realized, so the axes are checked on the rows
+    # rather than on the config that asked for them.
+    for marker in ("_f4_", "_f2_", "_d6_", "_d20_"):
+        assert any(marker in task_id for task_id in train_ids)
+        assert any(marker in task_id for task_id in val_ids)
+
+
+@pytest.mark.parametrize(
+    "removed",
+    ["size_ramp_window", "palette_size", "object_count", "density", "distractor_count"],
+)
+def test_a_removed_curriculum_key_is_rejected_rather_than_ignored(removed):
+    # `extra="allow"` is needed for the merged data.default keys, so without an
+    # explicit check a recipe still setting one of these would read as
+    # configured and do nothing.
+    with pytest.raises(ValueError, match="removed curriculum keys"):
+        ArcSynthDataset(
+            levels=[1], num_tasks=4, num_val_tasks=4, seed=0, val_seed=1, **{removed: 2}
+        )
+
+
+def test_a_window_too_small_for_the_cross_product_is_rejected():
+    # A window that cannot hold every combination is a window that can be
+    # uniformly hopeless, which is the failure the mixture exists to prevent.
+    with pytest.raises(ValueError, match="cannot hold all 6 level/size"):
+        ArcSynthDataset(
+            levels=[1, 2],
+            num_tasks=8,
+            num_val_tasks=4,
+            seed=0,
+            val_seed=1,
+            max_input_dim=[6, 12, 20],
+            difficulty_ramp_window=4,
+            difficulty_ramp_steps=2,
+        )
+
+
+def test_a_ramp_window_without_a_span_is_rejected():
+    # Defaulting the span to the dataset length gives an inert ramp that still
+    # reads as configured -- the failure mode this check exists to prevent.
+    with pytest.raises(ValueError, match="difficulty_ramp_steps"):
+        ArcSynthDataset(
+            levels=[1, 2],
+            num_tasks=8,
+            num_val_tasks=4,
+            seed=0,
+            val_seed=1,
+            difficulty_ramp_window=8,
+        )
+
+
 def test_concatenates_with_the_real_arc_schema(dataset):
     # The two validation sources are merged into one dataloader, so their
     # features have to match exactly -- that is why real ARC rows carry a level.
@@ -66,3 +132,21 @@ def test_concatenates_with_the_real_arc_schema(dataset):
     merged = concatenate_datasets([dataset.val_dataset, real])
     assert len(merged) == len(dataset.val_dataset) + len(real)
     assert set(merged.column_names) == COLUMNS
+
+
+def test_a_ramp_that_cannot_complete_in_the_dataset_is_rejected():
+    # Both ramp knobs interpolate from grpo.*, so a recipe that does not pin
+    # max_num_steps inherits the base default of 1_000_000 and spends its whole
+    # run in the first fraction of a percent of the schedule -- inert, but still
+    # reading as configured.
+    with pytest.raises(ValueError, match="ramp can never complete"):
+        ArcSynthDataset(
+            levels=[1, 2],
+            num_tasks=8000,
+            num_val_tasks=4,
+            seed=0,
+            val_seed=1,
+            max_input_dim=[6, 12, 20],
+            difficulty_ramp_window=128,
+            difficulty_ramp_steps=1_000_000,
+        )

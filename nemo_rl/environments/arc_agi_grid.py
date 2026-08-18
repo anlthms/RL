@@ -322,6 +322,21 @@ def shape_mismatch(pred: Grid, target: Grid) -> float:
     return min(1.0, error / (target_h + target_w))
 
 
+def _reward_floor(weights: RewardWeights) -> float:
+    """The worst reward any response can earn.
+
+    Every penalty charged in full and no format credit. Two responses sit here:
+    one that could not be parsed, and one that echoed the test input without
+    solving it. Both must stay strictly below the worst *genuine* parseable
+    answer, which bottoms out one format bonus above -- without that gap the
+    format term cannot bootstrap, and at step 0, when nothing is solved, it is
+    the only reward difference the policy can act on. The gain terms reach -1,
+    so they belong in the floor: otherwise a badly-wrong parseable answer would
+    score below garbage and the ordering would invert.
+    """
+    return -(weights.cell + weights.edit + weights.extraneous + weights.shape)
+
+
 def score_response(
     response: str, target: Grid, test_input: Grid, weights: RewardWeights
 ) -> dict[str, float]:
@@ -341,18 +356,8 @@ def score_response(
     """
     pred = extract_answer_grid(response)
     if pred is None:
-        # Charge every penalty in full and grant no format credit. This puts the
-        # unparseable floor strictly below the worst parseable answer, which
-        # bottoms out one format bonus above it, so emitting *something* well
-        # formed is always an improvement. Without that gap the format term
-        # cannot bootstrap: at step 0, when nothing is solved, it is the only
-        # reward difference the policy can act on. Note the gain terms reach -1,
-        # so they belong in this floor -- otherwise a badly-wrong parseable
-        # answer would score below garbage and the ordering would invert.
         return {
-            "reward": -(
-                weights.cell + weights.edit + weights.extraneous + weights.shape
-            ),
+            "reward": _reward_floor(weights),
             "grid_match": 0.0,
             "cell_match": 0.0,
             "cell_gain": -1.0,
@@ -383,15 +388,27 @@ def score_response(
     terms["cell_gain"] = gain_over_baseline(terms["cell_match"], copy_cell)
     terms["edit_gain"] = gain_over_baseline(terms["edit_similarity"], copy_edit)
 
-    terms["reward"] = (
-        weights.exact * terms["grid_match"]
-        + weights.cell * terms["cell_gain"]
-        + weights.edit * terms["edit_gain"]
-        + weights.color * terms["color_recall"]
-        - weights.extraneous * terms["extraneous_colors"]
-        - weights.shape * terms["shape_mismatch"]
-        + weights.format * terms["format_valid"]
-    )
+    if terms["copied_input"] and not terms["grid_match"]:
+        # Gain-relative similarity moved an echo's similarity reward to zero,
+        # but it still collected color recall + format credit while avoiding
+        # every penalty. On unsolved tasks that positive safe harbour beat a
+        # genuine attempt whose gain happened to be negative, and two runs
+        # converged to 68-79% copied answers. Put a non-answer echo on the
+        # reward floor. Any other parseable grid retains the format gap and
+        # therefore strictly beats copying, while level 0 / a genuine identity
+        # task remains an exact solve and is exempt. Only the scalar moves: the
+        # diagnostic terms still report a well-formed grid that copied the input.
+        terms["reward"] = _reward_floor(weights)
+    else:
+        terms["reward"] = (
+            weights.exact * terms["grid_match"]
+            + weights.cell * terms["cell_gain"]
+            + weights.edit * terms["edit_gain"]
+            + weights.color * terms["color_recall"]
+            - weights.extraneous * terms["extraneous_colors"]
+            - weights.shape * terms["shape_mismatch"]
+            + weights.format * terms["format_valid"]
+        )
     return terms
 
 

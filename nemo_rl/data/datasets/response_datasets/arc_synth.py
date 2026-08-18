@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from datasets import Dataset
+from pydantic import BaseModel, model_validator
 
 from nemo_rl.data.datasets.raw_dataset import RawDataset
 from nemo_rl.environments.arc_agi_generators import (
@@ -23,6 +24,151 @@ from nemo_rl.environments.arc_agi_generators import (
 )
 
 TASK_NAME = "arc_synth"
+
+# Axes removed with the Option B cleanup (see ARC_CLEANUP_PLAN.md section 8).
+# They are named rather than ignored: `extra="allow"` is needed so the merged
+# `data.default` keys pass through, and it would otherwise swallow these
+# silently, leaving a recipe that reads as configured and does nothing.
+_REMOVED_KEYS = {
+    "size_ramp_window": "use difficulty_ramp_window",
+    "size_ramp_steps": "use difficulty_ramp_steps",
+    "palette_size": "removed; the ladder picks a palette per level",
+    "object_count": "removed; needs a definition of 'object' the ladder lacks",
+    "density": "removed; it meant two opposite things across samplers",
+    "composition_depth": "removed; level 5 is depth 2",
+    "distractor_count": "removed; was inert on four of six levels",
+}
+
+
+class SynthCurriculumConfig(BaseModel, extra="allow"):
+    """Everything needed to regenerate a synthetic split, and nothing else.
+
+    This is the whole reproducibility boundary: two `SynthCurriculumConfig`s
+    that compare equal generate identical tasks, so an offline re-scorer can
+    rebuild a run's validation rows from its recipe alone. Adding a curriculum
+    axis means adding a field here and nowhere else.
+
+    Attributes:
+        levels: Ladder levels to draw from. A repeated entry weights that level.
+        num_tasks: Training tasks to materialize. Deliberately far larger than
+            any run, so no task is seen twice.
+        num_val_tasks: Held-out tasks per validation pass.
+        seed: Generator seed for the training split.
+        val_seed: Generator seed for the held-out split. Must differ from
+            ``seed``, or validation measures memorization.
+        num_train_pairs: Few-shot pairs per task; a list ordered easy -> hard
+            (more demonstrations are easier), or None to draw 2-4 per task the
+            way real ARC tasks vary.
+        max_input_dim: Upper bound on an input grid's side, or a list of bounds
+            to mix sizes within every batch.
+        level_difficulty_order: Levels ordered by *measured* solve rate, easiest
+            first. Crossed with ``max_input_dim`` to form the joint schedule.
+        difficulty_ramp_window: Prompts per optimizer step. Every full window
+            holds every level/size combination while the weights move easy ->
+            hard. Requires ``data.shuffle: false``; omitted for validation, so
+            the held-out mixture is fixed across checkpoints.
+        difficulty_ramp_steps: Optimizer steps the schedule spans. Must be the
+            run length, not the dataset length.
+    """
+
+    levels: list[int]
+    num_tasks: int
+    num_val_tasks: int
+    seed: int
+    val_seed: int
+    num_train_pairs: int | list[int] | None = None
+    max_input_dim: int | list[int] = DEFAULT_MAX_INPUT_DIM
+    level_difficulty_order: list[int] | None = None
+    difficulty_ramp_window: int | None = None
+    difficulty_ramp_steps: int | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "SynthCurriculumConfig":
+        present = sorted(_REMOVED_KEYS.keys() & (self.model_extra or {}).keys())
+        if present:
+            detail = "; ".join(f"{key}: {_REMOVED_KEYS[key]}" for key in present)
+            raise ValueError(
+                f"removed curriculum keys are still set in the config ({detail})"
+            )
+        if not self.levels:
+            raise ValueError("levels must not be empty")
+        unknown = sorted(set(self.levels) - set(LEVELS))
+        if unknown:
+            raise ValueError(f"unknown levels {unknown}; the ladder has {list(LEVELS)}")
+        if self.seed == self.val_seed:
+            raise ValueError(
+                f"seed and val_seed are both {self.seed}: the held-out split "
+                "would be the training tasks verbatim, and validation would "
+                "measure memorization rather than generalization"
+            )
+        dims = self.dims
+        if not dims:
+            raise ValueError("max_input_dim must not be an empty list")
+        combinations = len(set(self.levels)) * len(set(dims))
+        if self.difficulty_ramp_window is not None:
+            if self.difficulty_ramp_window < combinations:
+                raise ValueError(
+                    f"difficulty_ramp_window {self.difficulty_ramp_window} cannot "
+                    f"hold all {combinations} level/size combinations; every "
+                    "optimizer window must contain the full range"
+                )
+            if self.difficulty_ramp_steps is None:
+                raise ValueError(
+                    "difficulty_ramp_window is set without difficulty_ramp_steps, "
+                    "so the schedule would span the dataset rather than the run "
+                    "and barely move"
+                )
+            # The ramp has to fit in the rows it will actually read. Both knobs
+            # interpolate from grpo.*, so a recipe that does not pin
+            # max_num_steps inherits the base default of 1_000_000 and spends
+            # its whole run in the first fraction of a percent of the schedule:
+            # an inert ramp that still reads as configured, which is the exact
+            # failure difficulty_ramp_steps was introduced to prevent.
+            needed = self.difficulty_ramp_steps * self.difficulty_ramp_window
+            if needed > self.num_tasks:
+                raise ValueError(
+                    f"difficulty_ramp_steps {self.difficulty_ramp_steps} x window "
+                    f"{self.difficulty_ramp_window} needs {needed} rows but "
+                    f"num_tasks is {self.num_tasks}, so the ramp can never "
+                    "complete; pin grpo.max_num_steps in the recipe to the run "
+                    "length it was sized for"
+                )
+        return self
+
+    @property
+    def dims(self) -> list[int]:
+        """``max_input_dim`` as a list, however it was written."""
+        if isinstance(self.max_input_dim, int):
+            return [self.max_input_dim]
+        return list(self.max_input_dim)
+
+    def train_tasks(self) -> list[SynthTask]:
+        """The training split, on the ramped schedule."""
+        return generate_tasks(
+            self.seed,
+            self.num_tasks,
+            self.levels,
+            num_train_pairs=self.num_train_pairs,
+            max_input_dim=self.max_input_dim,
+            level_difficulty_order=self.level_difficulty_order,
+            difficulty_ramp_window=self.difficulty_ramp_window,
+            difficulty_ramp_steps=self.difficulty_ramp_steps,
+        )
+
+    def val_tasks(self) -> list[SynthTask]:
+        """The held-out split, at fixed weights.
+
+        No ramp: the mixture must not move between checkpoints or the metric is
+        not comparable across them.
+        """
+        return generate_tasks(
+            self.val_seed,
+            self.num_val_tasks,
+            self.levels,
+            num_train_pairs=self.num_train_pairs,
+            max_input_dim=self.max_input_dim,
+            level_difficulty_order=self.level_difficulty_order,
+        )
 
 
 def _to_row(task: SynthTask) -> dict:
@@ -46,99 +192,29 @@ class ArcSynthDataset(RawDataset):
     """Synthetic ARC-style tasks from the difficulty ladder in ``arc_agi_generators``.
 
     Generated rather than downloaded: volume is free, and a run stays
-    reproducible because every task is a pure function of ``(seed, index,
-    level)``.
+    reproducible because every task is a pure function of its
+    ``SynthCurriculumConfig`` and its row index.
 
-    Levels are **mixed within every batch**, not ramped across steps. GRPO's
-    advantage is computed within a group of rollouts on one prompt, so a phase
-    in which every task is uniformly hopeless -- or uniformly trivial --
-    contributes no gradient at all. That is the same degenerate-group failure
-    the curriculum exists to fix, and a scheduled ramp reintroduces it. Mixing
-    guarantees some level in every batch sits at a solve rate strictly between 0
-    and 1.
+    Levels and grid sizes are **mixed within every batch**. Their joint weights
+    ramp across steps, but every full window retains the complete cross product.
+    GRPO's advantage is computed within a group of rollouts on one prompt, so a
+    phase in which every task is uniformly hopeless -- or uniformly trivial --
+    contributes no exact-match signal. Keeping the range present avoids
+    reintroducing that failure while still moving the curriculum frontier.
 
-    Every field that shapes the curriculum is required rather than defaulted
-    here: they all live in ``env_arc_synth.yaml``, and a silent fallback to some
-    other mixture or seed would be a different experiment reported under the
-    same name.
-
-    Args:
-        levels: Which ladder levels to draw from, out of
-            ``arc_agi_generators.LEVELS``. Tasks cycle through this list in
-            order, so a repeated entry weights that level.
-        num_tasks: How many training tasks to materialize.
-        num_val_tasks: How many held-out tasks to materialize for validation.
-        seed: Generator seed for the training tasks.
-        val_seed: Generator seed for the held-out tasks. Must differ from
-            ``seed`` or validation is a memorization check.
-        num_train_pairs: Few-shot pairs per task, or None to draw 2-4 per task
-            the way real ARC tasks vary.
-        max_input_dim: Upper bound on an input grid's side, or a list of them
-            to mix sizes across the batch. Grid size is a difficulty axis
-            independent of the transformation: exact match needs every cell
-            right, so a large grid can score zero on a rule the model does
-            understand. M4.2 measured level 0 at 1.000 on targets under 150
-            cells against 0.750 above 300. Mixed rather than ramped, for the
-            same reason levels are -- see ``generate_tasks``.
-        size_ramp_window: Set to ``grpo.num_prompts_per_step`` to reweight the
-            size mixture across the run: every batch still holds every size, but
-            the mass shifts from small to large so mean difficulty rises step
-            over step. Requires ``data.shuffle: false``, since the schedule
-            lives in the row order. Applies to training only -- the held-out
-            split stays a fixed mixture, or the metric would not be comparable
-            between checkpoints.
-        size_ramp_steps: How many steps the schedule spans. Set it to
-            ``grpo.max_num_steps``: the dataset is deliberately many times
-            larger than any run so no task repeats, so a ramp spread over the
-            dataset leaves a 60-step run at 12% of its schedule with the mixture
-            barely moved -- inert, but still looking configured.
+    Every field that shapes the curriculum lives on ``SynthCurriculumConfig``
+    and comes from ``env_arc_synth.yaml``: a silent fallback to some other
+    mixture or seed would be a different experiment reported under the same
+    name, so removed keys raise rather than being ignored.
     """
 
-    def __init__(
-        self,
-        levels: list[int],
-        num_tasks: int,
-        num_val_tasks: int,
-        seed: int,
-        val_seed: int,
-        num_train_pairs: int | None = None,
-        max_input_dim: int | list[int] = DEFAULT_MAX_INPUT_DIM,
-        size_ramp_window: int | None = None,
-        size_ramp_steps: int | None = None,
-        **kwargs,
-    ) -> None:
-        levels = list(levels)
-        if isinstance(max_input_dim, list) and not max_input_dim:
-            raise ValueError("max_input_dim must not be an empty list")
-        unknown = sorted(set(levels) - set(LEVELS))
-        if unknown:
-            raise ValueError(f"unknown levels {unknown}; the ladder has {list(LEVELS)}")
-        if seed == val_seed:
-            raise ValueError(
-                f"seed and val_seed are both {seed}: the held-out split would be "
-                "the training tasks verbatim, and validation would measure "
-                "memorization rather than generalization"
-            )
+    def __init__(self, **kwargs) -> None:
+        config = SynthCurriculumConfig(**kwargs)
         self.task_name = TASK_NAME
+        self.curriculum = config
         self.dataset = Dataset.from_list(
-            [
-                _to_row(task)
-                for task in generate_tasks(
-                    seed,
-                    num_tasks,
-                    levels,
-                    num_train_pairs,
-                    max_input_dim,
-                    size_ramp_window,
-                    size_ramp_steps,
-                )
-            ]
+            [_to_row(task) for task in config.train_tasks()]
         )
         self.val_dataset = Dataset.from_list(
-            [
-                _to_row(task)
-                for task in generate_tasks(
-                    val_seed, num_val_tasks, levels, num_train_pairs, max_input_dim
-                )
-            ]
+            [_to_row(task) for task in config.val_tasks()]
         )

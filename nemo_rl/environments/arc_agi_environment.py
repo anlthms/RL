@@ -50,7 +50,10 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
     earns ~0.61 cell accuracy on the ARC-AGI-2 evaluation split -- more than any
     run has yet earned by reasoning -- and training duly converged on the echo
     (58% of validation answers by step 60 of job 6041201). Measured against a
-    copy of the same task's input, an echo is worth exactly zero.
+    copy of the same task's input, its similarity contribution is exactly zero.
+    A non-answer echo is additionally placed on the unparseable reward floor:
+    otherwise color recall and valid formatting still make it a positive safe
+    harbour that beats a genuine but imperfect attempt.
 
     Attributes:
         exact_weight: Weight on exact grid match. Kept dominant so that shaping

@@ -1,0 +1,54 @@
+# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 8 nodes.
+# Launch: ENV=arcsynth_8n NUM_ACTOR_NODES=8 QOS=normal bash launch_experiment.sh colocated
+#
+# The run's shape lives here rather than in an EXTRA_OVERRIDES string. The
+# 4-node campaign carried five overrides on the command line and a second copy
+# of them in run_arc_preflight.sub, and the two could not be kept in agreement
+# -- job 6211877 in fact ran with one of them silently dropped. A named recipe
+# is the single source both the launch and the preflight read.
+#
+# 8 nodes = 32 GPUs, and nano's parallelism still divides cleanly: TP2 x PP1 x
+# CP1 -> DP 16, ETP1 x EP4 -> EDP 8.
+#
+# NOTE: 8 nodes is above the 4-node interactive-QOS limit, so QOS=normal is
+# required and the job sits in the normal queue. QOS= (empty) does NOT work:
+# submit_nemorl.sh does `QOS=${QOS:-interactive}`, and `:-` substitutes on empty
+# as well as unset, so an empty value silently resolves back to interactive and
+# the submission is rejected for exceeding its 4-node limit.
+defaults:
+  - nanov3_colocated.yaml
+  - env_arc_synth.yaml
+
+grpo:
+  # Intended allocation. launch_experiment.sh overrides cluster.num_nodes from
+  # NUM_ACTOR_NODES, so this is what the preflight checks the submission against
+  # -- YAML cannot constrain a Slurm allocation by itself.
+  max_num_steps: 80
+
+  # Half of nano's default 128/2048 rather than the 4-node campaign's quarter.
+  # Nano's lr was tuned at 2048, so every reduction makes gradients noisier than
+  # its config assumes; twice the nodes buys back half of that gap at the same
+  # wall clock. 60 steps took 2h42m on 4 nodes at 32 prompts, so 80 steps at 64
+  # prompts on 8 nodes lands in a comparable time with more steps and less noise.
+  num_prompts_per_step: 64
+  # Validation is 344 rows over both sources. Four passes (0, 20, 40, 60, 80)
+  # fit; the 4-node run's seven did not, and cost it 15-20 minutes each.
+  val_period: 20
+
+policy:
+  # MUST equal num_prompts_per_step x num_generations_per_prompt (64 x 16).
+  # Leaving this at nano's 2048 while halving prompts-per-step is what killed
+  # job 6226427: 1024 rollouts arrived for a 2048-sample optimizer step and
+  # shard_by_batch_size asserted at Step 1, after a 10-minute step-0 validation
+  # had already been paid for. The preflight now checks this relationship.
+  train_global_batch_size: 1024
+
+  generation:
+    mcore_generation_config:
+      # 80 GB of KV buffer plus the training state does not fit alongside the
+      # 32768-token context; 40 was measured safe on the 4-node runs at ~31 GB
+      # per GPU of ~186 GB, and per-GPU memory does not change with node count.
+      buffer_size_gb: 40
+
+cluster:
+  num_nodes: 8

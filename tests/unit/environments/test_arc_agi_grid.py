@@ -220,9 +220,7 @@ class TestScoreResponse:
         target = [[1, 2], [3, 4]]
         exact = score(answer("12\n34"), target)
         for wrong in ("12\n33", "1\n3", "1234", "11\n11"):
-            assert exact["reward"] > score(answer(wrong), target)[
-                "reward"
-            ]
+            assert exact["reward"] > score(answer(wrong), target)["reward"]
 
 
 class TestBestAlignmentCellAccuracy:
@@ -268,9 +266,10 @@ class TestBestAlignmentCellAccuracy:
             ph, pw = rng.randint(1, th), rng.randint(1, tw)
             target = [[rng.randint(0, 3) for _ in range(tw)] for _ in range(th)]
             pred = [[rng.randint(0, 3) for _ in range(pw)] for _ in range(ph)]
-            assert best_alignment_cell_accuracy(pred, target) >= overlay_cell_accuracy(
-                pred, target
-            ) - 1e-9
+            assert (
+                best_alignment_cell_accuracy(pred, target)
+                >= overlay_cell_accuracy(pred, target) - 1e-9
+            )
 
 
 class TestEditSimilarity:
@@ -330,9 +329,7 @@ class TestRewardHacks:
         copied = "000\n000\n000"
         assert (
             score(answer(copied), self.target)["reward"]
-            < score(answer(self.genuine_partial), self.target)[
-                "reward"
-            ]
+            < score(answer(self.genuine_partial), self.target)["reward"]
         )
 
     def test_echoing_the_test_input_earns_zero_on_both_similarity_terms(self):
@@ -346,6 +343,28 @@ class TestRewardHacks:
         assert echo["cell_gain"] == pytest.approx(0.0)
         assert echo["edit_gain"] == pytest.approx(0.0)
         assert echo["copied_input"] == 1.0
+
+    def test_non_answer_echo_is_on_the_unparseable_floor(self):
+        test_input = [[1, 1], [1, 1]]
+        target = [[1, 1], [1, 0]]
+        echo = score(answer("11\n11"), target, test_input)
+        unparseable = score("nothing", target, test_input)
+        assert echo["reward"] == unparseable["reward"]
+        assert echo["format_valid"] == 1.0
+
+    def test_any_other_parseable_attempt_beats_an_echo(self):
+        test_input = [[1, 1], [1, 1]]
+        target = [[1, 1], [1, 0]]
+        echo = score(answer("11\n11"), target, test_input)
+        wrong = score(answer("99\n99"), target, test_input)
+        assert wrong["reward"] > echo["reward"]
+
+    def test_identity_answer_is_not_penalized_as_an_echo(self):
+        identity = [[1, 2], [3, 4]]
+        solved = score(answer("12\n34"), identity, identity)
+        assert solved["grid_match"] == 1.0
+        assert solved["copied_input"] == 1.0
+        assert solved["reward"] > 1.0
 
     def test_beating_the_echo_outscores_the_echo(self):
         test_input = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
@@ -367,18 +386,14 @@ class TestRewardHacks:
         flooded = "012\n345\n678"
         assert (
             score(answer(flooded), self.target)["reward"]
-            < score(answer(self.genuine_partial), self.target)[
-                "reward"
-            ]
+            < score(answer(self.genuine_partial), self.target)["reward"]
         )
 
     def test_padding_to_a_giant_grid_scores_below_a_genuine_partial(self):
         giant = "\n".join("1" * 30 for _ in range(30))
         assert (
             score(answer(giant), self.target)["reward"]
-            < score(answer(self.genuine_partial), self.target)[
-                "reward"
-            ]
+            < score(answer(self.genuine_partial), self.target)["reward"]
         )
 
 
@@ -391,9 +406,7 @@ class TestSerialization:
         for _ in range(200):
             height = rng.randint(1, 30)
             width = rng.randint(1, 30)
-            grid = [
-                [rng.randint(0, 9) for _ in range(width)] for _ in range(height)
-            ]
+            grid = [[rng.randint(0, 9) for _ in range(width)] for _ in range(height)]
             assert parse_grid(serialize_grid(grid)) == grid
 
     def test_prompt_layout_contains_every_pair_and_the_test_input(self):

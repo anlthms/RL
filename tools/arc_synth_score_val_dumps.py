@@ -15,9 +15,9 @@
 
 ``tools/arc_agi_score_val_dumps.py`` can only score real ARC rows, because it
 looks their targets up in the solutions file. Synthetic targets are not stored
-anywhere -- but they do not need to be: ``generate_tasks`` is a pure function of
-``(seed, index, level)``, so passing the run's ``val_seed`` and level mixture
-regenerates exactly the rows it validated on.
+anywhere -- but they do not need to be: a split is a pure function of its
+``SynthCurriculumConfig``, so passing the run's recipe regenerates exactly the
+rows it validated on, through the same code path the dataset used.
 
 What it reports beyond ``grid_match``, and why each one earned its place:
 
@@ -32,18 +32,26 @@ What it reports beyond ``grid_match``, and why each one earned its place:
   grids. Bucketing tells that apart from not knowing the rule.
 
 Usage:
-    uv run tools/arc_synth_score_val_dumps.py logs/exp_005 --levels 0 1 2
+    uv run tools/arc_synth_score_val_dumps.py logs/exp_005 \
+        --config examples/configs/async/nanov3_arcsynth_colocated.yaml
 """
 
 import argparse
 import json
 from pathlib import Path
 
-from nemo_rl.environments.arc_agi_generators import generate_tasks
+from omegaconf import OmegaConf
+
+from nemo_rl.data.datasets.response_datasets.arc_synth import SynthCurriculumConfig
 from nemo_rl.environments.arc_agi_grid import (
     best_alignment_cell_accuracy,
     extract_answer_grid,
     grid_shape,
+)
+from nemo_rl.utils.config import (
+    load_config,
+    parse_hydra_overrides,
+    register_omegaconf_resolvers,
 )
 
 AREA_BUCKETS = ((0, 60), (60, 150), (150, 300), (300, 10**9))
@@ -84,13 +92,23 @@ def score(rows: list[dict], tasks: list, indices: list[int]) -> dict[str, float]
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("log_dir", help="run log dir holding val_data_step*.jsonl")
-    parser.add_argument("--levels", type=int, nargs="+", required=True)
-    parser.add_argument("--val-seed", type=int, default=1_000_000)
-    parser.add_argument("--num-val-tasks", type=int, default=172)
+    parser.add_argument(
+        "--config", required=True, help="run recipe used to generate validation"
+    )
     parser.add_argument("--by-area", action="store_true")
-    args = parser.parse_args()
+    args, overrides = parser.parse_known_args()
 
-    tasks = generate_tasks(args.val_seed, args.num_val_tasks, args.levels)
+    # Rebuild the run's held-out split from its own recipe, through the same
+    # schema the dataset uses. Anything else is a second implementation of the
+    # curriculum that silently drifts from the one that produced the dump.
+    register_omegaconf_resolvers()
+    config = load_config(args.config)
+    if overrides:
+        config = parse_hydra_overrides(config, overrides)
+    resolved = OmegaConf.to_container(config, resolve=True)
+    curriculum = SynthCurriculumConfig(**resolved["data"]["train"])
+    levels = sorted(set(curriculum.levels))
+    tasks = curriculum.val_tasks()
     dumps = sorted(
         Path(args.log_dir).glob("val_data_step*.jsonl"),
         key=lambda p: int(p.stem.removeprefix("val_data_step")),
@@ -106,7 +124,7 @@ def main() -> None:
         if len(rows) < len(tasks):
             print(f"  !! {dump.name} has {len(rows)} rows, expected >= {len(tasks)}")
             continue
-        for level in args.levels:
+        for level in levels:
             idx = [i for i, t in enumerate(tasks) if t.level == level]
             s = score(rows, tasks, idx)
             print(
@@ -120,7 +138,7 @@ def main() -> None:
         print(
             f"{'level':>6} {'cells':>13} {'n':>4} {'grid':>6} {'echoed':>7} {'cell(pred)':>11} {'shape_ok':>9}"
         )
-        for level in args.levels:
+        for level in levels:
             for low, high in AREA_BUCKETS:
                 idx = [
                     i

@@ -122,6 +122,7 @@ def test_echoing_the_test_input_loses_to_a_real_answer(arc_env):
     )
     assert result.metadata[0]["terms"]["copied_input"] == 1.0
     assert result.metadata[0]["terms"]["cell_gain"] == 0.0
+    assert result.rewards[0] == pytest.approx(-0.4)
     assert result.rewards[1] > result.rewards[0]
 
 

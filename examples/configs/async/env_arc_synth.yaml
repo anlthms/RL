@@ -1,15 +1,16 @@
 # Synthetic ARC-ladder data/env layer. Model-agnostic: list AFTER a
 # <model>_<topology> config in a `defaults:` list.
 #
-# Parallel to env_arc.yaml, and everything not about the data source is
-# deliberately identical to it -- the point of this layer is to change *what the
-# model is asked to solve*, so that a difference in the result is attributable to
-# the curriculum and not to a second simultaneous change.
+# Why it exists: four runs training on real ARC-AGI-2 produced
+# grid_match == 0.0000 at every checkpoint. Every gradient the policy received
+# came from shaping. The ladder supplies tasks a small model can actually solve,
+# so exact match has somewhere to move from.
 #
-# Why it exists: four runs on real ARC-AGI-2 produced grid_match == 0.0000 at
-# every checkpoint. Every gradient the policy has ever received came from
-# shaping. The ladder supplies tasks a 1.7B model can actually solve, so exact
-# match has somewhere to move from.
+# This began as a copy of a real-ARC training layer, deliberately identical
+# everywhere except the data source, so a difference in the result was
+# attributable to the curriculum alone. That layer has since been removed: real
+# ARC-AGI-2 remains the campaign metric but is a *validation* source here rather
+# than a training arm of its own, since training on it produced no signal.
 
 grpo:
   # Validation on, in the same layer that configures what to validate against.
@@ -33,11 +34,20 @@ policy:
   # Synthetic prompts are smaller than real ARC ones (generated inputs are at
   # most 20x20 before the geometric rules, against 30x30 in the real corpus),
   # but the real evaluation split is still validated on, and its worst row is
-  # 16593 tokens. Same context as env_arc.yaml.
+  # 16593 tokens, so the context is sized for the real split, not the synthetic one.
   # NOTE: do not combine CMP=1 with this env -- it hard-sets 16384.
   max_total_sequence_length: 32768
   generation:
     max_new_tokens: 8192
+
+  # Rich 20x20/four-shot prompts can fill a 32768-token packed training
+  # microbatch. Nano-v3's colocated inference state then leaves too little room
+  # for the backward pass: job 6210750 completed logprobs but OOMed during the
+  # first gradient finalization. Synthetic prompts plus the 8192-token response
+  # cap fit within 16384; limiting only the training pack halves peak activation
+  # memory while retaining the 32768 model context and logprob budget.
+  sequence_packing:
+    train_mb_tokens: 16384
 
 data:
   _override_: true
@@ -54,15 +64,19 @@ data:
     # GRPO's advantage is computed within a group of rollouts on one prompt, so
     # a phase where every task is uniformly hopeless -- or uniformly trivial --
     # contributes no gradient. A ramp reintroduces exactly the degenerate-group
-    # failure the curriculum is meant to fix. Repeat a level here to weight it.
+    # failure the curriculum is meant to fix; reweighting a mixture does not.
+    # Repeat a level here to weight it: it keeps one slot per window like every
+    # other combination and takes that multiple of the remaining mass.
     #
     # Level 0 is the identity, and it is the M4.1 *gate* rather than a rung:
     # mixing it in gives the policy a dominant degenerate strategy, because
     # echoing the input scores the full +1.4 there while the copy-relative
-    # reward makes an echo worth ~0 -- not negative -- everywhere else. M4.2
+    # reward originally made an echo worth ~0 everywhere else. M4.2
     # (job 6072073) duly converged on it: 77-79% of level-1 and level-2 answers
     # were the test input copied verbatim by step 60, up from 19-24%, and
-    # neither level ever solved a task. So level 0 is deliberately absent here.
+    # neither level ever solved a task. Non-answer echoes now receive the
+    # unparseable floor as an additional guard, but level 0 is still deliberately
+    # absent: there an echo is the correct +1.4 answer by definition.
     #
     # M4.1 overrides this to `[0]` to run the gate; M4.2b used `[1, 2]`.
     levels: [1, 2, 3, 4, 5]
@@ -86,32 +100,29 @@ data:
     # ramp, and which §13 deferred on purpose).
     max_input_dim: [6, 12, 20]
 
-    # Reweight that mixture across the run rather than holding it fixed: every
-    # batch still contains all three sizes, but the mass shifts from small-heavy
-    # to large-heavy, so mean difficulty rises step over step. Measured over a
-    # 20-step schedule the per-window counts go [8, 5, 3] -> [3, 5, 8] and mean
-    # size 10.5 -> 14.9, with no window ever dropping a size.
-    #
-    # This is the difference between reweighting a mixture and ramping: a ramp
-    # puts every task in a batch at one difficulty, and a group of rollouts that
-    # is uniformly hopeless or uniformly trivial has zero advantage and
-    # contributes no gradient. Interpolated from grpo.num_prompts_per_step so
-    # it tracks the model -- qwen3-1.7B takes 16 prompts a step, nano-v3
-    # colocated takes 128, and a hardcoded window would run the schedule 8x too
-    # fast on one of them. Needs `shuffle: false` above.
-    #
-    # Applied to size and not to level deliberately -- size is monotone in
-    # difficulty, level number is not. M4.2 measured level 2 as *easier* than
-    # level 1 (0.088 against 0.000), so ramping by level index would be ramping
-    # by a guess.
-    size_ramp_window: ${grpo.num_prompts_per_step}
+    # Rank transforms by measured solve rate, easiest first. Nano-v3 at the
+    # interrupted step-20 checkpoint solved L3=8.8% and L2=5.7%; L1/L4/L5 were
+    # still zero. Their relative zero-score order is the authored complexity
+    # tiebreaker, not a claim that it was measured. L0 remains first only so the
+    # same config can run the plumbing gate when levels is overridden to [0].
+    level_difficulty_order: [0, 3, 2, 1, 4, 5]
 
-    # How many steps the schedule spans. This has to be the *run* length, not
-    # the dataset length: num_tasks is deliberately many times larger than any
-    # run so no task repeats, and a ramp spread over 8000 rows leaves a 60-step
-    # qwen run at 12% of its schedule -- an inert ramp that still reads as
-    # configured. Rows past the end stay at the hardest mixture.
-    size_ramp_steps: ${grpo.max_num_steps}
+    # Cross measured transform rank with grid size, then reweight the resulting
+    # 15 combinations jointly. Every full optimizer-step window contains all
+    # 15, while the extra slots move from easy to hard over the run. This avoids
+    # welding a hard transform to a small grid or calling authored level number
+    # a difficulty measurement. The schedule lives in row order and therefore
+    # requires shuffle=false above.
+    difficulty_ramp_window: ${grpo.num_prompts_per_step}
+    difficulty_ramp_steps: ${grpo.max_num_steps}
+
+    # Few-shot count, ordered easy -> hard and selected by the same joint rank:
+    # more demonstrations are easier, hence the descending list. This is the one
+    # axis beyond transform and grid size that is wired end to end. Five others
+    # (palette size, object count, density, composition depth, distractors)
+    # shipped half-wired and were removed -- see ARC_CLEANUP_PLAN.md section 8.
+    # Setting any of them here now raises rather than being ignored.
+    num_train_pairs: [4, 3, 2]
     # Materialized once at startup, so this trades startup seconds against
     # repetition. 60 steps x 16 prompts is 960 prompts; 8000 is far past any
     # run length we have used, so no task is ever seen twice.
@@ -144,7 +155,7 @@ env:
   _override_: true
   should_use_nemo_gym: false
   arc_agi:
-    # Unchanged from env_arc.yaml. The shaped terms still earn their keep here:
+    # The shaped terms earn their keep here:
     # they break degenerate groups on the levels the policy cannot yet solve,
     # while exact match -- which on this data is finally nonzero -- dominates on
     # the ones it can.

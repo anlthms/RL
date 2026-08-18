@@ -3,9 +3,10 @@
 #
 # Nothing model-specific is set here: nanov3_colocated.yaml already sizes the KV
 # buffer (80 GB) for this model, and env_arc_synth.yaml is model-agnostic --
-# `size_ramp_window` interpolates grpo.num_prompts_per_step, which is 128 here
-# against qwen3-1.7B's 16, so the size schedule tracks the model rather than
-# needing a per-model constant.
+# `difficulty_ramp_window` interpolates grpo.num_prompts_per_step, so the joint
+# schedule tracks whatever batch the model's own config sets rather than needing
+# a per-model constant. See nanov3_arcsynth_8n_colocated.yaml for the variant
+# sized to a specific allocation.
 #
 # The base inherits from a NeMo-Gym config; env_arc_synth's `_override_: true`
 # on the data and env blocks replaces that wholesale, and the run goes through

@@ -1,0 +1,38 @@
+# Nano-v3 MoE, synthetic ARC-ladder env, colocated async GRPO, sized for 4 nodes.
+# Launch: ENV=arcsynth_4n NUM_ACTOR_NODES=4 bash launch_experiment.sh colocated
+#
+# The known-good campaign shape (job 6174618: 60 steps + 4 validations in 2h01m,
+# ~73 s/step), previously carried as an EXTRA_OVERRIDES string in both the plan
+# doc and run_arc_preflight.sub. Job 6211877 is why it lives here instead: a
+# newline in that string truncated the driver command and silently dropped
+# val_period, and nothing resolved the same config twice to notice.
+#
+# 4 nodes = 16 GPUs and nano's parallelism divides cleanly: TP2 x PP1 x CP1 ->
+# DP 8, ETP1 x EP4 -> EDP 4. Memory is not the constraint (~31 GB/GPU of ~186).
+# <=4 nodes also gets interactive QOS, which allocates in ~90s -- the single
+# biggest lever on iteration speed, and the reason this size still exists
+# alongside the 8-node recipe.
+defaults:
+  - nanov3_colocated.yaml
+  - env_arc_synth.yaml
+
+grpo:
+  # 60 steps is what fits the batch partition's hard 4h cap at this size.
+  max_num_steps: 60
+  # 128 -> 32 (global batch 2048 -> 512) is what makes 60 steps fit; at nano's
+  # default batch a 4-node run needs ~7h. Caveat: nano's lr was tuned for 2048,
+  # so gradients are noisier here than its config assumes.
+  num_prompts_per_step: 32
+  # Validation is 344 rows and ~11 min a checkpoint; four fit, seven do not.
+  val_period: 20
+
+policy:
+  train_global_batch_size: 512
+  generation:
+    mcore_generation_config:
+      # 80 GB of KV buffer plus training state does not fit alongside the
+      # 32768-token context.
+      buffer_size_gb: 40
+
+cluster:
+  num_nodes: 4
