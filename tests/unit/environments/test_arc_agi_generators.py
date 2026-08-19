@@ -32,10 +32,13 @@ from nemo_rl.environments.arc_agi_generators import (
     is_degenerate,
     keep_only,
     recolor,
+    render_oracle_description,
     rot90,
     rot180,
     rot270,
     rule_is_identifiable,
+    rule_composition_depth,
+    rule_family,
     scale,
     tile,
     transpose,
@@ -44,6 +47,42 @@ from nemo_rl.environments.arc_agi_generators import (
 # Deliberately not symmetric under any element of the dihedral group, so every
 # rotation and reflection of it is a distinct grid.
 ASYMMETRIC = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+
+class TestOracleDescriptions:
+    @pytest.mark.parametrize(
+        ("rule_name", "expected_text"),
+        [
+            ("flip_h", "reversing the cells within every row"),
+            ("recolor(3->7)", "color 3 with color 7"),
+            ("tile(2x3)", "2 copies vertically and 3 copies horizontally"),
+            ("fill_enclosed(6)", "cannot reach the outer border"),
+        ],
+    )
+    def test_description_contains_concrete_operational_parameters(
+        self, rule_name, expected_text
+    ):
+        assert expected_text in render_oracle_description(rule_name)
+
+    def test_composition_description_preserves_stage_order(self):
+        description = render_oracle_description("drop_color(4)+rot90", paraphrase_id=2)
+        assert description.index("Replace every cell") < description.index("Rotate")
+        assert "stage 2 consumes the result of stage 1" in description
+        assert rule_family("drop_color(4)+rot90") == "composition"
+        assert rule_composition_depth("drop_color(4)+rot90") == 2
+
+    def test_paraphrase_variants_keep_the_same_operation(self):
+        variants = {
+            render_oracle_description("scale(3)", paraphrase_id=index)
+            for index in range(3)
+        }
+        assert len(variants) == 3
+        assert all("3-by-3 block" in description for description in variants)
+
+    def test_unaugmented_task_is_reserved_for_oracle_execution(self):
+        task = generate_task(seed=7, index=3, level=2, augment=False)
+        assert "_oracle_" in task.task_id
+        assert render_oracle_description(task.rule)
 
 
 class TestTransformations:

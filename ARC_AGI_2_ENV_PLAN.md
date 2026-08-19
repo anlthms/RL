@@ -18,6 +18,12 @@ Best real diagnostics were 18.55% cell match and 45.35% valid format at step 50.
 that the current generator is learnable but does not transfer exact solves. The next prepared run is
 `early_answer_4k_v3`, which targets responses that exhaust the token budget before emitting a grid.
 
+**Multi-turn status (2026-08-19).** Stages 1-3 of `docs/design-docs/arc-agi-multiturn.md` are
+implemented and verified. Four-GPU Megatron benchmark job 6321951 scored **18/150 reliable
+episodes (12%)**, below the 95% executor gate; train-format validity was 56% versus the 99% gate.
+Stage 4 executor training is therefore the active next step. No end-to-end proposer run should start
+until the executor gate passes.
+
 ---
 
 ## 1. Data
@@ -289,14 +295,15 @@ Gotchas:
    `task_id`), so the classifier can be trained and measured cheaply before it is trusted on real
    ARC, where no label exists. Risk to measure: a misclassification supplies a *misleading* exemplar,
    which may be worse than a generic one.
-3. **Execute-and-compare feedback loop.** Step 4 asks the model to test its rule against every
+3. **DONE through baseline measurement — execute-and-compare feedback loop.** Step 4 asks the model to test its rule against every
    example, but it does so in-context — it hallucinates the check. Instead run a second chat that
    applies the *predicted transform* to each training input, produces a grid, and diffs it against
    that pair's known output; feed the mismatches back into the original chat so the model can revise
    the rule. Two constraints: compare only against **train** pairs, never the test target, or the
    answer leaks; and this makes the environment multi-turn (`max_rollout_turns` is 1 today), so turn
-   credit assignment needs deciding. This is the highest-value item here — it converts the prompt's
-   self-check from narration into an actual verifier.
+   credit assignment needs deciding. Pure protocol logic, the dual-history agent, canonical oracle
+   descriptions, and the executor benchmark now exist; the measured 12% baseline makes executor
+   training the next gate.
 
 **Curriculum**
 

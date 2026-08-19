@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed design. This document defines the first implementation track; it does not authorize a training run.
+Stages 1-3 are implemented and verified: pure verifier/state logic, the mocked dual-history NeMo-Gym
+agent, and the oracle-description executor benchmark. Four-GPU Megatron job 6321951 completed all 150
+cases but failed the executor gate at 12% episode reliability and 56% train-format validity. Stage 4
+executor training is required before an end-to-end trial.
 
 ## Motivation
 
@@ -334,15 +337,29 @@ Save representative complete traces containing the initial prompt, each proposer
 
 ## Implementation and evaluation sequence
 
-1. **Pure logic:** implement and unit-test parsers, exact comparison, `p-c` diffs, shape mismatch, state transitions, token budgeting, and leakage guards.
-2. **Mocked agent:** exercise proposer/executor history isolation and final-turn-only result assembly without a model server.
-3. **Executor benchmark:** measure oracle-description reliability on held-out synthetic transforms.
+1. **Pure logic — implemented:** parsers, exact comparison, `p-c` diffs, shape mismatch, state transitions, token budgeting, and leakage guards live in `3rdparty/Gym-workspace/Gym/resources_servers/arc_agi/logic.py` and are used by the session-owning ARC resources server.
+2. **Mocked agent — implemented:** `arc_transform_refinement_agent` exercises persistent proposer history, fresh executor histories, one format retry, proactive context termination, complete traces, and final-proposer-only result assembly without a model server.
+3. **Executor benchmark — implemented and measured:** `tools/arc_executor_benchmark.py` generates held-out unaugmented synthetic tasks, renders canonical descriptions from sampled rule parameters, gates test execution on exact training application, and reports reliability by rule family, actual grid size, composition depth, and description paraphrase. Four-GPU Megatron job 6321951 measured 18/150 reliable episodes (12%) against the 95% gate.
 4. **Executor training if required:** run the separate execution task until the oracle gate is reliable.
 5. **Inference-only end-to-end trial:** run a fixed ARC subset, inspect complete traces, and measure whether revisions improve the training gate and real test exactness.
 6. **Small RL plumbing run:** verify on-policy token IDs, reward association, async streaming, context termination, and resume behavior.
 7. **Controlled training experiment:** only after the earlier gates pass, prepare an exact preflight and request authorization for the next multi-node run.
 
 The fixed 172-row real ARC-AGI-2 validation subset remains the campaign's authoritative metric. Synthetic exactness and executor reliability are prerequisites and diagnostics, not substitutes for real ARC exact match.
+
+Run the stage-3 measurement against an OpenAI-compatible chat-completions endpoint from a compute node:
+
+```bash
+uv run tools/arc_executor_benchmark.py \
+  --base-url http://127.0.0.1:10240/v1 \
+  --model <served-model-name> \
+  --output reports/arc_executor_benchmark.json
+```
+
+The default benchmark uses 150 deterministic held-out tasks across levels 1-5 and all three description
+paraphrases. It records complete audit traces in the output file. The provisional go/no-go gate remains 95%
+episode reliability and at least 99% format validity for both training applications and attempted test
+applications.
 
 ## Open questions
 

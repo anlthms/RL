@@ -28,6 +28,7 @@ exercised on a login node. See ``arc_agi_grid.py``, which this mirrors.
 """
 
 import random
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -615,6 +616,120 @@ class Rule:
         return out
 
 
+def rule_family(rule_name: str) -> str:
+    """Return the curriculum family represented by a concrete rule name."""
+    if "+" in rule_name:
+        return "composition"
+    operation = rule_name.partition("(")[0]
+    if operation == "identity":
+        return "identity"
+    if operation in DIHEDRAL:
+        return "dihedral"
+    if operation in {"drop_color", "recolor", "keep_only"}:
+        return "color"
+    if operation in {"tile", "crop_to_bbox", "scale", "add_border"}:
+        return "geometric"
+    if operation in {"denoise", "complete_symmetry", "fill_enclosed"}:
+        return "structure"
+    raise ValueError(f"cannot classify unknown ARC rule {rule_name!r}")
+
+
+def rule_composition_depth(rule_name: str) -> int:
+    """Return the number of ordered stages encoded in a concrete rule name."""
+    return len(rule_name.split("+"))
+
+
+def _describe_rule_stage(stage_name: str) -> str:
+    """Render one concrete generator stage as an operational instruction."""
+    fixed = {
+        "identity": "Copy every cell unchanged and preserve the input height and width.",
+        "rot90": "Rotate the entire grid 90 degrees clockwise; the output height is the input width.",
+        "rot180": "Rotate the entire grid 180 degrees.",
+        "rot270": "Rotate the entire grid 90 degrees counterclockwise; the output height is the input width.",
+        "flip_h": "Reflect the grid left-to-right by reversing the cells within every row.",
+        "flip_v": "Reflect the grid top-to-bottom by reversing the order of the rows.",
+        "transpose": "Reflect across the main diagonal by swapping every cell's row and column indices.",
+        "anti_transpose": (
+            "Reflect across the anti-diagonal: transpose the grid and then rotate that result 180 degrees."
+        ),
+        "crop_to_bbox": (
+            "Crop away all outer rows and columns containing only black cells, leaving the smallest rectangle that "
+            "contains every non-black cell."
+        ),
+        "denoise": (
+            "Replace a non-black cell with black exactly when all of its existing up, down, left, and right "
+            "neighbors are black; leave every other cell unchanged."
+        ),
+    }
+    if stage_name in fixed:
+        return fixed[stage_name]
+
+    match = re.fullmatch(r"drop_color\((\d)\)", stage_name)
+    if match:
+        return f"Replace every cell of color {match.group(1)} with black (0), leaving all other cells unchanged."
+    match = re.fullmatch(r"recolor\((\d)->(\d)\)", stage_name)
+    if match:
+        return f"Replace every cell of color {match.group(1)} with color {match.group(2)}, leaving all others unchanged."
+    match = re.fullmatch(r"keep_only\((\d)\)", stage_name)
+    if match:
+        return f"Keep cells of color {match.group(1)} and replace every cell of every other color with black (0)."
+    match = re.fullmatch(r"tile\((\d)x(\d)\)", stage_name)
+    if match:
+        vertical, horizontal = match.groups()
+        return (
+            f"Tile the whole input grid in a {vertical}-by-{horizontal} arrangement: {vertical} copies vertically "
+            f"and {horizontal} copies horizontally."
+        )
+    match = re.fullmatch(r"scale\((\d)\)", stage_name)
+    if match:
+        factor = match.group(1)
+        return f"Scale the grid by replacing each cell with a {factor}-by-{factor} block of that same color."
+    match = re.fullmatch(r"add_border\((\d)\)", stage_name)
+    if match:
+        return f"Add a one-cell-wide border of color {match.group(1)} around all four sides of the unchanged grid."
+    match = re.fullmatch(r"complete_symmetry\((horizontal|vertical)\)", stage_name)
+    if match:
+        if match.group(1) == "horizontal":
+            direction = "left-to-right"
+        else:
+            direction = "top-to-bottom"
+        return (
+            f"Complete {direction} mirror symmetry: for each black cell, copy the color from its mirrored position, "
+            "and never overwrite a non-black cell."
+        )
+    match = re.fullmatch(r"fill_enclosed\((\d)\)", stage_name)
+    if match:
+        return (
+            f"Fill every black region that cannot reach the outer border through up/down/left/right black cells with "
+            f"color {match.group(1)}; leave border-connected black cells and all colored cells unchanged."
+        )
+    raise ValueError(f"cannot describe unknown ARC rule stage {stage_name!r}")
+
+
+def render_oracle_description(rule_name: str, *, paraphrase_id: int = 0) -> str:
+    """Render a canonical, executable textual description of a sampled rule.
+
+    The three deterministic wrappers support a held-out wording split without
+    changing the underlying operation. Concrete colors, dimensions, and stage
+    order come from the sampled rule parameters rather than from its examples.
+    """
+    if paraphrase_id not in {0, 1, 2}:
+        raise ValueError("paraphrase_id must be 0, 1, or 2")
+    stages = [_describe_rule_stage(stage_name) for stage_name in rule_name.split("+")]
+    if paraphrase_id == 0:
+        heading = "Apply the following operation to each input grid independently."
+    elif paraphrase_id == 1:
+        heading = "Operational transformation specification for every supplied grid:"
+    else:
+        heading = "Produce each output mechanically from its corresponding input using these ordered steps:"
+    if len(stages) == 1:
+        return f"{heading}\n{stages[0]}"
+    numbered = "\n".join(
+        f"{index}. {stage}" for index, stage in enumerate(stages, start=1)
+    )
+    return f"{heading}\n{numbered}\nComplete the stages in that order; stage 2 consumes the result of stage 1."
+
+
 def _bind(
     sampler: Callable[..., Grid | None], palette: list[int], max_dim: int
 ) -> Callable[[random.Random], Grid | None]:
@@ -899,11 +1014,16 @@ def generate_task(
     *,
     num_train_pairs: int | None = None,
     max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
+    augment: bool = True,
 ) -> SynthTask:
     """Generate the task at ``(seed, index, level)``.
 
     Deterministic in its arguments and nothing else, so a run is reproducible
     without materializing a dataset.
+
+    ``augment=False`` is reserved for the oracle-description executor
+    benchmark. It keeps the sampled concrete rule aligned with its canonical
+    textual description; normal synthetic training retains augmentation.
 
     Rejection is the normal path: a rot180 that lands on a symmetric grid, a
     "drop color 3" whose examples contain no 3, and a crop of a grid with no
@@ -940,7 +1060,8 @@ def generate_task(
         if is_degenerate(rule, pairs):
             continue
 
-        pairs = augment_task(rng, pairs)
+        if augment:
+            pairs = augment_task(rng, pairs)
         train, (test_input, target) = pairs[:-1], pairs[-1]
         return SynthTask(
             # The rule goes in the id so a dumped validation row says which
@@ -948,6 +1069,7 @@ def generate_task(
             # and "tile is hard" -- without needing its own dataset column.
             task_id=(
                 f"synth_L{level}_d{max_input_dim}_f{count - 1}"
+                f"{'_oracle' if not augment else ''}"
                 f"_{rule.name}_{seed}_{index}"
             ),
             level=level,
