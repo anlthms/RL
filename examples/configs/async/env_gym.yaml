@@ -1,0 +1,74 @@
+# NeMo-Gym data/env layer. Model-agnostic: list AFTER a <model>_<topology> config
+# in a `defaults:` list to run that model on the Gym environments.
+#
+# `_override_: true` fully replaces the data/env blocks the model base inherited,
+# so this composes onto a math-native base (Qwen) as well as a gym-native one
+# (nano-v3). That also makes this file the single source of truth for the gym
+# data paths -- whatever the model base declares for `data` is discarded.
+
+grpo:
+  max_val_samples: null  # null means "score the whole validation split"
+  val_batch_size: 256
+
+policy:
+  generation:
+    # NeMo-Gym drives rollouts over an OpenAI-compatible HTTP server alongside the
+    # engine; _should_use_nemo_gym() asserts this is on (grpo.py). Not `_override_`:
+    # `parsers` is model-specific (nano-v3 names real tool/reasoning parsers) and
+    # must survive from the model config.
+    mcore_generation_config:
+      expose_http_server: true
+    vllm_cfg:
+      expose_http_server: true
+
+data:
+  _override_: true
+  max_input_seq_length: null  # the gym processor does not length-filter
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    data_path: "/lustre/fsw/portfolios/llmservice/users/rkirby/nemo-rl-workspace/data/train-split.jsonl"
+  validation:
+    data_path: "/lustre/fsw/portfolios/llmservice/users/rkirby/nemo-rl-workspace/data/val-split.jsonl"
+  default:
+    dataset_name: NemoGymDataset
+    env_name: "nemo_gym"
+    prompt_file: null
+    system_prompt_file: null
+    processor: "nemo_gym_data_processor"
+
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  nemo_gym:
+    skip_venv_if_present: true
+    # Port range for Gym HTTP servers. Every service is pinned below the lowest
+    # observed ephemeral floor (9000), and this band must not overlap the
+    # generation range (3000-4999) or the sandbox (6000-6999). See ray.sub for
+    # the full port layout.
+    port_range_low: 5000
+    port_range_high: 5999
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    - resources_servers/code_gen/configs/code_gen.yaml
+    - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+    - resources_servers/mcqa/configs/mcqa.yaml
+    - resources_servers/instruction_following/configs/instruction_following.yaml
+    - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          judge_model_server:
+            name: policy_model
+          should_use_judge: false
+    code_gen:
+      resources_servers:
+        code_gen:
+          num_processes: 1024
+          unit_test_timeout_secs: 10
+          debug: false
+
+logger:
+  monitor_gpus: true
