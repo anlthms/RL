@@ -1,0 +1,40 @@
+# Built-in math env (OpenMathInstruct-2) data/env layer. Model-agnostic: list
+# AFTER a <model>_<topology> config in a `defaults:` list to run that model on
+# math only -- no NeMo-Gym server and no gym venv.
+#
+# `_override_: true` fully replaces the data/env blocks the model base inherited,
+# so this composes onto a gym-native base (nano-v3) as well as a math-native one
+# (Qwen). Runs under the standard examples/run_grpo.py entrypoint.
+
+grpo:
+  # Match the gym path's 1000-prompt val set; null here means "score everything".
+  max_val_samples: 1000
+  val_batch_size: 250  # must divide max_val_samples (validate() floors the ratio)
+
+data:
+  _override_: true
+  # Non-null required: math_hf_data_processor does `length >= max_seq_length`.
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: OpenMathInstruct-2
+    split_validation_size: 1000  # absolute row count, not a fraction
+    seed: ${grpo.seed}
+  validation: null  # validation comes from the train split above
+  default:
+    prompt_file: "examples/prompts/cot.txt"
+    system_prompt_file: null
+    processor: "math_hf_data_processor"
+    env_name: "math"
+
+env:
+  _override_: true
+  should_use_nemo_gym: false
+  math:
+    num_workers: 8
+    math_verify_impl: "hf_math_verify"
+
+logger:
+  monitor_gpus: true

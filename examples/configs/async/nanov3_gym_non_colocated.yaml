@@ -1,0 +1,5 @@
+# nano-v3 30B-A3B, gym env, non_colocated async GRPO (Megatron inference).
+# Launch: ENV=gym bash launch_experiment.sh non_colocated
+defaults:
+  - nanov3_non_colocated.yaml
+  - env_gym.yaml

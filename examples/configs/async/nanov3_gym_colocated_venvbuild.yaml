@@ -1,0 +1,11 @@
+# Prefetch-only variant of nanov3_gym_colocated: forces NeMo-Gym to actually
+# install each server's dependencies instead of reusing whatever venv is present.
+# `skip_venv_if_present: true` (set by the real configs) makes Gym stop after
+# `uv venv --seed`, leaving 5-package shells that fail on `import fastapi`.
+# Not for training runs -- see .prefetch_gym_venvs.sub.
+defaults:
+  - nanov3_gym_colocated.yaml
+
+env:
+  nemo_gym:
+    skip_venv_if_present: false

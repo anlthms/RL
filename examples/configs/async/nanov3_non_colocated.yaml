@@ -1,0 +1,33 @@
+defaults: nanov3_base.yaml
+
+# Match the colocated arm's step: same prompts per step and same global batch, so
+# the two topologies optimize on identical data and their curves overlay per step.
+grpo:
+  num_prompts_per_step: 128
+
+policy:
+  train_global_batch_size: 2048  # num_prompts_per_step * num_generations_per_prompt
+
+  megatron_cfg:
+    env_vars:
+      # Only the non-colocated arm refits, so only it reaches MCore's NVSHMEM copy
+      # service. That service now hard-errors unless NVSHMEM_MAX_CTAS is exactly
+      # "2", and NVSHMEM's 128-team default is exhausted building the cross-world
+      # refit group.
+      NVSHMEM_MAX_TEAMS: "512"
+      NVSHMEM_MAX_CTAS: "2"
+
+  generation:
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 4
+
+env:
+  nemo_gym:
+    skip_venv_if_present: true
+
+logger:
+  wandb:
+    name: async_non_colocated
