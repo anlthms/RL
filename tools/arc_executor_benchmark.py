@@ -19,7 +19,6 @@ import argparse
 import asyncio
 import json
 import os
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +28,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from nemo_rl.environments.arc_agi_grid import (
+    Grid,
+    best_alignment_cell_accuracy,
+    extract_answer_grid,
+    grid_shape,
+    serialize_grid,
+)
 from nemo_rl.environments.arc_agi_generators import (
     SynthTask,
     generate_task,
@@ -39,20 +45,9 @@ from nemo_rl.environments.arc_agi_generators import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GYM_ROOT = REPO_ROOT / "3rdparty" / "Gym-workspace" / "Gym"
-if str(GYM_ROOT) not in sys.path:
-    sys.path.insert(0, str(GYM_ROOT))
-
-from resources_servers.arc_agi.logic import (  # noqa: E402  # pyrefly: ignore[import-error]
-    BatchVerification,
-    Grid,
-    PredictionParseError,
-    build_executor_prompt,
-    build_format_retry_prompt,
-    build_test_followup_prompt,
-    parse_tagged_grids,
-    verify_predictions,
-)
+EXECUTOR_PROMPT_TEMPLATE = (
+    REPO_ROOT / "examples" / "prompts" / "arc_executor.txt"
+).read_text(encoding="utf-8")
 
 
 ORACLE_RELIABILITY_TARGET = 0.95
@@ -79,10 +74,8 @@ class BenchmarkCase:
     grid_size: int
     paraphrase_id: int
     description: str
-    train_inputs: dict[str, Grid]
-    train_targets: dict[str, Grid]
-    test_inputs: dict[str, Grid]
-    test_targets: dict[str, Grid]
+    input_grid: Grid
+    target_grid: Grid
 
 
 @dataclass(frozen=True)
@@ -96,19 +89,11 @@ class CaseResult:
     composition_depth: int
     grid_size: int
     paraphrase_id: int
-    train_format_valid: bool
-    train_format_retry_used: bool
-    train_all_exact: bool
-    train_exact_fraction: float
-    train_shape_match_fraction: float
-    train_cell_accuracy: float
-    test_attempted: bool
-    test_format_valid: bool
-    test_all_exact: bool
-    test_exact_fraction: float
-    test_shape_match_fraction: float
-    test_cell_accuracy: float
-    episode_reliable: bool
+    format_valid: bool
+    format_retry_used: bool
+    grid_exact: bool
+    shape_match: bool
+    cell_accuracy: float
     latency_seconds: float
     trace: dict[str, Any]
 
@@ -203,7 +188,7 @@ def _task_grid_size(task: SynthTask) -> int:
 
 
 def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
-    """Generate deterministic unaugmented tasks held out by seed and index."""
+    """Generate deterministic tasks held out by seed and index."""
     cases: list[BenchmarkCase] = []
     for index in range(config.count):
         level = config.levels[index % len(config.levels)]
@@ -214,7 +199,6 @@ def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
             level=level,
             num_train_pairs=config.num_train_pairs,
             max_input_dim=config.max_input_dim,
-            augment=False,
         )
         cases.append(
             BenchmarkCase(
@@ -228,112 +212,80 @@ def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
                 description=render_oracle_description(
                     task.rule, paraphrase_id=paraphrase_id
                 ),
-                train_inputs={
-                    f"train_{pair_index}": pair["input"]
-                    for pair_index, pair in enumerate(task.train_pairs)
-                },
-                train_targets={
-                    f"train_{pair_index}": pair["output"]
-                    for pair_index, pair in enumerate(task.train_pairs)
-                },
-                test_inputs={"test_0": task.test_input},
-                test_targets={"test_0": task.target},
+                input_grid=task.test_input,
+                target_grid=task.target,
             )
         )
     return cases
 
 
-def _empty_metrics() -> tuple[bool, float, float, float]:
-    return False, 0.0, 0.0, 0.0
+def build_single_grid_prompt(*, description: str, input_grid: Grid) -> str:
+    """Render the exact single-grid prompt contract used by executor GRPO."""
+    task_body = (
+        "<transformation>\n"
+        f"{description}\n"
+        "</transformation>\n"
+        "<input>\n"
+        f"{serialize_grid(input_grid)}\n"
+        "</input>"
+    )
+    return EXECUTOR_PROMPT_TEMPLATE.format(task_body)
 
 
-def _metrics(result: BatchVerification | None) -> tuple[bool, float, float, float]:
-    if result is None:
-        return _empty_metrics()
+def build_single_grid_format_retry_prompt() -> str:
+    """Request only a corrected rendering of the same single-grid answer."""
     return (
-        result.all_exact,
-        result.exact_fraction,
-        result.shape_match_fraction,
-        result.cell_accuracy,
+        "Your previous response did not contain a parseable grid inside an "
+        "<answer> block. Do not change or reinterpret the transformation. Return "
+        "exactly one grid using this form:\n\n"
+        "<answer>\n"
+        "0 1 2\n"
+        "3 4 5\n"
+        "</answer>\n\n"
+        "Do not include JSON, prose, or a Markdown code fence."
     )
 
 
 async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResult:
-    """Apply one oracle description to train grids, gate, then test grids."""
+    """Apply one oracle description to one held-out grid in a fresh chat."""
     started = time.perf_counter()
-    train_prompt = build_executor_prompt(
+    prompt = build_single_grid_prompt(
         description=case.description,
-        inputs=case.train_inputs,
-        tag="predictions",
+        input_grid=case.input_grid,
     )
-    messages = [{"role": "user", "content": train_prompt}]
-    train_responses: list[str] = []
-    train_result: BatchVerification | None = None
+    messages = [{"role": "user", "content": prompt}]
+    responses: list[str] = []
+    prediction: Grid | None = None
     retry_used = False
 
     for attempt in range(2):
         response = await client.complete(messages)
-        train_responses.append(response)
-        try:
-            predictions = parse_tagged_grids(
-                response,
-                tag="predictions",
-                expected_ids=list(case.train_inputs),
-            )
-        except PredictionParseError as error:
-            if attempt == 1:
-                break
+        responses.append(response)
+        prediction = extract_answer_grid(response)
+        if prediction is not None:
+            break
+        if attempt == 0:
             retry_used = True
             messages.extend(
                 [
                     {"role": "assistant", "content": response},
                     {
                         "role": "user",
-                        "content": build_format_retry_prompt(
-                            tag="predictions",
-                            expected_ids=list(case.train_inputs),
-                            error=str(error),
-                        ),
+                        "content": build_single_grid_format_retry_prompt(),
                     },
                 ]
             )
-            continue
-        train_result = verify_predictions(
-            predictions=predictions,
-            correct=case.train_targets,
-        )
-        break
 
-    train_format_valid = train_result is not None
-    train_all_exact, train_exact, train_shape, train_cell = _metrics(train_result)
-    test_response: str | None = None
-    test_result: BatchVerification | None = None
-    test_format_valid = False
-    if train_all_exact:
-        messages.extend(
-            [
-                {"role": "assistant", "content": train_responses[-1]},
-                {
-                    "role": "user",
-                    "content": build_test_followup_prompt(test_inputs=case.test_inputs),
-                },
-            ]
-        )
-        test_response = await client.complete(messages)
-        try:
-            answers = parse_tagged_grids(
-                test_response,
-                tag="answers",
-                expected_ids=list(case.test_inputs),
-            )
-        except PredictionParseError:
-            pass
-        else:
-            test_format_valid = True
-            test_result = verify_predictions(
-                predictions=answers, correct=case.test_targets
-            )
-    test_all_exact, test_exact, test_shape, test_cell = _metrics(test_result)
+    format_valid = prediction is not None
+    grid_exact = prediction == case.target_grid
+    shape_match = prediction is not None and grid_shape(prediction) == grid_shape(
+        case.target_grid
+    )
+    cell_accuracy = (
+        best_alignment_cell_accuracy(prediction, case.target_grid)
+        if prediction is not None
+        else 0.0
+    )
     return CaseResult(
         task_id=case.task_id,
         level=case.level,
@@ -342,28 +294,18 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
         composition_depth=case.composition_depth,
         grid_size=case.grid_size,
         paraphrase_id=case.paraphrase_id,
-        train_format_valid=train_format_valid,
-        train_format_retry_used=retry_used,
-        train_all_exact=train_all_exact,
-        train_exact_fraction=train_exact,
-        train_shape_match_fraction=train_shape,
-        train_cell_accuracy=train_cell,
-        test_attempted=train_all_exact,
-        test_format_valid=test_format_valid,
-        test_all_exact=test_all_exact,
-        test_exact_fraction=test_exact,
-        test_shape_match_fraction=test_shape,
-        test_cell_accuracy=test_cell,
-        episode_reliable=train_all_exact and test_all_exact,
+        format_valid=format_valid,
+        format_retry_used=retry_used,
+        grid_exact=grid_exact,
+        shape_match=shape_match,
+        cell_accuracy=cell_accuracy,
         latency_seconds=time.perf_counter() - started,
         trace={
             "description": case.description,
-            "train_inputs": case.train_inputs,
-            "train_targets": case.train_targets,
-            "train_responses": train_responses,
-            "test_inputs": case.test_inputs,
-            "test_targets": case.test_targets,
-            "test_response": test_response,
+            "input_grid": case.input_grid,
+            "target_grid": case.target_grid,
+            "responses": responses,
+            "prediction": prediction,
         },
     )
 
@@ -376,23 +318,14 @@ def _mean(results: list[CaseResult], field: str) -> float:
 
 def summarize_group(results: list[CaseResult]) -> dict[str, Any]:
     """Aggregate gate metrics for one complete slice."""
-    test_attempts = [result for result in results if result.test_attempted]
     return {
         "count": len(results),
-        "train_format_valid": _mean(results, "train_format_valid"),
-        "train_format_retry_rate": _mean(results, "train_format_retry_used"),
-        "train_all_exact": _mean(results, "train_all_exact"),
-        "train_exact_fraction": _mean(results, "train_exact_fraction"),
-        "train_shape_match_fraction": _mean(results, "train_shape_match_fraction"),
-        "train_cell_accuracy": _mean(results, "train_cell_accuracy"),
-        "test_attempt_rate": _mean(results, "test_attempted"),
-        "test_format_valid_when_attempted": _mean(
-            test_attempts,
-            "test_format_valid",
-        ),
-        "test_all_exact": _mean(results, "test_all_exact"),
-        "test_cell_accuracy": _mean(results, "test_cell_accuracy"),
-        "episode_reliability": _mean(results, "episode_reliable"),
+        "format_valid": _mean(results, "format_valid"),
+        "format_retry_rate": _mean(results, "format_retry_used"),
+        "grid_exact": _mean(results, "grid_exact"),
+        "shape_match": _mean(results, "shape_match"),
+        "cell_accuracy": _mean(results, "cell_accuracy"),
+        "single_grid_reliability": _mean(results, "grid_exact"),
         "mean_latency_seconds": _mean(results, "latency_seconds"),
     }
 
@@ -410,15 +343,13 @@ def summarize_results(results: list[CaseResult]) -> dict[str, Any]:
 
     overall = summarize_group(results)
     overall["gate_pass"] = (
-        overall["episode_reliability"] >= ORACLE_RELIABILITY_TARGET
-        and overall["train_format_valid"] >= FORMAT_VALIDITY_TARGET
-        and overall["test_format_valid_when_attempted"] >= FORMAT_VALIDITY_TARGET
+        overall["single_grid_reliability"] >= ORACLE_RELIABILITY_TARGET
+        and overall["format_valid"] >= FORMAT_VALIDITY_TARGET
     )
     return {
         "targets": {
-            "episode_reliability": ORACLE_RELIABILITY_TARGET,
-            "train_format_valid": FORMAT_VALIDITY_TARGET,
-            "test_format_valid_when_attempted": FORMAT_VALIDITY_TARGET,
+            "single_grid_reliability": ORACLE_RELIABILITY_TARGET,
+            "format_valid": FORMAT_VALIDITY_TARGET,
         },
         "overall": overall,
         "by_rule_family": split(lambda result: result.family),

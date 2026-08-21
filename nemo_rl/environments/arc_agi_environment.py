@@ -11,12 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GRPO environment for ARC-AGI tasks.
-
-Single-turn: the model sees the few-shot pairs and the test input, and answers
-with free-form reasoning followed by one delimited grid. Only the grid is
-scored -- see ``arc_agi_grid.py`` for the parser and the reward terms.
-"""
+"""GRPO reward environment for single-grid ARC execution."""
 
 from typing import Any, TypedDict
 
@@ -93,8 +88,7 @@ def _add_per_level_terms(terms: dict[str, float], level: int) -> dict[str, float
 
     Validation aggregates each per-sample term by averaging over the samples
     that *reported* it, so a key present only on one level's samples is exactly
-    that level's mean -- no extra plumbing, and it works the same way for the
-    real-ARC bucket carried alongside the synthetic ones.
+    that level's mean.
     """
     suffix = level_metric_suffix(level)
     for name in _PER_LEVEL_TERMS:

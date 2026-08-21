@@ -9,7 +9,6 @@ from nemo_rl.environments.arc_agi_grid import (
     edit_similarity,
     extract_answer_grid,
     extraneous_color_fraction,
-    format_task_prompt,
     gain_over_baseline,
     overlay_cell_accuracy,
     parse_grid,
@@ -408,14 +407,3 @@ class TestSerialization:
             width = rng.randint(1, 30)
             grid = [[rng.randint(0, 9) for _ in range(width)] for _ in range(height)]
             assert parse_grid(serialize_grid(grid)) == grid
-
-    def test_prompt_layout_contains_every_pair_and_the_test_input(self):
-        pairs = [
-            {"input": [[1, 1]], "output": [[2, 2]]},
-            {"input": [[3, 3]], "output": [[4, 4]]},
-        ]
-        prompt = format_task_prompt(pairs, [[5, 6]])
-        assert prompt.count("<example>") == 2
-        assert "<test_input>\n5 6\n</test_input>" in prompt
-        assert "<input>\n1 1\n</input>" in prompt
-        assert "<output>\n4 4\n</output>" in prompt

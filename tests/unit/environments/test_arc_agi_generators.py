@@ -17,8 +17,6 @@ from nemo_rl.environments.arc_agi_generators import (
     Rule,
     add_border,
     anti_transpose,
-    apply_color_map,
-    augment_task,
     complete_symmetry,
     crop_to_bbox,
     denoise,
@@ -28,7 +26,6 @@ from nemo_rl.environments.arc_agi_generators import (
     flip_v,
     generate_task,
     generate_tasks,
-    identity,
     is_degenerate,
     keep_only,
     recolor,
@@ -79,9 +76,8 @@ class TestOracleDescriptions:
         assert len(variants) == 3
         assert all("3-by-3 block" in description for description in variants)
 
-    def test_unaugmented_task_is_reserved_for_oracle_execution(self):
-        task = generate_task(seed=7, index=3, level=2, augment=False)
-        assert "_oracle_" in task.task_id
+    def test_generated_task_has_an_oracle_description(self):
+        task = generate_task(seed=7, index=3, level=2)
         assert render_oracle_description(task.rule)
 
 
@@ -255,39 +251,6 @@ class TestGuards:
         assert rule.apply(striped) == [[6, 0], [6, 0]]
         assert is_degenerate(rule, [(striped, rule.apply(striped))])
 
-    def test_level_zero_is_exempt_from_the_degeneracy_guard(self):
-        rule = Rule(
-            name="identity", level=0, stages=(identity,), sample_input=lambda rng: None
-        )
-        assert not is_degenerate(rule, [(ASYMMETRIC, ASYMMETRIC)])
-
-
-class TestAugmentation:
-    def test_color_permutation_commutes_with_the_rule(self):
-        # This is what makes the augmentation safe: relabeling the colors and
-        # then applying the rule gives the same task as applying the rule and
-        # then relabeling, so the augmented pairs still follow one rule.
-        mapping = {color: (color % 9) + 1 for color in range(1, 10)}
-        mapping[BACKGROUND] = BACKGROUND
-        rule = drop_color(5)
-        permuted_rule = drop_color(mapping[5])
-        assert apply_color_map(rule(ASYMMETRIC), mapping) == permuted_rule(
-            apply_color_map(ASYMMETRIC, mapping)
-        )
-
-    def test_augmentation_preserves_pair_count_and_never_creates_an_identity(self):
-        rng = random.Random(7)
-        pairs = [(ASYMMETRIC, rot90(ASYMMETRIC)), ([[1, 0]], [[0, 1]])]
-        augmented = augment_task(rng, pairs)
-        assert len(augmented) == len(pairs)
-        assert all(inp != out for inp, out in augmented)
-
-    def test_augmentation_leaves_the_background_alone(self):
-        rng = random.Random(3)
-        grid = [[0, 1], [2, 0]]
-        [(inp, _)] = augment_task(rng, [(grid, grid)])
-        assert sum(cell == BACKGROUND for row in inp for cell in row) == 2
-
 
 class TestGenerateTask:
     @pytest.mark.parametrize("level", LEVELS)
@@ -305,22 +268,13 @@ class TestGenerateTask:
                 assert all(len(row) == len(grid[0]) for row in grid)
                 assert all(0 <= cell <= 9 for row in grid for cell in row)
 
-    @pytest.mark.parametrize("level", [level for level in LEVELS if level > 0])
-    def test_echoing_the_input_never_solves_a_task_above_level_zero(self, level):
-        # The whole point of the ladder is exact-match signal the model cannot
-        # get by copying -- four previous runs converged on exactly that copy.
+    @pytest.mark.parametrize("level", LEVELS)
+    def test_echoing_the_input_never_solves_a_task(self, level):
         for index in range(60):
             task = generate_task(seed=5, index=index, level=level)
             assert task.target != task.test_input
             for pair in task.train_pairs:
                 assert pair["output"] != pair["input"]
-
-    def test_level_zero_is_the_identity(self):
-        for index in range(20):
-            task = generate_task(seed=5, index=index, level=0)
-            assert task.target == task.test_input
-            for pair in task.train_pairs:
-                assert pair["output"] == pair["input"]
 
     def test_generation_is_deterministic_in_seed_and_index(self):
         first = generate_task(seed=3, index=9, level=3)
@@ -370,7 +324,7 @@ class TestMaxInputDim:
                 assert len(grid) <= MAX_GRID_DIM
                 assert len(grid[0]) <= MAX_GRID_DIM
 
-    @pytest.mark.parametrize("level", [level for level in LEVELS if level > 0])
+    @pytest.mark.parametrize("level", LEVELS)
     def test_guards_still_hold_under_a_small_cap(self, level):
         # A tight cap shrinks the space of distinct grids, which is exactly when
         # a rot180 lands on a symmetric grid -- the guards must still bite.
@@ -619,13 +573,13 @@ class TestLevelPalettes:
 
 class TestGenerateTasks:
     def test_levels_are_cycled_so_a_batch_holds_every_level(self):
-        levels = [0, 1, 2]
+        levels = [1, 2, 3]
         tasks = generate_tasks(seed=2, count=12, levels=levels)
         assert [task.level for task in tasks] == levels * 4
 
     def test_a_repeated_level_is_weighted(self):
-        tasks = generate_tasks(seed=2, count=6, levels=[0, 1, 1])
-        assert sum(task.level == 1 for task in tasks) == 4
+        tasks = generate_tasks(seed=2, count=6, levels=[1, 2, 2])
+        assert sum(task.level == 2 for task in tasks) == 4
 
     def test_empty_levels_is_rejected(self):
         with pytest.raises(ValueError, match="levels must not be empty"):

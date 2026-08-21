@@ -30,7 +30,7 @@ from nemo_rl.data.interfaces import (
     VLMMessageLogType,
 )
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
-from nemo_rl.environments.arc_agi_grid import format_task_prompt
+from nemo_rl.environments.arc_agi_grid import serialize_grid
 
 TokenizerType = PreTrainedTokenizerBase
 
@@ -444,30 +444,23 @@ def math_hf_data_processor(
     return output
 
 
-def arc_agi_data_processor(
+def _arc_grid_data_processor(
     datum_dict: dict[str, Any],
     task_data_spec: TaskDataSpec,
     tokenizer: TokenizerType,
     max_seq_length: int,
     idx: int,
+    *,
+    task_body: str,
 ) -> DatumSpec:
-    """Process an ARC row into a DatumSpec.
-
-    Serves both the real corpus (``response_datasets/arc_agi.py``) and the
-    synthetic ladder (``response_datasets/arc_synth.py``): the row schemas are
-    identical, so a second processor would be this one with a different name.
-    """
-    task_body = format_task_prompt(datum_dict["train_pairs"], datum_dict["test_input"])
+    """Process a rendered single-grid ARC prompt into a DatumSpec."""
     extra_env_info = {
         "target": datum_dict["target"],
         # The environment scores the similarity terms as gain over echoing the
         # test input, so it needs the input itself, not just the target.
         "test_input": datum_dict["test_input"],
         "task_id": datum_dict["task_id"],
-        # Carried so the environment can report per-level metrics. Both ARC
-        # row schemas always set it -- real rows as REAL_ARC_LEVEL -- so a
-        # missing key is a producer bug and should raise rather than quietly
-        # file the sample under the wrong bucket.
+        # Carried so executor training can report per-level metrics.
         "level": datum_dict["level"],
         "terms": None,
     }
@@ -515,6 +508,32 @@ def arc_agi_data_processor(
         "task_name": datum_dict["task_name"],
     }
     return output
+
+
+def arc_executor_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int,
+    idx: int,
+) -> DatumSpec:
+    """Process an oracle transform plus one input grid for executor GRPO."""
+    task_body = (
+        "<transformation>\n"
+        f"{datum_dict['transform_description']}\n"
+        "</transformation>\n"
+        "<input>\n"
+        f"{serialize_grid(datum_dict['test_input'])}\n"
+        "</input>"
+    )
+    return _arc_grid_data_processor(
+        datum_dict,
+        task_data_spec,
+        tokenizer,
+        max_seq_length,
+        idx,
+        task_body=task_body,
+    )
 
 
 def vlm_hf_data_processor(
@@ -893,7 +912,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
         "helpsteer3_data_processor": helpsteer3_data_processor,
         "kd_data_processor": kd_data_processor,
         "math_data_processor": math_data_processor,
-        "arc_agi_data_processor": arc_agi_data_processor,
+        "arc_executor_data_processor": arc_executor_data_processor,
         "math_hf_data_processor": math_hf_data_processor,
         "multichoice_qa_processor": multichoice_qa_processor,
         "sft_processor": sft_processor,

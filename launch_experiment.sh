@@ -15,18 +15,12 @@
 #
 # Launch an async GRPO experiment (Megatron inference) via submit_nemorl.sh.
 #
-# The experiment is two orthogonal axes; every combination has a config at
+# Each supported environment has a config at
 # examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
 #   ENV       gym                         NeMo-Gym servers
-#             arcsynth[_4n|_8n]           the synthetic ARC difficulty ladder, generic or
-#                                         sized for a specific allocation
-#             arcsynth_early_answer       that ladder with the early-answer prompt
+#             arc_executor_4n             oracle-description executor training
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
-#
-# The real-ARC-only (`arc`) and math arms are gone. Real ARC-AGI-2 is still
-# validated on at every checkpoint -- it is the campaign metric -- but as a
-# validation source inside env_arc_synth.yaml, not a training arm of its own.
 #
 # Usage:
 #   SUBMIT_ACCOUNT=<account> [ENV=...] \
@@ -46,7 +40,6 @@
 #   WATCHDOG_INTERVAL seconds between watchdog polls (default 300)
 #   EXTRA_OVERRIDES   ad-hoc Hydra overrides, applied last, e.g. "a=1 b=2"
 #
-# Driver log: <jobid>-logs/ray-driver.log.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -62,9 +55,12 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | arcsynth | arcsynth_4n | arcsynth_8n | arcsynth_early_answer) ;;
-  *) die "invalid ENV: ${ENV} (expected gym, arcsynth, arcsynth_{4n,8n}, or arcsynth_early_answer)" ;;
+  gym | arc_executor_4n) ;;
+  *) die "invalid ENV: ${ENV} (expected gym or arc_executor_4n)" ;;
 esac
+if [[ "${ENV}" == arc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
+  die "arc_executor_4n supports only colocated topology"
+fi
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
@@ -77,7 +73,7 @@ USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 # them. Unset any inherited value so a stale shell export cannot resplit them.
 unset UV_PYTHON
 
-# One name for both slurm and wandb, so a job id always maps to a run.
+# Use one name for both Slurm and Weights & Biases.
 RUN_NAME="async_${TOPOLOGY}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
 export JOB_NAME="${RUN_NAME}"
 
@@ -117,15 +113,6 @@ fi
 
 # Layer 3: CMP preset -- validation off, weights-only checkpoints, fixed seq.
 if [[ "${CMP:-0}" == 1 ]]; then
-  # The preset's fixed 16384 is applied after the config layer and so wins over
-  # env_arc_synth.yaml's 32768. The synthetic prompts are smaller, but every
-  # checkpoint still validates on the real ARC-AGI-2 split, whose worst row is
-  # 16593 tokens -- and an overlong prompt is not an error, the processor masks
-  # the row with loss_multiplier=0, so the combination degrades the run
-  # silently. Refuse it rather than leaving it as a comment nobody reads at 2am.
-  case "${ENV}" in
-    arcsynth*) die "CMP=1 forces max_total_sequence_length=16384, below the 16593-token worst-case real ARC validation prompt; do not combine it with ENV=${ENV}" ;;
-  esac
   add_override "grpo.val_period=0 grpo.val_at_start=false grpo.val_at_end=false"
   add_override "checkpointing.enabled=true checkpointing.save_period=5 checkpointing.save_optimizer=false"
   add_override "policy.max_total_sequence_length=16384"
@@ -210,10 +197,8 @@ echo "run:      ${RUN_NAME}"
 echo "config:   ${CONFIG}"
 echo "nodes:    ${NUM_ACTOR_NODES}${NUM_GEN_NODES:+ (${NUM_GEN_NODES} generation)}, ${TIMEOUT_MIN} min"
 
-# Capture the job id so the watchdog can be armed against it. Captured rather
-# than tee'd: there is no controlling terminal under nohup, cron or CI, and
-# `tee /dev/tty` fails there -- which under `set -e` aborts the launcher *after*
-# sbatch has already queued the job, leaving it running with no watchdog.
+# Capture submission output so the watchdog can be armed. Avoid `tee /dev/tty`:
+# nohup, cron, and CI may not have a controlling terminal.
 if ! SUBMIT_OUTPUT="$(bash submit_nemorl.sh 2>&1)"; then
   echo "${SUBMIT_OUTPUT}" >&2
   die "submission failed"
@@ -242,5 +227,5 @@ if [[ -n "${JOB_ID}" && "${WATCHDOG:-1}" != 0 ]]; then
     >"${WATCHDOG_LOG}" 2>&1 < /dev/null &
   echo "watchdog: armed on ${JOB_ID} (pid $!), log ${WATCHDOG_LOG}"
 elif [[ -z "${JOB_ID}" ]]; then
-  echo "watchdog: NOT armed -- could not parse a job id from the submission" >&2
+  echo "watchdog: NOT armed -- could not parse the submission identifier" >&2
 fi

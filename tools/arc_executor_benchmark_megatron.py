@@ -59,6 +59,14 @@ def _comma_separated_ints(value: str) -> tuple[int, ...]:
 def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help=(
+            "Optional trained checkpoint, supplied as either a step directory or "
+            "its policy/weights directory. If omitted, benchmark the base model."
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--seed", type=int, default=93_821)
@@ -75,10 +83,27 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     return args, overrides
 
 
+def _resolve_weights_path(checkpoint: Path) -> Path:
+    """Resolve a checkpoint step or weights directory to policy/weights."""
+    checkpoint = checkpoint.expanduser().resolve()
+    weights_path = (
+        checkpoint
+        if checkpoint.name == "weights"
+        else checkpoint / "policy" / "weights"
+    )
+    if not weights_path.is_dir():
+        raise FileNotFoundError(
+            "resolved checkpoint weights path does not exist or is not a directory: "
+            f"{weights_path} (from --checkpoint={checkpoint})"
+        )
+    return weights_path
+
+
 def _build_generation(
     config: MasterConfig,
     *,
     log_dir: Path,
+    weights_path: Path | None,
 ) -> MegatronGeneration:
     init_ray(log_dir=str(log_dir))
     tokenizer = get_tokenizer(config.policy["tokenizer"])
@@ -130,6 +155,7 @@ def _build_generation(
         tokenizer=tokenizer,
         cluster=generation_cluster,
         name_prefix="arc_executor_megatron",
+        weights_path=str(weights_path) if weights_path is not None else None,
     )
 
 
@@ -165,10 +191,21 @@ def main() -> None:
     config = MasterConfig.model_validate(OmegaConf.to_container(config, resolve=True))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    weights_path = (
+        _resolve_weights_path(args.checkpoint) if args.checkpoint is not None else None
+    )
+    print(
+        f"Executor benchmark weights: {weights_path or 'base model'}",
+        flush=True,
+    )
     generation: MegatronGeneration | None = None
     try:
         ray_log_dir = Path("/tmp") / f"arc_executor_ray_{os.getpid()}"
-        generation = _build_generation(config, log_dir=ray_log_dir)
+        generation = _build_generation(
+            config,
+            log_dir=ray_log_dir,
+            weights_path=weights_path,
+        )
         base_urls = [
             base_url
             for base_url in generation.dp_openai_server_base_urls

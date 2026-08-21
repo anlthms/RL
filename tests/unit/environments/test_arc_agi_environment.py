@@ -6,11 +6,7 @@ import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.arc_agi_environment import ArcAgiEnvConfig
-from nemo_rl.environments.arc_agi_grid import (
-    REAL_ARC_LEVEL,
-    RewardWeights,
-    score_response,
-)
+from nemo_rl.environments.arc_agi_grid import RewardWeights, score_response
 from nemo_rl.environments.utils import create_env
 
 TARGET = [[1, 2], [3, 4]]
@@ -63,7 +59,7 @@ def test_step_scores_a_batch(arc_env):
             "target": TARGET,
             "test_input": TEST_INPUT,
             "task_id": "t0",
-            "level": REAL_ARC_LEVEL,
+            "level": 1,
             "terms": None,
         }
         for _ in responses
@@ -90,7 +86,7 @@ def test_step_preserves_metadata_fields(arc_env):
             "target": TARGET,
             "test_input": TEST_INPUT,
             "task_id": "abc123",
-            "level": REAL_ARC_LEVEL,
+            "level": 1,
             "terms": None,
         }
     ]
@@ -110,7 +106,7 @@ def test_echoing_the_test_input_loses_to_a_real_answer(arc_env):
             "target": target,
             "test_input": test_input,
             "task_id": "t",
-            "level": REAL_ARC_LEVEL,
+            "level": 1,
             "terms": None,
         }
         for _ in range(2)
@@ -139,13 +135,13 @@ def test_terms_are_tagged_with_the_difficulty_level(arc_env):
             "level": level,
             "terms": None,
         }
-        for level in (0, 3, REAL_ARC_LEVEL)
+        for level in (1, 3, 5)
     ]
     responses = [answer("12\n34"), answer("99\n99"), answer("12\n34")]
     result = ray.get(arc_env.step.remote([message_log(r) for r in responses], metadata))
-    assert result.metadata[0]["terms"]["grid_match/level_0"] == 1.0
+    assert result.metadata[0]["terms"]["grid_match/level_1"] == 1.0
     assert result.metadata[1]["terms"]["grid_match/level_3"] == 0.0
-    assert result.metadata[2]["terms"]["grid_match/real"] == 1.0
+    assert result.metadata[2]["terms"]["grid_match/level_5"] == 1.0
     # A sample only reports its own level.
     assert "grid_match/level_3" not in result.metadata[0]["terms"]
 

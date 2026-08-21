@@ -31,7 +31,7 @@ class EnvRegistryEntry(TypedDict, total=False):
 ENV_REGISTRY: Dict[str, EnvRegistryEntry] = {
     "arc_agi": {
         "actor_class_fqn": "nemo_rl.environments.arc_agi_environment.ArcAgiEnvironment",
-        "default_processor": "arc_agi_data_processor",
+        "default_processor": "arc_executor_data_processor",
     },
     "math_default": {
         "actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment",

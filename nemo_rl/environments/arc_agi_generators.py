@@ -11,20 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Synthetic ARC-style task generator: a ladder of solvable transformations.
+"""Deterministic synthetic ARC transforms for the executor curriculum.
 
-Four GRPO runs on real ARC-AGI-2 produced ``grid_match == 0.0000`` at every
-checkpoint, so no gradient has ever come from exact match -- every one came from
-shaping, and shaping has bought presentation and nothing else. ARC-AGI-2 is
-built so that frontier models score near zero; for a 1.7B policy it is not a
-hard learning problem, it is a null signal. This module manufactures tasks the
-model can actually solve, so that exact match has somewhere to move from.
-
-Tasks are generated from ``(seed, index, level)`` rather than materialized into
-a static dataset: volume is free and a run is still reproducible.
-
-Stdlib only -- no Ray, torch, GPU, or numpy -- so the whole ladder can be
-exercised on a login node. See ``arc_agi_grid.py``, which this mirrors.
+Tasks are regenerated from ``(seed, index, level)`` and require no stored
+dataset. The module is stdlib-only; grid parsing and scoring live in
+``arc_agi_grid.py``.
 """
 
 import random
@@ -43,20 +34,14 @@ COLORS = tuple(range(1, 10))
 # plan's upper bound on an *input* -- geometric rules multiply it, and every
 # grid in a task must still fit MAX_GRID_DIM.
 MIN_GRID_DIM = 3
-# Upper bound on an input grid's side, overridable per call. Grid *size* turns
-# out to be a difficulty axis in its own right, independent of which
-# transformation a level applies: exact match needs every cell right, so at 99%
-# per-cell accuracy a 300-cell grid matches outright only ~5% of the time. M4.2
-# measured exactly that -- level 0 scored 1.000 on targets under 150 cells,
-# 0.792 at 150-300, and 0.750 above 300, on one policy at one checkpoint. A
-# smaller cap makes exact match attainable while a rule is still being learned.
+# Upper bound on an input grid's side, overridable per call.
 DEFAULT_MAX_INPUT_DIM = 20
 # Object placement needs room. Below this, "put three shapes down with a
 # background margin between them" usually fails and we would spend the whole
 # attempt budget on rejections.
 MIN_OBJECT_GRID_DIM = 8
 
-LEVELS = (0, 1, 2, 3, 4, 5)
+LEVELS = (1, 2, 3, 4, 5)
 
 # How many (rule, pairs) draws to make before giving up on a level. Generous:
 # rejection is the normal path (a rot180 that happens to land on a symmetric
@@ -74,7 +59,6 @@ ChoiceT = TypeVar("ChoiceT")
 # 3s" cannot be read off examples that contain only 3s. Level 4's structural
 # rules stay near-monochrome so the structure is what varies.
 _PALETTE_RANGE: dict[int, tuple[int, int]] = {
-    0: (1, 3),
     1: (1, 3),
     2: (2, 4),
     3: (1, 3),
@@ -317,10 +301,6 @@ def fill_enclosed(color: int) -> Callable[[Grid], Grid]:
         ]
 
     return apply
-
-
-def apply_color_map(grid: Grid, mapping: dict[int, int]) -> Grid:
-    return [[mapping.get(cell, cell) for cell in row] for row in grid]
 
 
 # ---------------------------------------------------------------------------
@@ -742,15 +722,6 @@ def _generic_sampler(rng: random.Random) -> Callable[..., Grid | None]:
     )
 
 
-def _level0_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
-    return Rule(
-        name="identity",
-        level=0,
-        stages=(identity,),
-        sample_input=_bind(_generic_sampler(rng), palette, max_dim),
-    )
-
-
 def _level1_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
     name = rng.choice([key for key in DIHEDRAL if key != "identity"])
     return Rule(
@@ -880,7 +851,6 @@ def _level5_rule(rng: random.Random, palette: list[int], max_dim: int) -> Rule:
 
 
 _LEVEL_RULES: dict[int, Callable[[random.Random, list[int], int], Rule]] = {
-    0: _level0_rule,
     1: _level1_rule,
     2: _level2_rule,
     3: _level3_rule,
@@ -923,10 +893,7 @@ def is_degenerate(rule: Rule, pairs: list[Pair]) -> bool:
       recolor wearing a level-5 label, and the flip is not inferable from any
       example.
 
-    Level 0 is exempt -- there, unchanged is the rule.
     """
-    if rule.level == 0:
-        return False
     for inp, _ in pairs:
         current = inp
         for stage in rule.trace(inp):
@@ -942,35 +909,6 @@ def _fits(grid: Grid) -> bool:
         and bool(grid[0])
         and len(grid[0]) <= MAX_GRID_DIM
     )
-
-
-# ---------------------------------------------------------------------------
-# Augmentation
-# ---------------------------------------------------------------------------
-
-
-def augment_task(rng: random.Random, pairs: list[Pair]) -> list[Pair]:
-    """Permute colors and apply a dihedral transform across the whole task.
-
-    Both are applied identically to every input and every output, so the task
-    stays a consistent function of its input -- for a color permutation the rule
-    is conjugated by a relabeling, for a dihedral transform by a symmetry of the
-    square. What they buy is that the model cannot memorize "color 3 is the one
-    that disappears" or "the answer is always wider than the input"; it has to
-    read the rule off the examples.
-    """
-    permuted = list(COLORS)
-    rng.shuffle(permuted)
-    mapping = dict(zip(COLORS, permuted))
-    mapping[BACKGROUND] = BACKGROUND
-    transform = DIHEDRAL[rng.choice(list(DIHEDRAL))]
-    return [
-        (
-            transform(apply_color_map(inp, mapping)),
-            transform(apply_color_map(out, mapping)),
-        )
-        for inp, out in pairs
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1014,16 +952,11 @@ def generate_task(
     *,
     num_train_pairs: int | None = None,
     max_input_dim: int = DEFAULT_MAX_INPUT_DIM,
-    augment: bool = True,
 ) -> SynthTask:
     """Generate the task at ``(seed, index, level)``.
 
     Deterministic in its arguments and nothing else, so a run is reproducible
     without materializing a dataset.
-
-    ``augment=False`` is reserved for the oracle-description executor
-    benchmark. It keeps the sampled concrete rule aligned with its canonical
-    textual description; normal synthetic training retains augmentation.
 
     Rejection is the normal path: a rot180 that lands on a symmetric grid, a
     "drop color 3" whose examples contain no 3, and a crop of a grid with no
@@ -1060,8 +993,6 @@ def generate_task(
         if is_degenerate(rule, pairs):
             continue
 
-        if augment:
-            pairs = augment_task(rng, pairs)
         train, (test_input, target) = pairs[:-1], pairs[-1]
         return SynthTask(
             # The rule goes in the id so a dumped validation row says which
@@ -1069,7 +1000,6 @@ def generate_task(
             # and "tile is hard" -- without needing its own dataset column.
             task_id=(
                 f"synth_L{level}_d{max_input_dim}_f{count - 1}"
-                f"{'_oracle' if not augment else ''}"
                 f"_{rule.name}_{seed}_{index}"
             ),
             level=level,
@@ -1177,7 +1107,11 @@ def _axis_values(value: AxisT | list[AxisT] | None) -> list[AxisT | None]:
     """
     if value is None:
         return [None]
-    values = list(value) if isinstance(value, list) else [value]
+    values: list[AxisT | None] = []
+    if isinstance(value, list):
+        values.extend(value)
+    else:
+        values.append(value)
     if not values:
         raise ValueError("difficulty-axis lists must not be empty")
     return values
@@ -1213,7 +1147,7 @@ def _joint_level_size_schedule(
     # A repeated level is a weight, not a second combination: the cross product
     # is built from the distinct levels and the multiplicity scales the mass
     # that level receives.
-    multiplicity = Counter(levels)
+    multiplicity: Counter[int] = Counter(levels)
     active_order = [level for level in level_difficulty_order if level in multiplicity]
     unique_dims = sorted(set(dims))
     level_rank = {level: rank for rank, level in enumerate(active_order)}

@@ -33,16 +33,10 @@ ANSWER_CLOSE = "</answer>"
 MAX_GRID_DIM = 30
 NUM_COLORS = 10
 
-# Difficulty level carried by every row, so per-level metrics can separate
-# "solving level 0 and nothing else" from "uniformly mediocre" -- which is the
-# whole question the synthetic curriculum exists to answer. Real ARC-AGI-2 rows
-# are not on the ladder and get their own bucket.
-REAL_ARC_LEVEL = -1
-
 
 def level_metric_suffix(level: int) -> str:
     """Metric-key suffix for a difficulty level."""
-    return "real" if level == REAL_ARC_LEVEL else f"level_{level}"
+    return f"level_{level}"
 
 
 # Row boundary marker for edit distance. Outside 0-9 so it can never match a cell.
@@ -389,15 +383,8 @@ def score_response(
     terms["edit_gain"] = gain_over_baseline(terms["edit_similarity"], copy_edit)
 
     if terms["copied_input"] and not terms["grid_match"]:
-        # Gain-relative similarity moved an echo's similarity reward to zero,
-        # but it still collected color recall + format credit while avoiding
-        # every penalty. On unsolved tasks that positive safe harbour beat a
-        # genuine attempt whose gain happened to be negative, and two runs
-        # converged to 68-79% copied answers. Put a non-answer echo on the
-        # reward floor. Any other parseable grid retains the format gap and
-        # therefore strictly beats copying, while level 0 / a genuine identity
-        # task remains an exact solve and is exempt. Only the scalar moves: the
-        # diagnostic terms still report a well-formed grid that copied the input.
+        # An inexact echo still earns color and format credit after its
+        # similarity gain is zeroed, so put it on the non-answer floor.
         terms["reward"] = _reward_floor(weights)
     else:
         terms["reward"] = (
@@ -410,22 +397,3 @@ def score_response(
             + weights.format * terms["format_valid"]
         )
     return terms
-
-
-def format_task_prompt(train_pairs: list[dict[str, Grid]], test_input: Grid) -> str:
-    """Lay out the few-shot pairs and the test input as delimited text.
-
-    Plain-text tags rather than added vocabulary: new tokens would need their
-    embeddings trained from scratch, and GRPO's signal is far too sparse for
-    that.
-    """
-    blocks = []
-    for pair in train_pairs:
-        blocks.append(
-            "<example>\n"
-            f"<input>\n{serialize_grid(pair['input'])}\n</input>\n"
-            f"<output>\n{serialize_grid(pair['output'])}\n</output>\n"
-            "</example>"
-        )
-    blocks.append(f"<test_input>\n{serialize_grid(test_input)}\n</test_input>")
-    return "\n".join(blocks)

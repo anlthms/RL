@@ -1,12 +1,5 @@
 # Verifier-Guided Multi-Turn ARC-AGI
 
-## Status
-
-Stages 1-3 are implemented and verified: pure verifier/state logic, the mocked dual-history NeMo-Gym
-agent, and the oracle-description executor benchmark. Four-GPU Megatron job 6321951 completed all 150
-cases but failed the executor gate at 12% episode reliability and 56% train-format validity. Stage 4
-executor training is required before an end-to-end trial.
-
 ## Motivation
 
 The existing ARC-AGI environment asks one model response to infer a rule, mentally test it, and emit the test grid. A worked one-shot example caused strong semantic anchoring without improving real ARC exact match. The next approach should replace the model's narrated self-check with an actual check against the known training pairs.
@@ -40,7 +33,7 @@ This design is inspired by the neighboring `../arc_agi` solver. That solver gene
 
 ## Conversation topology
 
-Each episode uses one persistent proposer chat and one fresh executor chat per revision round.
+Each episode uses one persistent proposer chat and one fresh executor chat per grid application.
 
 ```text
 Persistent proposer chat
@@ -51,35 +44,34 @@ Persistent proposer chat
   user:      deterministic verification feedback for v1
   ...
 
-Fresh executor chat for round r
-  user:      transform description vr + training inputs (no training outputs)
-  assistant: predicted training outputs
-  [only when all predictions pass]
-  user:      test input(s)
-  assistant: final test output(s)
+Fresh executor chat for each grid in round r
+  user:      transform description vr + one input grid (no expected output)
+  assistant: predicted output grid
 ```
 
-The executor chat is discarded after a failed round. A revised description always starts a new executor chat, so an earlier prediction cannot anchor application of the new rule. The proposer sees the normal ARC test input because it can help disambiguate the intended rule, but it is never shown the test output. The executor does not see the test input until the training gate passes.
+Each executor chat is discarded after one grid. A revised description therefore cannot inherit an earlier prediction, and grids within a round cannot anchor one another. The proposer sees the normal ARC test input because it can help disambiguate the intended rule, but it is never shown the test output. Test execution starts only after the description passes every training pair.
 
-For a task with several training or test grids, one executor call handles all training inputs for the round and one follow-up handles all test inputs. A per-grid executor mode can be added if aggregate prompts prove unreliable, but it multiplies inference calls and is not the initial default.
+Training grids are checked in order. The current description advances to the hidden test grid only after every training-grid call is exact.
 
 ## Episode state machine
 
 ```mermaid
 flowchart TD
     A[Build proposer prompt] --> B[Describe transform]
-    B --> C[Fresh executor applies transform to training inputs]
-    C --> D{Parseable predictions?}
+    B --> C[Fresh executor applies transform to next training grid]
+    C --> D{Parseable grid?}
     D -- no --> E[One format-only executor retry]
     E --> F{Parseable now?}
     F -- no --> G[Terminate and mask: executor format failure]
     D -- yes --> H[Deterministic exact verification]
     F -- yes --> H
-    H --> I{All training grids exact?}
-    I -- yes --> J[Same executor chat applies rule to test input]
+    H --> I{Grid exact?}
+    I -- yes --> Q{More training grids?}
+    Q -- yes --> C
+    Q -- no --> J[Fresh executor applies rule to test input]
     J --> K[Parse final grid and score hidden target]
     I -- no --> L[Render shape or p-c feedback]
-    L --> M
+    L --> M{Another proposer turn fits?}
     M -- yes --> N[Append feedback to proposer chat]
     N --> B
     M -- no --> O[Terminate: context exhausted]
@@ -112,23 +104,24 @@ It must not emit Python or a predicted test grid. Detailed private reasoning is 
 
 ### Executor prompt
 
-The executor receives only:
+Each executor call receives only:
 
 - the current `<transform_description>` text;
-- numbered input grids;
+- one input grid;
 - the color mapping and strict grid schema;
 - a requirement to apply the supplied rule, not infer a different rule;
-- a strict JSON object inside `<predictions>` tags.
+- a single grid inside `<answer>` tags.
 
 For example:
 
 ```text
-<predictions>
-{"train_0": [[0, 2], [2, 0]], "train_1": [[1, 1], [0, 0]]}
-</predictions>
+<answer>
+0 2
+2 0
+</answer>
 ```
 
-The expected outputs are absent. The executor should return grids only, without explanations. If the training predictions pass, the follow-up test request uses `<answers>` with `test_0`, `test_1`, and so on.
+The expected output is absent. The executor should return only the grid. A format failure gets one format-only retry in the same chat; every semantic application uses a fresh chat.
 
 ### Revision prompt
 
@@ -143,7 +136,7 @@ The proposer already saw the expected training outputs, so the diff reveals no t
 
 ## Deterministic verification and feedback
 
-A valid grid is a non-empty rectangular list of lists whose cells are integers from 0 through 9. Keys must exactly match the requested input IDs. Extra prose, missing grids, ragged rows, booleans, and out-of-range values are invalid.
+A valid grid is non-empty and rectangular, with integer cells from 0 through 9. Missing grids, ragged rows, booleans, and out-of-range values are invalid.
 
 For equal shapes, render every cell as `p-c`, where `p` is the predicted value and `c` is the correct value. Including matching cells as, for example, `2-2` preserves alignment and follows one unambiguous format:
 
@@ -233,17 +226,17 @@ Training every disjoint executor segment as part of the same episode would requi
 Rule execution is a prerequisite, not an assumption to hide inside end-to-end reward. Before proposer RL, build an oracle-description benchmark from the synthetic ARC rule generator:
 
 1. Render a canonical textual description from the sampled rule and parameters.
-2. Give that description and unseen inputs to a fresh executor chat.
+2. Give that description and one unseen input to a fresh executor chat.
 3. Score format validity, shape match, cell accuracy, and exact grid match.
 4. Split by rule family, grid size, composition depth, and description paraphrase.
 
-The go/no-go metric is episode-level application reliability: the fraction of tasks for which an oracle description is executed exactly on **all** training inputs and then on the test input. Per-grid accuracy can look acceptable while the probability of passing several training grids is too low.
+The go/no-go metric is single-grid exact match after at most one format-only retry. Format validity, shape match, and cell accuracy are diagnostics rather than substitutes for exact execution.
 
 Proceed to end-to-end proposer RL only when oracle descriptions pass the full gate reliably on the intended curriculum. A provisional target is at least 95% end-to-end oracle execution with negligible format failures; the first benchmark should determine whether this threshold is realistic. If the gate fails, train the executor separately before changing the proposer workflow.
 
 ### Separate executor training task
 
-Each executor-training sample contains a textual transform, one or more input grids, and hidden expected grids. The model returns strict grids and receives:
+Each executor-training sample contains a textual transform, one input grid, and one hidden expected grid. The model returns one strict grid and receives:
 
 - dominant exact-grid reward;
 - smaller shape, cell, and format components for learning signal;
@@ -298,9 +291,9 @@ Episode state contains:
 round index and termination reason
 proposer history
 description for each round
-executor request/response for each round
-parsed predictions and verification records
-final answers
+executor request/response for each grid application
+parsed grids and verification records
+final answer
 per-role token usage and latency
 ```
 
@@ -335,15 +328,15 @@ Save representative complete traces containing the initial prompt, each proposer
 | Executor returns invalid JSON | Episode fails for formatting rather than reasoning | Strict parser and one format-only retry |
 | Test target leaks into a prompt | Invalid evaluation | Resources-server ownership and tests that scan every model request |
 
-## Implementation and evaluation sequence
+## Evaluation sequence
 
-1. **Pure logic — implemented:** parsers, exact comparison, `p-c` diffs, shape mismatch, state transitions, token budgeting, and leakage guards live in `3rdparty/Gym-workspace/Gym/resources_servers/arc_agi/logic.py` and are used by the session-owning ARC resources server.
-2. **Mocked agent — implemented:** `arc_transform_refinement_agent` exercises persistent proposer history, fresh executor histories, one format retry, proactive context termination, complete traces, and final-proposer-only result assembly without a model server.
-3. **Executor benchmark — implemented and measured:** `tools/arc_executor_benchmark.py` generates held-out unaugmented synthetic tasks, renders canonical descriptions from sampled rule parameters, gates test execution on exact training application, and reports reliability by rule family, actual grid size, composition depth, and description paraphrase. Four-GPU Megatron job 6321951 measured 18/150 reliable episodes (12%) against the 95% gate.
-4. **Executor training if required:** run the separate execution task until the oracle gate is reliable.
-5. **Inference-only end-to-end trial:** run a fixed ARC subset, inspect complete traces, and measure whether revisions improve the training gate and real test exactness.
-6. **Small RL plumbing run:** verify on-policy token IDs, reward association, async streaming, context termination, and resume behavior.
-7. **Controlled training experiment:** only after the earlier gates pass, prepare an exact preflight and request authorization for the next multi-node run.
+1. Exercise parsers, exact comparison, `p-c` diffs, shape mismatch, state transitions, token budgeting, and leakage guards as pure logic.
+2. Exercise persistent proposer history, fresh executor histories, one format retry, proactive context termination, complete traces, and final-proposer-only result assembly with mocked model calls.
+3. Benchmark canonical oracle descriptions on deterministic held-out synthetic tasks. Send one input grid per fresh executor chat and report exactness, format validity, shape match, cell accuracy, rule family, grid size, composition depth, and paraphrase.
+4. If the executor misses its gate, train the separate execution task and repeat the same held-out benchmark.
+5. Run an inference-only end-to-end trial on a fixed ARC subset and measure whether revisions improve training-pair verification and hidden test exactness.
+6. Run a small RL plumbing check for on-policy token IDs, reward association, async streaming, context termination, and resume behavior.
+7. Start controlled proposer training only after the earlier gates pass.
 
 The fixed 172-row real ARC-AGI-2 validation subset remains the campaign's authoritative metric. Synthetic exactness and executor reliability are prerequisites and diagnostics, not substitutes for real ARC exact match.
 
@@ -356,10 +349,7 @@ uv run tools/arc_executor_benchmark.py \
   --output reports/arc_executor_benchmark.json
 ```
 
-The default benchmark uses 150 deterministic held-out tasks across levels 1-5 and all three description
-paraphrases. It records complete audit traces in the output file. The provisional go/no-go gate remains 95%
-episode reliability and at least 99% format validity for both training applications and attempted test
-applications.
+The default benchmark uses 150 deterministic held-out tasks across levels 1-5 and all three description paraphrases. It records complete audit traces in the output file. The provisional go/no-go gate is 95% exact grids and at least 99% format validity after at most one formatting retry.
 
 ## Open questions
 
@@ -367,7 +357,6 @@ applications.
 - Does showing the test input to the proposer improve disambiguation enough to justify the added temptation to solve prematurely?
 - Is final-turn-only training sufficient to learn effective revisions, or is per-turn return-to-go/loss masking needed?
 - How much proposer feedback can be omitted without harming correction quality?
-- Should the executor handle all training grids in one call or use isolated per-grid calls for difficult/large tasks?
 - Once the single-path loop works, does selecting among several independently proposed descriptions improve generalization enough to justify the extra inference?
 
 ## References
