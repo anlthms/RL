@@ -31,7 +31,10 @@
 #   RUN_TAG           label appended to the slurm + wandb run name
 #   MAX_STEPS         cap grpo.max_num_steps
 #   TIMEOUT_MIN       slurm wall clock in minutes (default 240)
-#   COLL_TRACE=1      dump NCCL flight-recorder traces to ./nccl_traces on timeout
+#   COLL_TRACE=0      disable the NCCL flight recorder (on by default; dumps each
+#                     rank's recent collectives to ./nccl_traces on a timeout)
+#   WATCHDOG=0        do not arm the GPU-idleness watchdog (armed by default)
+#   WATCHDOG_INTERVAL seconds between watchdog polls (default 300)
 #   EXTRA_OVERRIDES   ad-hoc Hydra overrides, applied last, e.g. "a=1 b=2"
 #
 # Driver log: <jobid>-logs/ray-driver.log.
@@ -97,8 +100,12 @@ else
   add_setup "uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
 fi
 
-# Layer 3: caller overrides, last so they win.
-[[ -n "${EXTRA_OVERRIDES:-}" ]] && add_override "${EXTRA_OVERRIDES}"
+# Layer 3: caller overrides, last so they win. Newlines are folded to spaces:
+# ray.sub runs ${COMMAND} verbatim with bash, so an embedded newline would
+# silently truncate the command there.
+if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
+  add_override "$(tr '\n' ' ' <<<"${EXTRA_OVERRIDES}")"
+fi
 
 # ------------------------------------------- entrypoint, config, setup -----
 # The gym path drives rollouts through NeMo-Gym HTTP servers and needs its own
@@ -116,10 +123,12 @@ if ((${#SETUP_PARTS[@]})); then
   export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"
 fi
 
-# COLL_TRACE=1 enables torch's NCCL flight recorder: dumps each rank's last
-# collectives to ./nccl_traces/ on a watchdog timeout (shows the stuck collective).
+# torch's NCCL flight recorder, on by default (COLL_TRACE=0 disables): dumps
+# each rank's recent collectives to ./nccl_traces/ on a collective timeout,
+# naming the stuck collective. Costs only a fixed per-rank ring buffer; nothing
+# is written unless a timeout fires.
 COLL_TRACE_ENV=""
-if [[ "${COLL_TRACE:-0}" == 1 ]]; then
+if [[ "${COLL_TRACE:-1}" == 1 ]]; then
   mkdir -p "$(pwd)/nccl_traces"
   COLL_TRACE_ENV="TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-20000} TORCH_NCCL_DUMP_ON_TIMEOUT=1 TORCH_NCCL_DEBUG_INFO_TEMP_FILE=$(pwd)/nccl_traces/trace_"
 fi
@@ -147,8 +156,36 @@ uv run ${ENTRYPOINT} \
   --config ${CONFIG} \
     ${OVERRIDES}"
 
+# Refuse to submit a command that would be truncated at a newline (see above).
+[[ "${COMMAND}" == *$'\n'* ]] && die "driver command contains a newline; it would be truncated there by ray.sub"
+
 echo "run:      ${RUN_NAME}"
 echo "config:   ${CONFIG}"
 echo "nodes:    ${NUM_ACTOR_NODES}${NUM_GEN_NODES:+ (${NUM_GEN_NODES} generation)}, ${TIMEOUT_MIN} min"
 
-bash submit_nemorl.sh
+# Capture (not tee) the submission output so the job id can be parsed: tee
+# needs a terminal, which nohup/cron lack, and its failure under `set -e`
+# would abort after sbatch already queued the job.
+if ! SUBMIT_OUTPUT="$(bash submit_nemorl.sh 2>&1)"; then
+  echo "${SUBMIT_OUTPUT}" >&2
+  die "submission failed"
+fi
+echo "${SUBMIT_OUTPUT}"
+JOB_ID="$(grep -oE 'Submitted batch job [0-9]+' <<<"${SUBMIT_OUTPUT}" | grep -oE '[0-9]+$' | tail -1)"
+
+# ------------------------------------------------------------- watchdog -----
+# Armed by default (WATCHDOG=0 disables): kills a job whose GPUs went idle,
+# capturing per-rank stacks and GPU state first -- the cluster reaper would
+# take hours longer and destroy that evidence. Runs on the submit host (it
+# only shells out to sacct/srun/scancel); setsid+nohup outlives this shell.
+if [[ -n "${JOB_ID}" && "${WATCHDOG:-1}" != 0 ]]; then
+  WATCHDOG_LOG="${JOB_ID}-watchdog.log"
+  setsid nohup python3 tools/run_watchdog.py "${JOB_ID}" \
+    --root "$(pwd)" \
+    --log-dir "$(pwd)/${JOB_ID}-logs" \
+    --interval "${WATCHDOG_INTERVAL:-300}" \
+    >"${WATCHDOG_LOG}" 2>&1 < /dev/null &
+  echo "watchdog: armed on ${JOB_ID} (pid $!), log ${WATCHDOG_LOG}"
+elif [[ -z "${JOB_ID}" ]]; then
+  echo "watchdog: NOT armed -- could not parse a job id from the submission" >&2
+fi

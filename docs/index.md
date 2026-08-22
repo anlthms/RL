@@ -219,6 +219,13 @@ Deep dive into NeMo RL's architecture, APIs, and design decisions for scalable R
 Tools and techniques for debugging distributed Ray applications and RL training runs.
 :::
 
+:::{grid-item-card} {octicon}`stopwatch` Hang Watchdog
+:link: run-watchdog
+:link-type: doc
+
+Automatically cancel a Slurm job whose GPUs have gone idle, capturing per-rank stacks and GPU state first.
+:::
+
 :::{grid-item-card} {octicon}`zap` FP8 Quantization
 :link: fp8
 :link-type: doc
@@ -344,6 +351,7 @@ ci-cd.md
 testing.md
 documentation.md
 debugging.md
+run-watchdog.md
 nsys-profiling.md
 fp8.md
 guides/use-custom-vllm.md
