@@ -3158,7 +3158,11 @@ def test_async_grpo_colocated_save_defers_wake_until_after_checkpoint(
 
     with (
         mock_async_grpo_infrastructure(
-            mock_batch, mock_rollout_metrics, collector_events=events
+            mock_batch,
+            mock_rollout_metrics,
+            collector_events=events,
+            # The post-save wake must go through the backend-dispatching refit.
+            refit_side_effect=lambda *a, **k: events.append("refit"),
         ),
         _patched_logprob_phase(policy),
         patch("nemo_rl.algorithms.grpo.torch.save"),
@@ -3179,22 +3183,23 @@ def test_async_grpo_colocated_save_defers_wake_until_after_checkpoint(
         )
 
     assert events == [
-        # Startup: the initial refit is patched out; the collector still gets
-        # the version stamp before collection starts.
+        # Startup: the initial refit fires; the collector then gets the
+        # version stamp before collection starts.
+        "refit",
         "set_weight_version",
         "start_collection",
-        # Step 1 (no save): stand down for training, then refit-arm stamp + resume.
+        # Step 1 (no save): stand down for training, then refit + stamp + resume.
         ("finish_generation", True),
+        "refit",
         "set_weight_version",
         "resume_after_refit",
         # Step 2 (save-bound): version-stamp with the engine asleep, save,
-        # then wake and resume.
+        # then the deferred refit (which carries the wake) and resume.
         ("finish_generation", True),
         "offload_before_refit",
         "set_weight_version",
         ("save", 2),
-        "offload_after_refit",
-        "wake_engine",
+        "refit",
         "resume_after_refit",
         # Step 3 (last step saves): same deferral, but no wake — the loop exits.
         ("finish_generation", True),

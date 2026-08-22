@@ -5256,10 +5256,20 @@ def async_grpo_train(
                         or should_save_by_timeout
                         or early_stop_message is not None
                     ):
-                        # The save onloaded model+optimizer;
-                        # generation windows must start from the offloaded state.
-                        policy.offload_after_refit()
-                        policy_generation.prepare_for_generation()
+                        # The deferred wake is this step's refit. The backend's
+                        # synchronizer keeps params resident under its captured
+                        # CUDA graphs; the no-synchronizer fallback would evict
+                        # them before the wake, hence the assert.
+                        assert (
+                            getattr(policy_generation, "weight_synchronizer", None)
+                            is not None
+                        ), "defer_wake_for_save requires a weight synchronizer"
+                        # Also finalizes any async checkpoint write, so resume
+                        # waits on the save landing on disk.
+                        with timer.time("post_checkpoint_refit"):
+                            refit_policy_generation(
+                                policy, policy_generation, colocated_inference
+                            )
                         ray.get(trajectory_collector.resume_after_refit.remote())
 
             # Logging
