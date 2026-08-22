@@ -15,10 +15,11 @@
 #
 # Launch an async GRPO experiment (Megatron inference) via submit_nemorl.sh.
 #
-# The experiment is two orthogonal axes; every combination has a config at
+# Each supported environment has a config at
 # examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
-#   ENV       gym | math                  NeMo-Gym servers, or the built-in math env
+#   ENV       gym                         NeMo-Gym servers
+#             arc_executor_4n             oracle-description executor training
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
@@ -53,9 +54,12 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | math) ;;
-  *) die "invalid ENV: ${ENV} (expected gym or math)" ;;
+  gym | arc_executor_4n) ;;
+  *) die "invalid ENV: ${ENV} (expected gym or arc_executor_4n)" ;;
 esac
+if [[ "${ENV}" == arc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
+  die "arc_executor_4n supports only colocated topology"
+fi
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
@@ -109,10 +113,10 @@ fi
 
 # ------------------------------------------- entrypoint, config, setup -----
 # The gym path drives rollouts through NeMo-Gym HTTP servers and needs its own
-# entrypoint; math runs on the standard one.
+# entrypoint; everything else runs on the standard one.
 case "${ENV}" in
-  gym)  ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  math) ENTRYPOINT="examples/run_grpo.py" ;;
+  gym) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
+  *)   ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
