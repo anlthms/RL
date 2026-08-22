@@ -1030,6 +1030,16 @@ def run_multi_turn_rollout(
         done = truncation_mask | terminateds
         sample_terminated[active_indices] |= done
 
+        # Keep the environment's metadata for every sample it just scored,
+        # including the ones finishing this turn. The per-turn update below
+        # only covers *continuing* samples, so a single-turn environment's
+        # metadata would otherwise never survive the rollout.
+        for local_idx, global_idx in enumerate(active_indices.tolist()):
+            if env_output.metadata[local_idx] is not None:
+                current_batch["extra_env_info"][global_idx] = env_output.metadata[
+                    local_idx
+                ]
+
         # Update active indices for the next iteration
         active_indices_local_next = torch.where(~done)[0]
         active_indices = active_indices[active_indices_local_next]
@@ -1349,8 +1359,14 @@ async def run_sample_multi_turn_rollout(
         if not terminated and not truncated:
             if env_output.next_stop_strings[0] is not None:
                 current_stop_strings = env_output.next_stop_strings[0]
-            if env_output.metadata[0] is not None:
-                current_extra_env_info = env_output.metadata[0]
+
+        # Keep the environment's metadata even on the terminating turn. A
+        # single-turn environment only ever produces terminal metadata, so
+        # gating this on "not terminated" discarded its per-sample scoring
+        # detail entirely -- the sample state kept the pre-rollout metadata the
+        # data processor built.
+        if env_output.metadata[0] is not None:
+            current_extra_env_info = env_output.metadata[0]
 
     # Check if max turns reached
     if turn_count >= max_rollout_turns:

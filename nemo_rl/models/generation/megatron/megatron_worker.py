@@ -607,7 +607,14 @@ class MegatronGenerationMixin:
             )
             generation_lengths[i] = len(generated_tokens)
             unpadded_sequence_lengths[i] = seq_len
-            gen_logprobs = result[i].generated_log_probs
+            # mcore strips the matched stop string from generated_tokens but
+            # leaves its logprobs in generated_log_probs, so the two disagree in
+            # length by the stop string's token count. Logprobs must align 1:1
+            # with the tokens we keep, and the padded row is sized from the
+            # token count, so clip to it -- otherwise every rollout that
+            # actually hit its stop string dies with a shape mismatch, and the
+            # surviving samples are exactly the ones that failed to stop.
+            gen_logprobs = result[i].generated_log_probs[: len(generated_tokens)]
             logprobs_padded[i, prompt_len : prompt_len + len(gen_logprobs)] = (
                 torch.tensor(
                     gen_logprobs,
