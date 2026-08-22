@@ -40,6 +40,7 @@ from nemo_rl.data.datasets.response_datasets import (
 from nemo_rl.data.interfaces import TaskDataProcessFnCallable, TaskDataSpec
 from nemo_rl.data.processors import (
     PROCESSOR_REGISTRY,
+    arc_executor_data_processor,
     helpsteer3_data_processor,
     kd_data_processor,
     math_data_processor,
@@ -91,6 +92,32 @@ def test_nemo_gym_data_processor_without_task_data_spec():
     assert result["idx"] == 3
     assert result["task_name"] == "nemo_gym"
     assert result["length"] == 0
+def test_arc_executor_processor_keeps_target_out_of_the_prompt():
+    datum = {
+        "task_name": "arc_executor",
+        "task_id": "executor-test",
+        "transform_description": "Reflect the grid left-to-right.",
+        "test_input": [[0, 1], [2, 3]],
+        "target": [[9, 9], [9, 9]],
+        "level": 1,
+    }
+    output = arc_executor_data_processor(
+        datum_dict=datum,
+        task_data_spec=TaskDataSpec(
+            task_name="arc_executor",
+            prompt_file="examples/prompts/arc_executor.txt",
+            system_prompt_file=None,
+        ),
+        tokenizer=DummyTokenizer(),
+        max_seq_length=8192,
+        idx=0,
+    )
+    prompt = str(output["message_log"][0]["content"])
+    assert "Reflect the grid left-to-right." in prompt
+    assert "0 1\n2 3" in prompt
+    assert "9 9" not in prompt
+    assert output["extra_env_info"]["target"] == datum["target"]
+    assert output["loss_multiplier"] == 1.0
 
 
 def test_math_data_processor():

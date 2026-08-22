@@ -80,6 +80,7 @@ ACTOR_ENVIRONMENTS: dict[str, list[str] | None] = {
     "nemo_rl.models.generation.trtllm.trtllm_worker_async.TrtllmAsyncGenerationWorker": [
         "trtllm"
     ],
+    "nemo_rl.environments.arc_agi_environment.ArcAgiEnvironment": None,
     "nemo_rl.environments.math_environment.MathEnvironment": None,
     "nemo_rl.environments.math_environment.MathMultiRewardEnvironment": None,
     "nemo_rl.environments.vlm_environment.VLMEnvironment": None,

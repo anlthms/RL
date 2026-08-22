@@ -1,0 +1,62 @@
+# Stage-4 single-turn executor training. The model receives an oracle transform
+# description plus one unseen input grid and is rewarded only for applying it.
+
+grpo:
+  val_at_start: true
+  val_at_end: true
+  val_period: 10
+  max_val_samples: 150
+  val_batch_size: 30
+
+policy:
+  max_total_sequence_length: 8192
+  generation:
+    max_new_tokens: 4096
+
+data:
+  _override_: true
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: arc_executor
+    levels: [1, 2, 3, 4, 5]
+    max_input_dim: 12
+    level_difficulty_order: [2, 5, 1, 4, 3]
+    difficulty_ramp_window: ${grpo.num_prompts_per_step}
+    difficulty_ramp_steps: ${grpo.max_num_steps}
+    num_train_pairs: 3
+    paraphrase_ids: [0, 1, 2]
+    num_tasks: 2048
+    num_val_tasks: 150
+    seed: ${grpo.seed}
+    val_seed: 1000000
+  validation: null
+  default:
+    prompt_file: "examples/prompts/arc_executor.txt"
+    system_prompt_file: null
+    processor: "arc_executor_data_processor"
+    env_name: "arc_agi"
+
+env:
+  _override_: true
+  should_use_nemo_gym: false
+  arc_agi:
+    exact_weight: 1.0
+    cell_weight: 0.20
+    edit_weight: 0.10
+    color_weight: 0.05
+    extraneous_color_weight: 0.05
+    shape_weight: 0.05
+    format_weight: 0.05
+
+checkpointing:
+  enabled: true
+  metric_name: "val:accuracy"
+  save_period: 10
+  keep_top_k: 2
+
+logger:
+  monitor_gpus: true
+  num_val_samples_to_print: 4
