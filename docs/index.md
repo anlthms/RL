@@ -226,6 +226,13 @@ Tools and techniques for debugging distributed Ray applications and RL training 
 OpenTelemetry traces and `rl.*` metrics via nemo-lens: span groups, configuration, vLLM tracing, and an OTLP export stack.
 :::
 
+:::{grid-item-card} {octicon}`stopwatch` Hang Watchdog
+:link: run-watchdog
+:link-type: doc
+
+Automatically cancel a Slurm job whose GPUs have gone idle, capturing per-rank stacks and GPU state first.
+:::
+
 :::{grid-item-card} {octicon}`zap` FP8 Quantization
 :link: fp8
 :link-type: doc
@@ -351,6 +358,7 @@ ci-cd.md
 testing.md
 documentation.md
 debugging.md
+run-watchdog.md
 nsys-profiling.md
 fp8.md
 guides/use-custom-vllm.md

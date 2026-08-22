@@ -61,3 +61,8 @@ code_snapshots*/
 # Named rather than ignoring the directory shape: tests/test_suites/llm/
 # performance/ sits at that depth and is tracked.
 /tests/test_suites/**/metrics.json
+
+# Watchdog + NCCL flight-recorder artifacts (per-job, local only)
+*-watchdog.log
+*-hang/
+nccl_traces/
