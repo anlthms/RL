@@ -4117,6 +4117,7 @@ def validate(
         )
 
         total_rewards = []
+        total_reward_terms: dict[str, list[float]] = {}
         total_lengths = []
         all_message_logs = []  # Collect all message logs
 
@@ -4208,6 +4209,20 @@ def validate(
             total_rewards.extend(val_batch["total_reward"].tolist())
             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
 
+            # An environment may attach a per-sample "terms" dict to its
+            # metadata to break a shaped reward back down into its components.
+            # Without this, `accuracy` below is just the mean *shaped* reward,
+            # which conflates "solved it" with "got close" -- for ARC-AGI that
+            # is the difference between the headline score and the metric that
+            # actually moves early. Environments that don't populate "terms"
+            # are unaffected.
+            for env_info in val_batch.get("extra_env_info", []):
+                if isinstance(env_info, dict) and isinstance(
+                    env_info.get("terms"), dict
+                ):
+                    for name, value in env_info["terms"].items():
+                        total_reward_terms.setdefault(name, []).append(value)
+
             # Collect message logs for later display
             to_env = [
                 get_keys_from_message_log(
@@ -4248,6 +4263,11 @@ def validate(
         val_metrics = {
             "accuracy": accuracy,
             "avg_length": avg_length,
+            **{
+                name: sum(values) / len(values)
+                for name, values in total_reward_terms.items()
+                if values
+            },
             **additional_metrics_to_report,
         }
         if pass_k is not None:
