@@ -30,6 +30,11 @@ policy:
     max_new_tokens: 6144
   sequence_packing:
     train_mb_tokens: 12288
+    # Pinned with the train pack rather than inheriting max_total (20480): a
+    # run hung at the colocated engine-pause -> logprob boundary the first
+    # time logprob packs inherited the 20480 engine ceiling. Training samples
+    # are <= ~10.4k tokens, so 12288 loses nothing.
+    logprob_mb_tokens: 12288
 
 data:
   _override_: true
