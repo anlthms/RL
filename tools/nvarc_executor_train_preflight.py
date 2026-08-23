@@ -13,10 +13,10 @@
 # limitations under the License.
 """Resolve and validate the NVARC executor training recipe.
 
-Mirrors ``tools/arc_executor_train_preflight.py`` for the NVARC data source:
-same batch/sequence/checkpoint checks, plus split-isolation and difficulty-
-bucket coverage over the ingested parquet instead of the paraphrase checks
-that only exist for the synthetic generator.
+Checks the batch/sequence/checkpoint arithmetic, the NVARC training pool
+(bucket coverage, no repeated (puzzle, input) rows), and the validation
+wiring: validation must be solely the real ARC-AGI-2 evaluation split,
+presented as induction rows with its own prompt and processor.
 """
 
 from __future__ import annotations
@@ -70,11 +70,19 @@ def main() -> None:
             "policy.train_global_batch_size must equal prompts per step x "
             f"generations per prompt ({expected_global_batch})"
         )
+    # The pack ceiling is deliberately below max_total_sequence_length: the
+    # engine ceiling is sized for real-ARC validation prompts, which are never
+    # trained on. A training microbatch still has to hold a full response.
     if (
         policy["sequence_packing"]["train_mb_tokens"]
-        < policy["max_total_sequence_length"]
+        <= policy["generation"]["max_new_tokens"]
     ):
-        errors.append("train_mb_tokens is smaller than max_total_sequence_length")
+        errors.append("train_mb_tokens cannot hold even one full response")
+    if (
+        policy["sequence_packing"]["train_mb_tokens"]
+        > policy["max_total_sequence_length"]
+    ):
+        errors.append("train_mb_tokens exceeds max_total_sequence_length")
     if resolved["cluster"]["num_nodes"] != args.nodes:
         errors.append(
             f"recipe resolves {resolved['cluster']['num_nodes']} nodes but --nodes is {args.nodes}"
@@ -85,12 +93,35 @@ def main() -> None:
         errors.append("executor recipe must use arc_executor_data_processor")
     if data["default"]["prompt_file"] != "examples/prompts/nvarc_executor.txt":
         errors.append("NVARC recipe must use the color-legend executor prompt")
-    if data["validation"] is not None:
-        errors.append("executor validation must use only its held-out puzzle split")
     if not checkpointing["enabled"]:
         errors.append("executor training must save checkpoints for re-benchmarking")
-    if checkpointing["metric_name"] != "val:accuracy":
-        errors.append("executor checkpoints must select on val:accuracy")
+    if checkpointing["metric_name"] != "val:cell_match":
+        errors.append(
+            "checkpoints must select on val:cell_match (real-split exact match "
+            "sits at ~0 for a long time)"
+        )
+
+    # Validation must be solely the real ARC-AGI-2 evaluation split.
+    if data["train"].get("num_val_tasks") != 0:
+        errors.append(
+            "data.train.num_val_tasks must be 0: validation runs solely on the "
+            "real ARC evaluation split"
+        )
+    validation = data.get("validation")
+    if not isinstance(validation, list) or len(validation) != 1:
+        errors.append("data.validation must be a single-entry list")
+        validation = []
+    for entry in validation:
+        if entry.get("dataset_name") != "arc_agi":
+            errors.append("validation dataset must be arc_agi")
+        if entry.get("split") != "evaluation" or entry.get("validation_split") != (
+            "evaluation"
+        ):
+            errors.append("validation must read only the evaluation files")
+        if entry.get("prompt_file") != "examples/prompts/arc_agi.txt":
+            errors.append("real-ARC validation must use the induction prompt")
+        if entry.get("processor") != "arc_agi_data_processor":
+            errors.append("real-ARC validation must use arc_agi_data_processor")
 
     try:
         curriculum = NvArcExecutorConfig(**data["train"])
@@ -103,11 +134,10 @@ def main() -> None:
     dataset = load_response_dataset(cast(ResponseDatasetConfig, train_config))
     if dataset.task_name != TASK_NAME:
         errors.append(f"loaded unexpected task {dataset.task_name!r}")
+    if dataset.val_dataset is not None:
+        errors.append("NVARC-side validation split must be disabled")
 
     train_ids = dataset.dataset["task_id"]
-    val_ids = dataset.val_dataset["task_id"]
-    if set(train_ids) & set(val_ids):
-        errors.append("training and held-out executor puzzles overlap")
     # A puzzle may legitimately recur with different pairs, but an identical
     # (puzzle, input) row means a bucket cycled through every pair of every
     # puzzle -- the dataset is too small for the configured num_tasks.
@@ -115,8 +145,7 @@ def main() -> None:
     if len(set(train_rows)) != len(train_rows):
         errors.append("training repeats a (puzzle, input) pair; reduce num_tasks")
 
-    bucket_counts = collections.Counter(dataset.dataset["level"])
-    val_bucket_counts = collections.Counter(dataset.val_dataset["level"])
+    bucket_counts = collections.Counter(dataset.dataset["bucket"])
     if curriculum is not None:
         buckets = set(range(1, len(curriculum.bucket_edges) + 2))
         if set(bucket_counts) != buckets:
@@ -124,16 +153,17 @@ def main() -> None:
                 f"training covers buckets {sorted(bucket_counts)} but the config "
                 f"defines {sorted(buckets)}"
             )
-        if set(val_bucket_counts) != buckets:
-            errors.append(
-                f"validation covers buckets {sorted(val_bucket_counts)} but the "
-                f"config defines {sorted(buckets)}"
-            )
-    val_count = len(dataset.val_dataset)
+
+    val_count = 0
+    for entry in validation:
+        val_config = dict(entry)
+        update_single_dataset_config(val_config, data["default"])
+        val_data = load_response_dataset(cast(ResponseDatasetConfig, val_config))
+        val_count += len(val_data.dataset)
     scored = grpo["max_val_samples"] // grpo["val_batch_size"] * grpo["val_batch_size"]
     if scored != val_count:
         errors.append(
-            f"validation scores {scored} rows but the held-out split has {val_count}"
+            f"validation scores {scored} rows but the real split has {val_count}"
         )
 
     print(f"config: {args.config}")
@@ -146,12 +176,12 @@ def main() -> None:
     print(
         "sequence: "
         f"{policy['max_total_sequence_length']} total / "
+        f"{policy['sequence_packing']['train_mb_tokens']} train pack / "
         f"{policy['generation']['max_new_tokens']} generated"
     )
     print(f"train: {len(dataset.dataset)} rows over {len(set(train_ids))} puzzles")
     print(f"train buckets: {dict(sorted(bucket_counts.items()))}")
-    print(f"validation: {val_count} held-out rows, {scored} scored")
-    print(f"validation buckets: {dict(sorted(val_bucket_counts.items()))}")
+    print(f"validation: {val_count} real ARC-AGI-2 rows, {scored} scored")
     print(
         "checkpointing: "
         f"every {checkpointing['save_period']} steps, "

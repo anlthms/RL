@@ -92,20 +92,22 @@ def test_nemo_gym_data_processor_without_task_data_spec():
     assert result["idx"] == 3
     assert result["task_name"] == "nemo_gym"
     assert result["length"] == 0
+
+
 def test_arc_executor_processor_keeps_target_out_of_the_prompt():
     datum = {
-        "task_name": "arc_executor",
+        "task_name": "nvarc_executor",
         "task_id": "executor-test",
         "transform_description": "Reflect the grid left-to-right.",
         "test_input": [[0, 1], [2, 3]],
         "target": [[9, 9], [9, 9]],
-        "level": 1,
+        "bucket": 1,
     }
     output = arc_executor_data_processor(
         datum_dict=datum,
         task_data_spec=TaskDataSpec(
-            task_name="arc_executor",
-            prompt_file="examples/prompts/arc_executor.txt",
+            task_name="nvarc_executor",
+            prompt_file="examples/prompts/nvarc_executor.txt",
             system_prompt_file=None,
         ),
         tokenizer=DummyTokenizer(),

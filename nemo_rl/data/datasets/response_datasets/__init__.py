@@ -16,7 +16,7 @@ from functools import partial
 
 from nemo_rl.data import ResponseDatasetConfig
 from nemo_rl.data.datasets.response_datasets.aime import AIMEDataset
-from nemo_rl.data.datasets.response_datasets.arc_executor import ArcExecutorDataset
+from nemo_rl.data.datasets.response_datasets.arc_agi import ArcAgiDataset
 from nemo_rl.data.datasets.response_datasets.arrow_text_dataset import ArrowTextDataset
 from nemo_rl.data.datasets.response_datasets.audiomcq import AudioMCQDataset
 from nemo_rl.data.datasets.response_datasets.avqa import AVQADataset
@@ -64,7 +64,7 @@ from nemo_rl.data.datasets.utils import (
 DATASET_REGISTRY = {
     # built-in datasets
     "audiomcq": AudioMCQDataset,
-    "arc_executor": ArcExecutorDataset,
+    "arc_agi": ArcAgiDataset,
     "nvarc_executor": NvArcExecutorDataset,
     "arrow_text": ArrowTextDataset,
     "avqa": AVQADataset,
@@ -147,7 +147,7 @@ def load_response_dataset(data_config: ResponseDatasetConfig):
 
 __all__ = [
     "AudioMCQDataset",
-    "ArcExecutorDataset",
+    "ArcAgiDataset",
     "ArrowTextDataset",
     "AVQADataset",
     "AIMEDataset",

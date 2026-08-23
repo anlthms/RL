@@ -1,18 +1,16 @@
-# Four-node/16-GPU NVARC executor GRPO. Same TP4 topology as the synthetic
-# arc_executor recipe; sequence lengths stay at 8192/4096 pending the Phase-0
-# token-stat review (NVARC rules are longer than the synthetic oracle text).
+# Four-node/16-GPU NVARC executor GRPO. TP4 topology; the sequence budget
+# (20480 engine ceiling for real-ARC validation prompts, 12288 training
+# microbatch, 6144 generated) lives in env_nvarc_executor.yaml.
 defaults:
   - nanov3_colocated.yaml
   - env_nvarc_executor.yaml
 
 grpo:
-  max_num_steps: 20
+  max_num_steps: 40
   num_prompts_per_step: 32
 
 policy:
   train_global_batch_size: 512
-  sequence_packing:
-    train_mb_tokens: ${policy.max_total_sequence_length}
   make_sequence_length_divisible_by: 8
   megatron_cfg:
     tensor_model_parallel_size: 4

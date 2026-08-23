@@ -343,13 +343,14 @@ The fixed 172-row real ARC-AGI-2 validation subset remains the campaign's author
 Run the stage-3 measurement against an OpenAI-compatible chat-completions endpoint from a compute node:
 
 ```bash
-uv run tools/arc_executor_benchmark.py \
+uv run tools/nvarc_executor_benchmark.py \
   --base-url http://127.0.0.1:10240/v1 \
   --model <served-model-name> \
-  --output reports/arc_executor_benchmark.json
+  --data-dir <nvarc-ingested-dir> \
+  --output reports/nvarc_executor_benchmark.json
 ```
 
-The default benchmark uses 150 deterministic held-out tasks across levels 1-5 and all three description paraphrases. It records complete audit traces in the output file. The provisional go/no-go gate is 95% exact grids and at least 99% format validity after at most one formatting retry.
+The default benchmark uses 150 deterministic held-out NVARC puzzles (one pair each, sampled by seed from the executor_val pool). It records complete audit traces in the output file. The provisional go/no-go gate is 95% exact grids and at least 99% format validity after at most one formatting retry.
 
 ## Open questions
 
