@@ -18,8 +18,7 @@
 # Each supported environment has a config at
 # examples/configs/async/nanov3_<env>_<topology>.yaml.
 #
-#   ENV       gym                         NeMo-Gym servers
-#             arc_executor_4n             oracle-description executor training
+#   ENV       rl_blend                    RL-blend dataset over NeMo-Gym servers
 #             nvarc_executor_4n           NVARC-description executor training
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
@@ -53,12 +52,12 @@ case "${TOPOLOGY}" in
   *) die "usage: bash launch_experiment.sh colocated|non_colocated" ;;
 esac
 
-ENV="${ENV:-gym}"
+ENV="${ENV:-rl_blend}"
 case "${ENV}" in
-  gym | arc_executor_4n | nvarc_executor_4n) ;;
-  *) die "invalid ENV: ${ENV} (expected gym, arc_executor_4n, or nvarc_executor_4n)" ;;
+  rl_blend | nvarc_executor_4n) ;;
+  *) die "invalid ENV: ${ENV} (expected rl_blend or nvarc_executor_4n)" ;;
 esac
-if [[ "${ENV}" == *arc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
+if [[ "${ENV}" == nvarc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
   die "${ENV} supports only colocated topology"
 fi
 
@@ -113,11 +112,11 @@ if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
 fi
 
 # ------------------------------------------- entrypoint, config, setup -----
-# The gym path drives rollouts through NeMo-Gym HTTP servers and needs its own
-# entrypoint; everything else runs on the standard one.
+# The RL-blend path drives rollouts through NeMo-Gym HTTP servers and needs its
+# own entrypoint; everything else runs on the standard one.
 case "${ENV}" in
-  gym) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  *)   ENTRYPOINT="examples/run_grpo.py" ;;
+  rl_blend) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
+  *)        ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
@@ -141,7 +140,7 @@ fi
 # NRL_MEGATRON_CHECKPOINT_DIR caches the one-time HF -> Megatron conversion.
 # NCCL_GRAPH_MIXING_SUPPORT=1 lets NCCL safely mix graph-captured decode collectives
 # with eager training collectives on the shared colocated communicator.
-# HF_HOME must be on shared storage: OpenMathInstruct-2's mmap'd Arrow cache is
+# HF_HOME must be on shared storage: HF Arrow caches are mmap'd and can be
 # pickled to a collector on another node, so node-local /root/.cache would miss.
 # NEMO_GYM_VENV_DIR is assigned inline rather than exported: the image sets it in
 # its own ENV, which enroot applies over anything inherited from the job. It also

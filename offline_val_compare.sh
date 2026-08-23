@@ -37,7 +37,7 @@ cd "$(dirname "$0")"
 
 [ "$#" -ge 1 ] || { echo "usage: bash offline_val_compare.sh <label>:<dir>:<samples_per_step> ..." >&2; exit 1; }
 
-CONFIG="${CONFIG:-examples/configs/async/nanov3_gym_non_colocated.yaml}"
+CONFIG="${CONFIG:-examples/configs/async/nanov3_rl_blend_non_colocated.yaml}"
 WANDB_NAME="${WANDB_NAME:-offlineval_compare}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT

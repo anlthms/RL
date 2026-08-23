@@ -1,5 +1,5 @@
 # nano-v3 30B-A3B, gym env, colocated async GRPO (Megatron inference).
-# Launch: ENV=gym bash launch_experiment.sh colocated
+# Launch: ENV=rl_blend bash launch_experiment.sh colocated
 defaults:
   - nanov3_colocated.yaml
-  - env_gym.yaml
+  - env_rl_blend.yaml
