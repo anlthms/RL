@@ -67,11 +67,11 @@ def test_rows_carry_the_arc_executor_schema(tmp_path) -> None:
         "transform_description",
         "test_input",
         "target",
-        "level",
+        "bucket",
         "difficulty",
     }
     assert row["transform_description"].startswith("<rules_summary>")
-    assert 1 <= row["level"] <= 4
+    assert 1 <= row["bucket"] <= 4
 
 
 def test_splits_never_cross_pools(tmp_path) -> None:
@@ -111,14 +111,20 @@ def test_ramp_orders_buckets_easy_to_hard(tmp_path) -> None:
         difficulty_ramp_window=8,
         difficulty_ramp_steps=3,
     )
-    levels = dataset.dataset["level"]
-    windows = [levels[index : index + 8] for index in range(0, 24, 8)]
+    buckets = dataset.dataset["bucket"]
+    windows = [buckets[index : index + 8] for index in range(0, 24, 8)]
     # Every window keeps every bucket.
     for window in windows:
         assert set(window) == {1, 2, 3, 4}
     # The weighting moves from the easiest bucket toward the hardest.
     assert windows[0].count(1) > windows[-1].count(1)
     assert windows[-1].count(4) > windows[0].count(4)
+
+
+def test_zero_val_tasks_disables_the_validation_split(tmp_path) -> None:
+    dataset = _dataset(tmp_path, num_val_tasks=0)
+    assert dataset.val_dataset is None
+    assert len(dataset.dataset) == 24
 
 
 def test_rejects_shared_seed(tmp_path) -> None:

@@ -1,20 +1,35 @@
 # Single-turn executor training on NVARC descriptions. The model receives a
 # canonical 4-section NVARC rule plus one unseen input grid and is rewarded
 # only for applying it. Data comes from the offline tools/nvarc_ingest.py
-# parquet (train/executor_val pools split by puzzle id; every nvarc_full
-# puzzle is seeded from an ARC-AGI-2 evaluation task and quarantined there).
+# parquet (train pool split by puzzle id; every nvarc_full puzzle is seeded
+# from an ARC-AGI-2 evaluation task and quarantined as split=excluded).
+#
+# Validation is solely the official ARC-AGI-2 evaluation split: 120 tasks /
+# 172 test-pair rows, presented as induction tasks (train pairs, no rule
+# text) and scored by the same arc_agi environment, so grid match, cell
+# match, and the reward are tracked on the campaign's authoritative metric
+# every val_period steps. NVARC-side validation is disabled
+# (num_val_tasks: 0).
 
 grpo:
   val_at_start: true
   val_at_end: true
   val_period: 10
-  max_val_samples: 150
-  val_batch_size: 30
+  # All 172 real rows, nothing else. 43 divides 172 exactly.
+  max_val_samples: 172
+  val_batch_size: 43
 
 policy:
-  max_total_sequence_length: 8192
+  # Sized for the real validation prompts, not the training pack: the largest
+  # evaluation-row induction prompt is ~16.3k tokens and the engine's
+  # max_model_len interpolates from this value. Training samples stay small
+  # (task-body p99 is 3.8k tokens + 6144 generated), so the training
+  # microbatch is pinned separately via sequence_packing.train_mb_tokens.
+  max_total_sequence_length: 20480
   generation:
-    max_new_tokens: 4096
+    max_new_tokens: 6144
+  sequence_packing:
+    train_mb_tokens: 12288
 
 data:
   _override_: true
@@ -26,18 +41,30 @@ data:
     dataset_name: nvarc_executor
     data_dir: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-ingested/v1
     # Inclusive upper edges on max grid area; areas above the last edge form
-    # the fifth bucket. Reported as level_1..level_5 validation metrics.
-    # These are the ingested-v1 train-split quintiles (max-over-pairs area
-    # saturates near 900 for half the corpus, so equal-mass edges beat round
-    # numbers).
-    bucket_edges: [380, 700, 783, 840]
+    # the tenth bucket. Reported as bucket_1..bucket_10 metrics. These are
+    # the ingested-v1 train-split deciles: max-over-pairs area saturates near
+    # 900 for half the corpus, so equal-mass edges beat round numbers, and
+    # ten buckets give the ramp a genuinely easy opening decile (area <= 162).
+    bucket_edges: [162, 380, 621, 700, 750, 783, 810, 840, 870]
     difficulty_ramp_window: ${grpo.num_prompts_per_step}
     difficulty_ramp_steps: ${grpo.max_num_steps}
     num_tasks: 4096
-    num_val_tasks: 150
+    # NVARC-side validation off: validation runs solely on the real split.
+    num_val_tasks: 0
     seed: ${grpo.seed}
     val_seed: 1000000
-  validation: null
+  validation:
+    # The real ARC-AGI-2 evaluation split. split == validation_split so only
+    # the evaluation files are read; the 1000-task training file is not
+    # needed here. Carries its own prompt/processor: these are induction
+    # rows (train pairs shown, rule withheld), not executor rows.
+    - dataset_name: arc_agi
+      data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/ash/data/arc-prize-2025
+      split: evaluation
+      validation_split: evaluation
+      prompt_file: "examples/prompts/arc_agi.txt"
+      processor: "arc_agi_data_processor"
+      env_name: "arc_agi"
   default:
     prompt_file: "examples/prompts/nvarc_executor.txt"
     system_prompt_file: null
@@ -58,7 +85,9 @@ env:
 
 checkpointing:
   enabled: true
-  metric_name: "val:accuracy"
+  # Real-split exact match sits at ~0 for a long time, so select checkpoints
+  # on cell match, which moves first. Grid match is still logged.
+  metric_name: "val:cell_match"
   save_period: 10
   keep_top_k: 2
 

@@ -4,7 +4,7 @@ transformation.
 
 Each grid is written one row per line with cells separated by single spaces.
 Cells are integer colors: 0=black, 1=blue, 2=red, 3=green, 4=yellow, 5=gray,
-6=magenta, 7=orange, 8=sky/azure, 9=brown/maroon.
+6=fuchsia, 7=orange, 8=teal, 9=brown.
 
 {}
 

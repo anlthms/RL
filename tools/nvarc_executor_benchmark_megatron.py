@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Run the ARC executor benchmark on an inference-only Megatron backend."""
+"""Run the NVARC executor benchmark on an inference-only Megatron backend."""
 
 from __future__ import annotations
 
@@ -40,7 +40,11 @@ from nemo_rl.utils.config import (
     parse_hydra_overrides,
     register_omegaconf_resolvers,
 )
-from tools.arc_executor_benchmark import BenchmarkConfig, execute_benchmark
+from tools.nvarc_executor_benchmark import (
+    DEFAULT_BUCKET_EDGES,
+    BenchmarkConfig,
+    execute_benchmark,
+)
 
 
 class ExecutorMCoreConfig(MCoreGenerationSpecificArgs):
@@ -71,24 +75,15 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--seed", type=int, default=93_821)
     parser.add_argument("--count", type=int, default=150)
-    parser.add_argument("--levels", type=_comma_separated_ints, default=(1, 2, 3, 4, 5))
-    parser.add_argument("--paraphrases", type=_comma_separated_ints, default=(0, 1, 2))
-    parser.add_argument("--num-train-pairs", type=int, default=3)
-    parser.add_argument("--max-input-dim", type=int, default=12)
-    parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--split", default="executor_val")
+    parser.add_argument(
+        "--bucket-edges", type=_comma_separated_ints, default=DEFAULT_BUCKET_EDGES
+    )
+    parser.add_argument("--max-output-tokens", type=int, default=6144)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument(
-        "--task-source", choices=("synthetic", "nvarc"), default="synthetic"
-    )
-    parser.add_argument("--nvarc-data-dir", default=None)
-    parser.add_argument("--nvarc-split", default="executor_val")
-    parser.add_argument(
-        "--nvarc-bucket-edges",
-        type=_comma_separated_ints,
-        default=(380, 700, 783, 840),
-    )
     args, overrides = parser.parse_known_args()
     return args, overrides
 
@@ -148,7 +143,7 @@ def _build_generation(
 
     cluster_config = config.cluster
     generation_cluster = RayVirtualCluster(
-        name="arc_executor_megatron_cluster",
+        name="nvarc_executor_megatron_cluster",
         bundle_ct_per_node_list=[gpus_per_node],
         use_gpus=True,
         num_gpus_per_node=gpus_per_node,
@@ -164,7 +159,7 @@ def _build_generation(
         config=config.policy,
         tokenizer=tokenizer,
         cluster=generation_cluster,
-        name_prefix="arc_executor_megatron",
+        name_prefix="nvarc_executor_megatron",
         weights_path=str(weights_path) if weights_path is not None else None,
     )
 
@@ -210,7 +205,7 @@ def main() -> None:
     )
     generation: MegatronGeneration | None = None
     try:
-        ray_log_dir = Path("/tmp") / f"arc_executor_ray_{os.getpid()}"
+        ray_log_dir = Path("/tmp") / f"nvarc_executor_ray_{os.getpid()}"
         generation = _build_generation(
             config,
             log_dir=ray_log_dir,
@@ -233,18 +228,13 @@ def main() -> None:
             model=config.policy["model_name"],
             seed=args.seed,
             count=args.count,
-            levels=args.levels,
-            paraphrases=args.paraphrases,
-            num_train_pairs=args.num_train_pairs,
-            max_input_dim=args.max_input_dim,
+            data_dir=args.data_dir,
+            split=args.split,
+            bucket_edges=args.bucket_edges,
             max_output_tokens=args.max_output_tokens,
             concurrency=args.concurrency,
             timeout_seconds=args.timeout_seconds,
             temperature=args.temperature,
-            task_source=args.task_source,
-            nvarc_data_dir=args.nvarc_data_dir,
-            nvarc_split=args.nvarc_split,
-            nvarc_bucket_edges=args.nvarc_bucket_edges,
         )
         report = execute_benchmark(
             benchmark_config,

@@ -30,7 +30,7 @@ from nemo_rl.data.interfaces import (
     VLMMessageLogType,
 )
 from nemo_rl.data.llm_message_utils import get_formatted_message_log
-from nemo_rl.environments.arc_agi_grid import serialize_grid
+from nemo_rl.environments.arc_agi_grid import format_task_prompt, serialize_grid
 
 TokenizerType = PreTrainedTokenizerBase
 
@@ -460,8 +460,8 @@ def _arc_grid_data_processor(
         # test input, so it needs the input itself, not just the target.
         "test_input": datum_dict["test_input"],
         "task_id": datum_dict["task_id"],
-        # Carried so executor training can report per-level metrics.
-        "level": datum_dict["level"],
+        # Carried so the environment can report per-difficulty-bucket metrics.
+        "bucket": datum_dict["bucket"],
         "terms": None,
     }
 
@@ -508,6 +508,31 @@ def _arc_grid_data_processor(
         "task_name": datum_dict["task_name"],
     }
     return output
+
+
+def arc_agi_data_processor(
+    datum_dict: dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int,
+    idx: int,
+) -> DatumSpec:
+    """Process a real ARC induction row (few-shot pairs, no rule text).
+
+    Used for validation on the official ARC-AGI-2 evaluation split: the model
+    sees the task's train pairs and one test input, and must induce and apply
+    the rule itself. Scored by the same ``arc_agi`` environment as executor
+    rows.
+    """
+    task_body = format_task_prompt(datum_dict["train_pairs"], datum_dict["test_input"])
+    return _arc_grid_data_processor(
+        datum_dict,
+        task_data_spec,
+        tokenizer,
+        max_seq_length,
+        idx,
+        task_body=task_body,
+    )
 
 
 def arc_executor_data_processor(
@@ -968,6 +993,7 @@ PROCESSOR_REGISTRY: Dict[str, TaskDataProcessFnCallable] = cast(
         "helpsteer3_data_processor": helpsteer3_data_processor,
         "kd_data_processor": kd_data_processor,
         "math_data_processor": math_data_processor,
+        "arc_agi_data_processor": arc_agi_data_processor,
         "arc_executor_data_processor": arc_executor_data_processor,
         "math_hf_data_processor": math_hf_data_processor,
         "multichoice_qa_processor": multichoice_qa_processor,
