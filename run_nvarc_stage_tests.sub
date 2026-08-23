@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --partition=cpu
+#SBATCH --qos=cpu-normal
+#SBATCH --cpus-per-task=8
+#SBATCH --time=00:30:00
+#SBATCH --job-name=nemotron_sw_post:nvarc-stage-tests
+#SBATCH --account=nemotron_sw_post
+#SBATCH --output=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/RL7/reports/nvarc_stage_tests.log
+
+set -euo pipefail
+
+REPO=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/RL7
+CONTAINER=/lustre/fs1/portfolios/llmservice/projects/llmservice_fm_text/users/tene/nemo_rl_0804.sqsh
+ROOT_VENV=/opt/nemo_rl_venv
+MOUNTS="/lustre:/lustre,/home:/home,${REPO}:/opt/nemo-rl"
+
+srun --no-container-mount-home \
+  --container-image="${CONTAINER}" \
+  --container-mounts="${MOUNTS}" \
+  --container-workdir="${REPO}" \
+  bash -c "
+set -euo pipefail
+'${ROOT_VENV}/bin/python' -m pytest -q -p no:cacheprovider --no-header \
+  -p no:randomly --tb=long -rf --maxfail=100 \
+  tests/unit/environments/test_arc_agi_grid.py \
+  tests/unit/environments/test_arc_agi_environment.py \
+  tests/unit/environments/test_arc_agi_generators.py \
+  tests/unit/data/datasets/test_arc_executor_dataset.py \
+  tests/unit/data/datasets/test_nvarc_executor_dataset.py \
+  tests/unit/tools/test_nvarc_ingest.py \
+  tests/unit/tools/test_arc_executor_benchmark.py
+
+'${ROOT_VENV}/bin/ruff' check \
+  tools/nvarc_ingest.py \
+  tools/arc_executor_benchmark.py \
+  tools/arc_executor_benchmark_megatron.py \
+  tools/nvarc_executor_train_preflight.py \
+  nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
+  tests/unit/tools/test_nvarc_ingest.py \
+  tests/unit/data/datasets/test_nvarc_executor_dataset.py \
+  tests/unit/tools/test_arc_executor_benchmark.py
+
+'${ROOT_VENV}/bin/ruff' format --check \
+  tools/nvarc_ingest.py \
+  tools/arc_executor_benchmark.py \
+  tools/nvarc_executor_train_preflight.py \
+  nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
+  tests/unit/tools/test_nvarc_ingest.py \
+  tests/unit/data/datasets/test_nvarc_executor_dataset.py
+
+'${ROOT_VENV}/bin/pyrefly' check \
+  tools/nvarc_ingest.py \
+  nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
+  tools/arc_executor_benchmark.py \
+  tools/arc_executor_benchmark_megatron.py
+
+echo ALL_STAGE_CHECKS_PASSED
+"
