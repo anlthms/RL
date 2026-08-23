@@ -272,6 +272,7 @@ project-includes = [
   "tools/arc_executor_benchmark.py",
   "tools/arc_executor_benchmark_megatron.py",
   "tools/arc_executor_train_preflight.py",
+  "tools/nvarc_executor_train_preflight.py",
   "tools/model_diagnostics/1.max_model_len_respected.py",
   "tools/model_diagnostics/2.long_generation_decode_vs_prefill.py",
   "tools/model_diagnostics/3.check_and_reinit_hf_model_embeddings_untrained.py",
