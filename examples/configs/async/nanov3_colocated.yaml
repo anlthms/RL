@@ -29,8 +29,13 @@ policy:
       # forward fits without activation_checkpointing (which cuda_graph_impl=local
       # forbids). Uses mcore's torch_memory_saver (launcher SETUP_COMMAND).
       kv_cache_management_mode: "offload"
+      # Must match megatron_cfg's TP below (one dual-mode model).
+      tensor_model_parallel_size: 1
 
   megatron_cfg:
+    # TP=1 (base is TP=2): matches the throughput reference run (5906745,
+    # "tp1ep4"); TP=2 costs ~1.8x more GPU-time per token on this model.
+    tensor_model_parallel_size: 1
     transformer_impl: "inference_optimized"
     # Inference kernels (mirror the dedicated non-colocated model).
     inference_moe_token_dispatcher_type: "nccl"
