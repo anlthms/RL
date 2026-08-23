@@ -81,10 +81,10 @@ add_override "policy.generation.backend=megatron"
 add_override "cluster.num_nodes=${NUM_ACTOR_NODES}"
 add_override "logger.wandb.name=${RUN_NAME}"
 add_override "+logger.wandb.entity=${WANDB_ENTITY:-adlr}"
-# Non-colocated reshards weights over the network: nvshmem is proven stable at
-# <=4 generation nodes, while nccl hangs the reshard there. Colocated shares
-# weights in-process (CUDA-IPC), so the backend is a no-op.
-add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
+# Weight-refit backend, applied to both arms (a no-op when colocated: weights
+# are shared in-process). nvshmem delivers corrupt weights on this stack
+# (NVIDIA-NeMo/RL#3646); nccl is the upstream default since #3609.
+add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nccl}"
 [[ -n "${WANDB_PROJECT:-}" ]] && add_override "logger.wandb.project=${WANDB_PROJECT}"
 [[ -n "${MAX_STEPS:-}" ]] && add_override "grpo.max_num_steps=${MAX_STEPS}"
 
