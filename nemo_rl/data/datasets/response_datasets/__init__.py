@@ -43,6 +43,7 @@ from nemo_rl.data.datasets.response_datasets.nemotron_cascade2_sft import (
     NemotronCascade2SFTMathDataset,
 )
 from nemo_rl.data.datasets.response_datasets.numinamath import NuminaMath15Dataset
+from nemo_rl.data.datasets.response_datasets.nvarc_executor import NvArcExecutorDataset
 from nemo_rl.data.datasets.response_datasets.oai_format_dataset import (
     OpenAIFormatDataset,
 )
@@ -64,6 +65,7 @@ DATASET_REGISTRY = {
     # built-in datasets
     "audiomcq": AudioMCQDataset,
     "arc_executor": ArcExecutorDataset,
+    "nvarc_executor": NvArcExecutorDataset,
     "arrow_text": ArrowTextDataset,
     "avqa": AVQADataset,
     "AIME2024": partial(AIMEDataset, variant="2024"),
@@ -167,6 +169,7 @@ __all__ = [
     "OpenAIFormatDataset",
     "OpenMathInstruct2Dataset",
     "NuminaMath15Dataset",
+    "NvArcExecutorDataset",
     "OpenR1Math220KDataset",
     "RefCOCODataset",
     "ResponseDataset",
