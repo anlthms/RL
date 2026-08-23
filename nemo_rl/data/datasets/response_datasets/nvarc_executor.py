@@ -13,13 +13,12 @@
 # limitations under the License.
 """Single-grid executor rows sourced from the ingested NVARC dataset.
 
-Rows carry the same schema as ``arc_executor`` (``task_name``, ``task_id``,
-``transform_description``, ``test_input``, ``target``, ``level``) so the
-``arc_executor_data_processor`` and ``ArcAgiEnvironment`` run unchanged. The
-rule text is the canonical 4-section NVARC description produced by
-``tools/nvarc_ingest.py``; ``level`` is a 1-indexed max-grid-area bucket (the
-proposal's initial difficulty proxy) rather than a generator ladder level, so
-per-level validation metrics read as per-area-bucket metrics.
+Rows carry ``task_name``, ``task_id``, ``transform_description``,
+``test_input``, ``target``, and ``bucket`` for the
+``arc_executor_data_processor`` and ``ArcAgiEnvironment``. The rule text is
+the canonical 4-section NVARC description produced by
+``tools/nvarc_ingest.py``; ``bucket`` is a 1-indexed max-grid-area bucket (the
+proposal's initial difficulty proxy), reported as ``bucket_<n>`` metrics.
 
 The train/executor-val/proposer-eval pools were split by *puzzle id* at
 ingestion time; this module never crosses them. Training rows sample
@@ -31,12 +30,14 @@ repeating one.
 import json
 import random
 from pathlib import Path
+from typing import TypeVar
 
 from datasets import Dataset
 from pydantic import BaseModel, model_validator
 
 from nemo_rl.data.datasets.raw_dataset import RawDataset
-from nemo_rl.environments.arc_agi_generators import ramped_choices
+
+ChoiceT = TypeVar("ChoiceT")
 
 TASK_NAME = "nvarc_executor"
 
@@ -49,16 +50,19 @@ class NvArcExecutorConfig(BaseModel, extra="allow"):
     Attributes:
         data_dir: Directory of ``tools/nvarc_ingest.py`` output parquet.
         num_tasks: Training rows to emit (must cover the difficulty ramp).
-        num_val_tasks: Held-out rows drawn from the ``executor_val`` pool.
+        num_val_tasks: Held-out rows drawn from the ``executor_val`` pool;
+            0 disables the NVARC-side validation split entirely (used when
+            validation runs solely on the real ARC evaluation set).
         seed: Ordering/pair-sampling seed for the training split.
         val_seed: Pair-sampling seed for validation; must differ from ``seed``.
         bucket_edges: Strictly increasing inclusive upper edges on puzzle
             difficulty (max grid area over the puzzle). Areas above the last
             edge form the final bucket, so ``len(bucket_edges) + 1`` buckets
-            exist; bucket ids are 1-indexed and reported as ``level_<n>``
+            exist; bucket ids are 1-indexed and reported as ``bucket_<n>``
             validation metrics. The defaults are the ingested v1 train-split
-            quintiles: max-over-pairs area saturates near 900 for half the
-            corpus, so equal-mass edges beat round numbers.
+            deciles: max-over-pairs area saturates near 900 for half the
+            corpus, so equal-mass edges beat round numbers, and ten buckets
+            give the ramp a genuinely easy opening decile (area <= 162).
         difficulty_ramp_window: Rows per training step (the trainer's
             ``num_prompts_per_step``); every window keeps every bucket so no
             GRPO group is uniformly hopeless. Omit for a fixed mixture.
@@ -71,7 +75,7 @@ class NvArcExecutorConfig(BaseModel, extra="allow"):
     num_val_tasks: int
     seed: int
     val_seed: int
-    bucket_edges: list[int] = [380, 700, 783, 840]
+    bucket_edges: list[int] = [162, 380, 621, 700, 750, 783, 810, 840, 870]
     difficulty_ramp_window: int | None = None
     difficulty_ramp_steps: int | None = None
 
@@ -124,6 +128,58 @@ class _PairSampler:
         return self._pairs[self._queue.pop()]
 
 
+def ramped_choices(
+    *,
+    count: int,
+    choices: list[ChoiceT],
+    multipliers: list[float],
+    window: int,
+    ramp_windows: int | None = None,
+) -> list[ChoiceT]:
+    """Reweight ordered choices while retaining all of them in every window.
+
+    Every window keeps at least one of every choice, so no batch is ever
+    uniformly hopeless or uniformly trivial. What moves is the *weighting* of
+    the remaining slots: a hump centred on the easiest choice at the start of
+    the run and the hardest at the end, scaled by each choice's multiplier.
+
+    ``window`` is the number of prompts the trainer consumes per step;
+    ``ramp_windows`` is how many steps the schedule spans. Largest-remainder
+    apportionment, so the counts sum to the window exactly.
+    """
+    if window < len(choices):
+        raise ValueError(
+            f"difficulty_ramp_window {window} is smaller than the "
+            f"{len(choices)} difficulty buckets"
+        )
+    windows = max(1, -(-count // window))
+    span = max(1, ramp_windows or windows)
+    out: list[ChoiceT] = []
+    for window_index in range(windows):
+        progress = min(window_index, span - 1) / max(span - 1, 1)
+        centre = progress * (len(choices) - 1)
+        weights = [
+            multiplier * 2.0 ** -abs(index - centre)
+            for index, multiplier in enumerate(multipliers)
+        ]
+        total = sum(weights)
+        current_size = min(window, count - window_index * window)
+        spare = max(0, current_size - len(choices))
+        exact = [spare * weight / total for weight in weights]
+        counts = [1 + int(extra) for extra in exact]
+        remainder = spare - sum(int(extra) for extra in exact)
+        order = sorted(
+            range(len(choices)),
+            key=lambda index: exact[index] - int(exact[index]),
+            reverse=True,
+        )
+        for index in order[:remainder]:
+            counts[index] += 1
+        row = [choice for choice, copies in zip(choices, counts) for _ in range(copies)]
+        out.extend(row[:current_size])
+    return out[:count]
+
+
 def _load_split(data_dir: str, split: str) -> list[dict]:
     """Read one split's rows (rule text + pairs) from the ingested parquet."""
     # Deferred import: pyarrow.dataset is only needed when this dataset is
@@ -153,7 +209,7 @@ def _to_row(puzzle: dict, pair: dict, *, bucket: int) -> dict:
         "transform_description": puzzle["canonical_rule"],
         "test_input": pair["input"],
         "target": pair["output"],
-        "level": bucket,
+        "bucket": bucket,
         "difficulty": puzzle["difficulty"],
     }
 
@@ -166,7 +222,13 @@ class NvArcExecutorDataset(RawDataset):
         self.task_name = TASK_NAME
         self.curriculum = config
         self.dataset = Dataset.from_list(self._split_rows(config, train=True))
-        self.val_dataset = Dataset.from_list(self._split_rows(config, train=False))
+        # num_val_tasks == 0 opts out of NVARC-side validation, for recipes
+        # that validate solely on the real ARC evaluation split.
+        self.val_dataset = (
+            Dataset.from_list(self._split_rows(config, train=False))
+            if config.num_val_tasks
+            else None
+        )
 
     @staticmethod
     def _split_rows(config: NvArcExecutorConfig, *, train: bool) -> list[dict]:

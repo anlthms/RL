@@ -59,7 +59,7 @@ def test_step_scores_a_batch(arc_env):
             "target": TARGET,
             "test_input": TEST_INPUT,
             "task_id": "t0",
-            "level": 1,
+            "bucket": 1,
             "terms": None,
         }
         for _ in responses
@@ -86,7 +86,7 @@ def test_step_preserves_metadata_fields(arc_env):
             "target": TARGET,
             "test_input": TEST_INPUT,
             "task_id": "abc123",
-            "level": 1,
+            "bucket": 1,
             "terms": None,
         }
     ]
@@ -106,7 +106,7 @@ def test_echoing_the_test_input_loses_to_a_real_answer(arc_env):
             "target": target,
             "test_input": test_input,
             "task_id": "t",
-            "level": 1,
+            "bucket": 1,
             "terms": None,
         }
         for _ in range(2)
@@ -122,31 +122,31 @@ def test_echoing_the_test_input_loses_to_a_real_answer(arc_env):
     assert result.rewards[1] > result.rewards[0]
 
 
-def test_terms_are_tagged_with_the_difficulty_level(arc_env):
+def test_terms_are_tagged_with_the_difficulty_bucket(arc_env):
     # Validation averages each per-sample term over the samples that reported
-    # it, so a level-tagged key *is* that level's mean with no extra plumbing.
-    # Without the split, an aggregate grid match cannot tell "solving level 0
+    # it, so a bucket-tagged key *is* that bucket's mean with no extra plumbing.
+    # Without the split, an aggregate grid match cannot tell "solving bucket 1
     # and nothing else" from "uniformly mediocre".
     metadata = [
         {
             "target": TARGET,
             "test_input": TEST_INPUT,
             "task_id": "t",
-            "level": level,
+            "bucket": bucket,
             "terms": None,
         }
-        for level in (1, 3, 5)
+        for bucket in (1, 3, 5)
     ]
     responses = [answer("12\n34"), answer("99\n99"), answer("12\n34")]
     result = ray.get(arc_env.step.remote([message_log(r) for r in responses], metadata))
-    assert result.metadata[0]["terms"]["grid_match/level_1"] == 1.0
-    assert result.metadata[1]["terms"]["grid_match/level_3"] == 0.0
-    assert result.metadata[2]["terms"]["grid_match/level_5"] == 1.0
-    # A sample only reports its own level.
-    assert "grid_match/level_3" not in result.metadata[0]["terms"]
+    assert result.metadata[0]["terms"]["grid_match/bucket_1"] == 1.0
+    assert result.metadata[1]["terms"]["grid_match/bucket_3"] == 0.0
+    assert result.metadata[2]["terms"]["grid_match/bucket_5"] == 1.0
+    # A sample only reports its own bucket.
+    assert "grid_match/bucket_3" not in result.metadata[0]["terms"]
 
 
-def test_global_metrics_are_reported_per_level(arc_env):
+def test_global_metrics_are_reported_per_bucket(arc_env):
     # Terms come from the real scorer rather than a hand-written dict: the
     # metrics function reads every term by name, so a partial dict tests the
     # test rather than the code.
@@ -160,18 +160,18 @@ def test_global_metrics_are_reported_per_level(arc_env):
         format=0.05,
     )
     scored = []
-    for level, response in ((0, "12\n34"), (0, "99\n99"), (1, "12\n34")):
+    for bucket, response in ((0, "12\n34"), (0, "99\n99"), (1, "12\n34")):
         scored.append(
             {
                 "target": TARGET,
                 "test_input": TEST_INPUT,
                 "task_id": "t",
-                "level": level,
+                "bucket": bucket,
                 "terms": score_response(answer(response), TARGET, TEST_INPUT, weights),
             }
         )
-    # Two of the three are exact, and the one at level 1 is one of them, so the
-    # aggregate and the per-level split disagree -- which is the point.
+    # Two of the three are exact, and the one in bucket 1 is one of them, so
+    # the aggregate and the per-bucket split disagree -- which is the point.
     assert [terms["terms"]["grid_match"] for terms in scored] == [1.0, 0.0, 1.0]
     batch = BatchedDataDict(
         {
@@ -188,9 +188,9 @@ def test_global_metrics_are_reported_per_level(arc_env):
     )
     _, metrics = ray.get(arc_env.global_post_process_and_metrics.remote(batch))
     assert metrics["grid_match"] == pytest.approx(2 / 3)
-    assert metrics["grid_match/level_0"] == pytest.approx(0.5)
-    assert metrics["grid_match/level_1"] == 1.0
-    assert metrics["num_problems_in_batch/level_0"] == 2
+    assert metrics["grid_match/bucket_0"] == pytest.approx(0.5)
+    assert metrics["grid_match/bucket_1"] == 1.0
+    assert metrics["num_problems_in_batch/bucket_0"] == 2
     # No real-ARC rows in this batch, so no real bucket is invented for them.
     assert "grid_match/real" not in metrics
     assert metrics["pass@samples_per_prompt"] == pytest.approx(1.0)

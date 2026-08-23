@@ -34,9 +34,15 @@ MAX_GRID_DIM = 30
 NUM_COLORS = 10
 
 
-def level_metric_suffix(level: int) -> str:
-    """Metric-key suffix for a difficulty level."""
-    return f"level_{level}"
+# Real ARC rows are off the NVARC difficulty ladder, but they carry the bucket
+# column so real and synthetic rows can share one validation set and still be
+# reported separately.
+REAL_ARC_BUCKET = -1
+
+
+def bucket_metric_suffix(bucket: int) -> str:
+    """Metric-key suffix for a difficulty (grid-area) bucket."""
+    return "real" if bucket == REAL_ARC_BUCKET else f"bucket_{bucket}"
 
 
 # Row boundary marker for edit distance. Outside 0-9 so it can never match a cell.
@@ -92,6 +98,25 @@ def _parse_row(row: str) -> list[int] | None:
     if not row.isdigit():
         return None
     return [int(char) for char in row]
+
+
+def format_task_prompt(train_pairs: list[dict[str, Grid]], test_input: Grid) -> str:
+    """Lay out the few-shot pairs and the test input as delimited text.
+
+    Plain-text tags rather than added vocabulary: new tokens would need their
+    embeddings trained from scratch, and GRPO's signal is far too sparse for
+    that.
+    """
+    blocks = []
+    for pair in train_pairs:
+        blocks.append(
+            "<example>\n"
+            f"<input>\n{serialize_grid(pair['input'])}\n</input>\n"
+            f"<output>\n{serialize_grid(pair['output'])}\n</output>\n"
+            "</example>"
+        )
+    blocks.append(f"<test_input>\n{serialize_grid(test_input)}\n</test_input>")
+    return "\n".join(blocks)
 
 
 def parse_grid(text: str) -> Grid | None:

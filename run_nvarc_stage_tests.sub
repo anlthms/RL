@@ -12,8 +12,12 @@
 set -euo pipefail
 
 REPO=/lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/RL7
-CONTAINER=/lustre/fs1/portfolios/llmservice/projects/llmservice_fm_text/users/tene/nemo_rl_0804.sqsh
-ROOT_VENV=/opt/nemo_rl_venv
+# The training container. Its /etc/environment puts /opt/nemo_rl_venv/bin on
+# PATH and sets UV_PROJECT_ENVIRONMENT, so pytest/ruff/pyrefly resolve without
+# spelling a venv path. --no-container-mount-home is load-bearing: mounting
+# the host home over /root masks the image's uv interpreter and cache, which
+# every pure-python site-package symlinks into.
+CONTAINER=/lustre/fs1/portfolios/llmservice/projects/llmservice_fm_text/users/tene/nemo_rl_0807.sqsh
 MOUNTS="/lustre:/lustre,/home:/home,${REPO}:/opt/nemo-rl"
 
 srun --no-container-mount-home \
@@ -22,39 +26,49 @@ srun --no-container-mount-home \
   --container-workdir="${REPO}" \
   bash -c "
 set -euo pipefail
-'${ROOT_VENV}/bin/python' -m pytest -q -p no:cacheprovider --no-header \
+pytest -q -p no:cacheprovider --no-header \
   -p no:randomly --tb=long -rf --maxfail=100 \
   tests/unit/environments/test_arc_agi_grid.py \
   tests/unit/environments/test_arc_agi_environment.py \
-  tests/unit/environments/test_arc_agi_generators.py \
-  tests/unit/data/datasets/test_arc_executor_dataset.py \
+  tests/unit/data/datasets/test_arc_agi_dataset.py \
   tests/unit/data/datasets/test_nvarc_executor_dataset.py \
   tests/unit/tools/test_nvarc_ingest.py \
-  tests/unit/tools/test_arc_executor_benchmark.py
+  tests/unit/tools/test_nvarc_executor_benchmark.py \
+  'tests/unit/data/test_data_processor.py::test_arc_executor_processor_keeps_target_out_of_the_prompt'
 
-'${ROOT_VENV}/bin/ruff' check \
+ruff check \
   tools/nvarc_ingest.py \
-  tools/arc_executor_benchmark.py \
-  tools/arc_executor_benchmark_megatron.py \
+  tools/nvarc_executor_benchmark.py \
+  tools/nvarc_executor_benchmark_megatron.py \
   tools/nvarc_executor_train_preflight.py \
   nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
+  nemo_rl/data/datasets/response_datasets/arc_agi.py \
+  nemo_rl/environments/arc_agi_grid.py \
+  nemo_rl/environments/arc_agi_environment.py \
   tests/unit/tools/test_nvarc_ingest.py \
   tests/unit/data/datasets/test_nvarc_executor_dataset.py \
-  tests/unit/tools/test_arc_executor_benchmark.py
+  tests/unit/data/datasets/test_arc_agi_dataset.py \
+  tests/unit/tools/test_nvarc_executor_benchmark.py
 
-'${ROOT_VENV}/bin/ruff' format --check \
+ruff format --check \
   tools/nvarc_ingest.py \
-  tools/arc_executor_benchmark.py \
+  tools/nvarc_executor_benchmark.py \
+  tools/nvarc_executor_benchmark_megatron.py \
   tools/nvarc_executor_train_preflight.py \
   nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
+  nemo_rl/data/datasets/response_datasets/arc_agi.py \
   tests/unit/tools/test_nvarc_ingest.py \
-  tests/unit/data/datasets/test_nvarc_executor_dataset.py
+  tests/unit/data/datasets/test_nvarc_executor_dataset.py \
+  tests/unit/data/datasets/test_arc_agi_dataset.py \
+  tests/unit/tools/test_nvarc_executor_benchmark.py
 
-'${ROOT_VENV}/bin/pyrefly' check \
+pyrefly check \
   tools/nvarc_ingest.py \
   nemo_rl/data/datasets/response_datasets/nvarc_executor.py \
-  tools/arc_executor_benchmark.py \
-  tools/arc_executor_benchmark_megatron.py
+  nemo_rl/data/datasets/response_datasets/arc_agi.py \
+  tools/nvarc_executor_benchmark.py \
+  tools/nvarc_executor_benchmark_megatron.py \
+  tools/nvarc_executor_train_preflight.py
 
 echo ALL_STAGE_CHECKS_PASSED
 "

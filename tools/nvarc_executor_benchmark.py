@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Benchmark oracle ARC rule execution through an OpenAI-compatible endpoint.
+"""Benchmark NVARC rule execution through an OpenAI-compatible endpoint.
 
-Two task sources share one harness and one prompt contract: ``synthetic``
-regenerates the fixed held-out generator tasks (the historical 150-case
-control), and ``nvarc`` samples held-out puzzles from the ingested NVARC
-parquet (``tools/nvarc_ingest.py``), one pair per puzzle, deterministically by
-seed. Comparing a checkpoint on both answers the transfer question directly.
+Samples held-out puzzles from the ingested NVARC parquet
+(``tools/nvarc_ingest.py``), one pair per puzzle, deterministically by seed,
+and evaluates each with the exact single-grid prompt contract used by executor
+GRPO: one rule, one grid, fresh chat, one format-only retry.
 """
 
 from __future__ import annotations
@@ -43,30 +42,17 @@ from nemo_rl.environments.arc_agi_grid import (
     grid_shape,
     serialize_grid,
 )
-from nemo_rl.environments.arc_agi_generators import (
-    SynthTask,
-    generate_task,
-    render_oracle_description,
-    rule_composition_depth,
-    rule_family,
-)
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXECUTOR_PROMPT_TEMPLATE = (
-    REPO_ROOT / "examples" / "prompts" / "arc_executor.txt"
-).read_text(encoding="utf-8")
-NVARC_EXECUTOR_PROMPT_TEMPLATE = (
     REPO_ROOT / "examples" / "prompts" / "nvarc_executor.txt"
 ).read_text(encoding="utf-8")
-PROMPT_TEMPLATES = {
-    "synthetic": EXECUTOR_PROMPT_TEMPLATE,
-    "nvarc": NVARC_EXECUTOR_PROMPT_TEMPLATE,
-}
 
 
 ORACLE_RELIABILITY_TARGET = 0.95
 FORMAT_VALIDITY_TARGET = 0.99
+
+DEFAULT_BUCKET_EDGES = (162, 380, 621, 700, 750, 783, 810, 840, 870)
 
 
 class ExecutorClient(Protocol):
@@ -79,24 +65,19 @@ class ExecutorClient(Protocol):
 
 @dataclass(frozen=True)
 class BenchmarkCase:
-    """One held-out transform description and one grid to apply it to.
+    """One held-out NVARC rule and one grid to apply it to.
 
-    ``source`` selects the prompt template; for NVARC cases ``level`` is the
-    difficulty (area) bucket, ``family`` is ``"nvarc"``, and the synthetic-only
-    axes (``composition_depth``, ``paraphrase_id``) are pinned to 0.
+    ``bucket`` is the same 1-indexed max-grid-area bucket the training dataset
+    reports, so the per-bucket summary lines up with training validation
+    metrics.
     """
 
     task_id: str
-    level: int
-    rule: str
-    family: str
-    composition_depth: int
+    bucket: int
     grid_size: int
-    paraphrase_id: int
     description: str
     input_grid: Grid
     target_grid: Grid
-    source: str = "synthetic"
 
 
 @dataclass(frozen=True)
@@ -104,12 +85,8 @@ class CaseResult:
     """Executor competence metrics and trace for one benchmark case."""
 
     task_id: str
-    level: int
-    rule: str
-    family: str
-    composition_depth: int
+    bucket: int
     grid_size: int
-    paraphrase_id: int
     format_valid: bool
     format_retry_used: bool
     grid_exact: bool
@@ -127,18 +104,13 @@ class BenchmarkConfig:
     model: str
     seed: int
     count: int
-    levels: tuple[int, ...]
-    paraphrases: tuple[int, ...]
-    num_train_pairs: int
-    max_input_dim: int
+    data_dir: str
+    split: str
+    bucket_edges: tuple[int, ...]
     max_output_tokens: int
     concurrency: int
     timeout_seconds: float
     temperature: float
-    task_source: str = "synthetic"
-    nvarc_data_dir: str | None = None
-    nvarc_split: str = "executor_val"
-    nvarc_bucket_edges: tuple[int, ...] = (380, 700, 783, 840)
 
 
 class OpenAIChatCompletionsClient:
@@ -202,87 +174,37 @@ class OpenAIChatCompletionsClient:
         return content
 
 
-def _task_grid_size(task: SynthTask) -> int:
-    grids = [
-        *(pair["input"] for pair in task.train_pairs),
-        *(pair["output"] for pair in task.train_pairs),
-        task.test_input,
-        task.target,
-    ]
-    return max(max(len(grid), len(grid[0])) for grid in grids)
-
-
 def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
-    """Generate deterministic tasks held out by seed and index."""
-    cases: list[BenchmarkCase] = []
-    for index in range(config.count):
-        level = config.levels[index % len(config.levels)]
-        paraphrase_id = config.paraphrases[index % len(config.paraphrases)]
-        task = generate_task(
-            seed=config.seed,
-            index=index,
-            level=level,
-            num_train_pairs=config.num_train_pairs,
-            max_input_dim=config.max_input_dim,
-        )
-        cases.append(
-            BenchmarkCase(
-                task_id=task.task_id,
-                level=task.level,
-                rule=task.rule,
-                family=rule_family(task.rule),
-                composition_depth=rule_composition_depth(task.rule),
-                grid_size=_task_grid_size(task),
-                paraphrase_id=paraphrase_id,
-                description=render_oracle_description(
-                    task.rule, paraphrase_id=paraphrase_id
-                ),
-                input_grid=task.test_input,
-                target_grid=task.target,
-            )
-        )
-    return cases
-
-
-def build_nvarc_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
     """Sample held-out NVARC puzzles deterministically, one pair per puzzle.
 
     Puzzles are sorted by id before sampling so the case set is independent of
     parquet shard layout; ``config.seed`` fixes both the puzzle subset and the
-    pair drawn from each. ``level`` is the same 1-indexed area bucket the
-    training dataset reports, so the per-level summary lines up with training
-    validation metrics.
+    pair drawn from each.
     """
-    # Deferred import: pyarrow is unneeded (and unimported) on the synthetic path.
+    # Deferred import: pyarrow is unneeded by the unit-testable pieces above.
     import pyarrow.dataset as ds
 
-    if not config.nvarc_data_dir:
-        raise ValueError("task_source=nvarc requires --nvarc-data-dir")
     # Select shards by name: the ingest directory also holds stats.json, which
     # a whole-directory dataset would try to parse.
-    shards = sorted(Path(config.nvarc_data_dir).glob("data-*.parquet"))
+    shards = sorted(Path(config.data_dir).glob("data-*.parquet"))
     if not shards:
-        raise FileNotFoundError(
-            f"no data-*.parquet shards under {config.nvarc_data_dir}"
-        )
+        raise FileNotFoundError(f"no data-*.parquet shards under {config.data_dir}")
     table = ds.dataset([str(shard) for shard in shards], format="parquet").to_table(
         columns=["puzzle_id", "canonical_rule", "pairs_json", "difficulty"],
-        filter=ds.field("split") == config.nvarc_split,
+        filter=ds.field("split") == config.split,
     )
     rows = sorted(table.to_pylist(), key=lambda row: row["puzzle_id"])
     if not rows:
-        raise ValueError(
-            f"no rows with split={config.nvarc_split!r} under {config.nvarc_data_dir}"
-        )
+        raise ValueError(f"no rows with split={config.split!r} under {config.data_dir}")
     rng = random.Random(config.seed)
     if len(rows) > config.count:
         rows = rng.sample(rows, config.count)
 
     def bucket(difficulty: int) -> int:
-        for index, edge in enumerate(config.nvarc_bucket_edges):
+        for index, edge in enumerate(config.bucket_edges):
             if difficulty <= edge:
                 return index + 1
-        return len(config.nvarc_bucket_edges) + 1
+        return len(config.bucket_edges) + 1
 
     cases: list[BenchmarkCase] = []
     for row in rows:
@@ -291,24 +213,17 @@ def build_nvarc_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
         cases.append(
             BenchmarkCase(
                 task_id=row["puzzle_id"],
-                level=bucket(row["difficulty"]),
-                rule=row["puzzle_id"],
-                family="nvarc",
-                composition_depth=0,
+                bucket=bucket(row["difficulty"]),
                 grid_size=max(max(len(g), len(g[0])) for g in grids),
-                paraphrase_id=0,
                 description=row["canonical_rule"],
                 input_grid=pair["input"],
                 target_grid=pair["output"],
-                source="nvarc",
             )
         )
     return cases
 
 
-def build_single_grid_prompt(
-    *, description: str, input_grid: Grid, source: str = "synthetic"
-) -> str:
+def build_single_grid_prompt(*, description: str, input_grid: Grid) -> str:
     """Render the exact single-grid prompt contract used by executor GRPO."""
     task_body = (
         "<transformation>\n"
@@ -318,7 +233,7 @@ def build_single_grid_prompt(
         f"{serialize_grid(input_grid)}\n"
         "</input>"
     )
-    return PROMPT_TEMPLATES[source].format(task_body)
+    return EXECUTOR_PROMPT_TEMPLATE.format(task_body)
 
 
 def build_single_grid_format_retry_prompt() -> str:
@@ -336,12 +251,11 @@ def build_single_grid_format_retry_prompt() -> str:
 
 
 async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResult:
-    """Apply one oracle description to one held-out grid in a fresh chat."""
+    """Apply one rule description to one held-out grid in a fresh chat."""
     started = time.perf_counter()
     prompt = build_single_grid_prompt(
         description=case.description,
         input_grid=case.input_grid,
-        source=case.source,
     )
     messages = [{"role": "user", "content": prompt}]
     responses: list[str] = []
@@ -378,12 +292,8 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
     )
     return CaseResult(
         task_id=case.task_id,
-        level=case.level,
-        rule=case.rule,
-        family=case.family,
-        composition_depth=case.composition_depth,
+        bucket=case.bucket,
         grid_size=case.grid_size,
-        paraphrase_id=case.paraphrase_id,
         format_valid=format_valid,
         format_retry_used=retry_used,
         grid_exact=grid_exact,
@@ -421,7 +331,7 @@ def summarize_group(results: list[CaseResult]) -> dict[str, Any]:
 
 
 def summarize_results(results: list[CaseResult]) -> dict[str, Any]:
-    """Report overall reliability and required design-document splits."""
+    """Report overall reliability and the per-difficulty splits."""
     if not results:
         raise ValueError("cannot summarize an empty benchmark")
 
@@ -442,11 +352,8 @@ def summarize_results(results: list[CaseResult]) -> dict[str, Any]:
             "format_valid": FORMAT_VALIDITY_TARGET,
         },
         "overall": overall,
-        "by_level": split(lambda result: result.level),
-        "by_rule_family": split(lambda result: result.family),
+        "by_bucket": split(lambda result: result.bucket),
         "by_grid_size": split(lambda result: result.grid_size),
-        "by_composition_depth": split(lambda result: result.composition_depth),
-        "by_description_paraphrase": split(lambda result: result.paraphrase_id),
     }
 
 
@@ -482,25 +389,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--seed", type=int, default=93_821)
     parser.add_argument("--count", type=int, default=150)
-    parser.add_argument("--levels", type=_comma_separated_ints, default=(1, 2, 3, 4, 5))
-    parser.add_argument("--paraphrases", type=_comma_separated_ints, default=(0, 1, 2))
-    parser.add_argument("--num-train-pairs", type=int, default=3)
-    parser.add_argument("--max-input-dim", type=int, default=12)
-    parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--split", default="executor_val")
+    parser.add_argument(
+        "--bucket-edges", type=_comma_separated_ints, default=DEFAULT_BUCKET_EDGES
+    )
+    parser.add_argument("--max-output-tokens", type=int, default=6144)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--task-source", choices=("synthetic", "nvarc"), default="synthetic"
-    )
-    parser.add_argument("--nvarc-data-dir", default=None)
-    parser.add_argument("--nvarc-split", default="executor_val")
-    parser.add_argument(
-        "--nvarc-bucket-edges",
-        type=_comma_separated_ints,
-        default=(380, 700, 783, 840),
-    )
     return parser.parse_args()
 
 
@@ -511,18 +409,7 @@ def execute_benchmark(
     output: Path,
 ) -> dict[str, Any]:
     """Run a benchmark against a ready endpoint and persist its full report."""
-    if config.task_source == "nvarc":
-        cases = build_nvarc_cases(config)
-    else:
-        if not config.levels or any(
-            level not in {0, 1, 2, 3, 4, 5} for level in config.levels
-        ):
-            raise ValueError("levels must contain only integers from 0 through 5")
-        if not config.paraphrases or any(
-            value not in {0, 1, 2} for value in config.paraphrases
-        ):
-            raise ValueError("paraphrases must contain only 0, 1, or 2")
-        cases = build_cases(config)
+    cases = build_cases(config)
     client = OpenAIChatCompletionsClient(
         base_url=config.base_url,
         model=config.model,
@@ -551,18 +438,13 @@ def main() -> None:
         model=args.model,
         seed=args.seed,
         count=args.count,
-        levels=args.levels,
-        paraphrases=args.paraphrases,
-        num_train_pairs=args.num_train_pairs,
-        max_input_dim=args.max_input_dim,
+        data_dir=args.data_dir,
+        split=args.split,
+        bucket_edges=args.bucket_edges,
         max_output_tokens=args.max_output_tokens,
         concurrency=args.concurrency,
         timeout_seconds=args.timeout_seconds,
         temperature=args.temperature,
-        task_source=args.task_source,
-        nvarc_data_dir=args.nvarc_data_dir,
-        nvarc_split=args.nvarc_split,
-        nvarc_bucket_edges=args.nvarc_bucket_edges,
     )
     report = execute_benchmark(config, api_key=args.api_key, output=args.output)
     print(json.dumps(report["summary"], indent=2))
