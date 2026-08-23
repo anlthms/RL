@@ -269,6 +269,7 @@ project-includes = [
   "nemo_rl/data/datasets/response_datasets/arc_agi.py",
   "nemo_rl/data/datasets/response_datasets/nvarc_executor.py",
   "tools/nvarc_ingest.py",
+  "tools/nvarc_chat_dump.py",
   "tools/nvarc_executor_benchmark.py",
   "tools/nvarc_executor_benchmark_megatron.py",
   "tools/nvarc_executor_train_preflight.py",
