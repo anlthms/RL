@@ -79,6 +79,16 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--task-source", choices=("synthetic", "nvarc"), default="synthetic"
+    )
+    parser.add_argument("--nvarc-data-dir", default=None)
+    parser.add_argument("--nvarc-split", default="executor_val")
+    parser.add_argument(
+        "--nvarc-bucket-edges",
+        type=_comma_separated_ints,
+        default=(380, 700, 783, 840),
+    )
     args, overrides = parser.parse_known_args()
     return args, overrides
 
@@ -231,6 +241,10 @@ def main() -> None:
             concurrency=args.concurrency,
             timeout_seconds=args.timeout_seconds,
             temperature=args.temperature,
+            task_source=args.task_source,
+            nvarc_data_dir=args.nvarc_data_dir,
+            nvarc_split=args.nvarc_split,
+            nvarc_bucket_edges=args.nvarc_bucket_edges,
         )
         report = execute_benchmark(
             benchmark_config,

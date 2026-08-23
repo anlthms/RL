@@ -1167,7 +1167,7 @@ def _joint_level_size_schedule(
     weights = [float(multiplicity[level]) for level, _ in choices]
 
     if window:
-        scheduled = _ramped_choices(
+        scheduled = ramped_choices(
             count=count,
             choices=choices,
             multipliers=weights,
@@ -1184,7 +1184,7 @@ def _joint_level_size_schedule(
     return scheduled, [scores[choice] for choice in scheduled]
 
 
-def _ramped_choices(
+def ramped_choices(
     *,
     count: int,
     choices: list[ChoiceT],
