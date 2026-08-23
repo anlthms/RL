@@ -266,15 +266,17 @@ def capture_evidence(
         ("nvidia-smi.txt", ["nvidia-smi"], 120),
         # py-spy against every python process on the node: which collective or
         # lock each rank is parked on is the single most useful artefact, and it
-        # exists only while the processes do.
+        # exists only while the processes do. Match the full cmdline: Ray
+        # renames actor processes to "ray::<Actor>" (setproctitle), so a plain
+        # `pgrep python` misses every GPU worker.
         (
             "py-spy.txt",
             [
                 "bash",
                 "-lc",
-                'for p in $(pgrep -u "$(id -u)" python 2>/dev/null); do '
+                'for p in $(pgrep -u "$(id -u)" -f "python|ray::" 2>/dev/null); do '
                 'echo "=== pid $p"; '
-                "py-spy dump --pid $p --nonblocking 2>&1 | head -80; done",
+                "py-spy dump --pid $p --nonblocking 2>&1 | head -120; done",
             ],
             300,
         ),
