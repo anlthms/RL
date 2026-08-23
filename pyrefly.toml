@@ -267,6 +267,8 @@ project-includes = [
   "tools/external_gym_vllm/vllm_pool_lb.py",
   "tools/external_gym_vllm/serve_vllm_on_ray.py",
   "nemo_rl/data/datasets/response_datasets/arc_executor.py",
+  "nemo_rl/data/datasets/response_datasets/nvarc_executor.py",
+  "tools/nvarc_ingest.py",
   "tools/arc_executor_benchmark.py",
   "tools/arc_executor_benchmark_megatron.py",
   "tools/arc_executor_train_preflight.py",

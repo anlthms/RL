@@ -20,6 +20,7 @@
 #
 #   ENV       gym                         NeMo-Gym servers
 #             arc_executor_4n             oracle-description executor training
+#             nvarc_executor_4n           NVARC-description executor training
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
@@ -54,11 +55,11 @@ esac
 
 ENV="${ENV:-gym}"
 case "${ENV}" in
-  gym | arc_executor_4n) ;;
-  *) die "invalid ENV: ${ENV} (expected gym or arc_executor_4n)" ;;
+  gym | arc_executor_4n | nvarc_executor_4n) ;;
+  *) die "invalid ENV: ${ENV} (expected gym, arc_executor_4n, or nvarc_executor_4n)" ;;
 esac
-if [[ "${ENV}" == arc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
-  die "arc_executor_4n supports only colocated topology"
+if [[ "${ENV}" == *arc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
+  die "${ENV} supports only colocated topology"
 fi
 
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
