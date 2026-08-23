@@ -4,7 +4,7 @@
 # only -- no optimizer/scheduler) per checkpoint, collects accuracy, logs the curve.
 #
 # Usage: SUBMIT_ACCOUNT=<acct> bash validate_all_checkpoints.sh <checkpoint_dir> [config_yaml]
-#   config_yaml: eval config (default examples/configs/async/nanov3_gym_non_colocated.yaml).
+#   config_yaml: eval config (default examples/configs/async/nanov3_rl_blend_non_colocated.yaml).
 #     Must match the env the checkpoint was trained on -- pass the *_math_* leaf to
 #     score a math run, otherwise validation runs against the wrong environment.
 # Env: SEQ_LEN (checkpoint's training seq, default 16384), NUM_ACTOR_NODES (4), QOS
@@ -13,7 +13,7 @@ set -eu
 cd "$(dirname "$0")"
 
 CKPT_DIR=${1:?"usage: bash validate_all_checkpoints.sh <checkpoint_dir> [config_yaml]"}
-CONFIG=${2:-examples/configs/async/nanov3_gym_non_colocated.yaml}
+CONFIG=${2:-examples/configs/async/nanov3_rl_blend_non_colocated.yaml}
 [ -d "${CKPT_DIR}" ] || { echo "checkpoint dir not found: ${CKPT_DIR}" >&2; exit 1; }
 [ -f "${CONFIG}" ] || { echo "config not found: ${CONFIG}" >&2; exit 1; }
 
