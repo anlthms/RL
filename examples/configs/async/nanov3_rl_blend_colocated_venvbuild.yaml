@@ -4,7 +4,7 @@
 # `uv venv --seed`, leaving 5-package shells that fail on `import fastapi`.
 # Not for training runs -- see .prefetch_gym_venvs.sub.
 defaults:
-  - nanov3_gym_colocated.yaml
+  - nanov3_rl_blend_colocated.yaml
 
 env:
   nemo_gym:
