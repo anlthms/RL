@@ -86,8 +86,10 @@ env:
 checkpointing:
   enabled: true
   # Real-split exact match sits at ~0 for a long time, so select checkpoints
-  # on the induction rows' cell match, surfaced per-agent by the gym rollout.
-  metric_name: "val:arc_agi_2_simple_agent/cell_match"
+  # on the induction rows' cell match. The gym rollout surfaces per-agent
+  # scalars as <agent>/<field>/<stat> (calculate_single_metric appends the
+  # stat suffix), hence the /mean.
+  metric_name: "val:arc_agi_2_simple_agent/cell_match/mean"
   save_period: 10
   keep_top_k: 2
 
