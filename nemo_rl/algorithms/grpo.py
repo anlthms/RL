@@ -86,6 +86,7 @@ from nemo_rl.distributed.virtual_cluster import (
 )
 from nemo_rl.environments.interfaces import EnvironmentInterface
 from nemo_rl.environments.nemo_gym import should_use_nemo_gym, spinup_nemo_gym_actor
+from nemo_rl.experience.failures import GymTransportError
 from nemo_rl.experience.interfaces import (
     NEXT_NEMO_GYM_TASK_INDEX_KEY,
 )
@@ -3880,31 +3881,53 @@ def validate(
                     top_p=generation_config["val_top_p"],
                     top_k=generation_config["val_top_k"],
                 )
-                nemo_gym_rollout_result = run_nemo_gym_rollout_sync(
-                    policy_generation=policy_generation,
-                    input_batch=val_batch,
-                    tokenizer=tokenizer,
-                    task_to_env=val_task_to_env,
-                    max_seq_len=master_config.policy["max_total_sequence_length"],
-                    generation_config=generation_config,
-                    sampling_params=val_sampling_params,
-                    log_full_result_tables=should_log_nemo_gym_full_result_tables(
-                        wandb_enabled=master_config.logger["wandb_enabled"],
-                        wandb_config=master_config.logger["wandb"],
-                    ),
-                    max_rollout_turns=None,
-                    greedy=False,
-                    effort_config=_get_effort_config(master_config),
-                    reward_penalty_config=master_config.reward_penalties,
-                    thinking_tags=get_nemo_gym_thinking_tags(master_config.env),
-                    mask_env_flagged_samples=should_mask_flagged_samples(
-                        master_config.env
-                    ),
-                    deduplicate_multimodal_data=(
-                        master_config.grpo.deduplicate_multimodal_data
-                    ),
-                    debug_payload_metrics=master_config.grpo.debug_payload_metrics,
-                )
+                # Training rollouts survive transient Gym failures (one bad
+                # episode surfaces as HTTP 500 -> GymTransportError) through
+                # RolloutRetryPolicy, but this path has no outer retry, so a
+                # single flaky episode would otherwise kill the whole run at
+                # validation time. Retry the batch a bounded number of times;
+                # _prepare_nemo_gym_rows is idempotent, so resubmission is safe.
+                val_rollout_attempts = 3
+                for val_rollout_attempt in range(1, val_rollout_attempts + 1):
+                    try:
+                        nemo_gym_rollout_result = run_nemo_gym_rollout_sync(
+                            policy_generation=policy_generation,
+                            input_batch=val_batch,
+                            tokenizer=tokenizer,
+                            task_to_env=val_task_to_env,
+                            max_seq_len=master_config.policy[
+                                "max_total_sequence_length"
+                            ],
+                            generation_config=generation_config,
+                            sampling_params=val_sampling_params,
+                            log_full_result_tables=should_log_nemo_gym_full_result_tables(
+                                wandb_enabled=master_config.logger["wandb_enabled"],
+                                wandb_config=master_config.logger["wandb"],
+                            ),
+                            max_rollout_turns=None,
+                            greedy=False,
+                            effort_config=_get_effort_config(master_config),
+                            reward_penalty_config=master_config.reward_penalties,
+                            thinking_tags=get_nemo_gym_thinking_tags(master_config.env),
+                            mask_env_flagged_samples=should_mask_flagged_samples(
+                                master_config.env
+                            ),
+                            deduplicate_multimodal_data=(
+                                master_config.grpo.deduplicate_multimodal_data
+                            ),
+                            debug_payload_metrics=master_config.grpo.debug_payload_metrics,
+                        )
+                    except GymTransportError as error:
+                        if val_rollout_attempt == val_rollout_attempts:
+                            raise
+                        print(
+                            f"⚠️ Validation rollout attempt "
+                            f"{val_rollout_attempt}/{val_rollout_attempts} failed "
+                            f"with a transient Gym transport error; retrying the "
+                            f"batch: {error}"
+                        )
+                    else:
+                        break
                 val_batch = nemo_gym_rollout_result.final_batch
                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
                 additional_metrics_to_report = gen_metrics
