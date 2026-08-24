@@ -104,21 +104,60 @@ def test_pairs_do_not_repeat_before_a_full_pass(tmp_path) -> None:
         assert len(set(first_pass)) == len(first_pass), task_id
 
 
-def test_ramp_orders_buckets_easy_to_hard(tmp_path) -> None:
+def test_pure_staging_holds_each_bucket_then_clamps(tmp_path) -> None:
     dataset = _dataset(
         tmp_path,
-        num_tasks=24,
-        difficulty_ramp_window=8,
-        difficulty_ramp_steps=3,
+        num_tasks=40,
+        curriculum_window=4,
+        curriculum_hold_steps=2,
+    )
+    # Two 4-row windows per bucket, easiest first; the two windows past the
+    # final stage stay on the last bucket.
+    assert dataset.dataset["bucket"] == [1] * 8 + [2] * 8 + [3] * 8 + [4] * 16
+
+
+def test_cumulative_staging_mixes_earlier_buckets(tmp_path) -> None:
+    dataset = _dataset(
+        tmp_path,
+        num_tasks=16,
+        curriculum_window=4,
+        curriculum_hold_steps=1,
+        curriculum_cumulative=True,
     )
     buckets = dataset.dataset["bucket"]
-    windows = [buckets[index : index + 8] for index in range(0, 24, 8)]
-    # Every window keeps every bucket.
-    for window in windows:
-        assert set(window) == {1, 2, 3, 4}
-    # The weighting moves from the easiest bucket toward the hardest.
-    assert windows[0].count(1) > windows[-1].count(1)
-    assert windows[-1].count(4) > windows[0].count(4)
+    windows = [buckets[index : index + 4] for index in range(0, 16, 4)]
+    # Each window cycles the current stage plus every earlier one.
+    for stage, window in enumerate(windows, start=1):
+        assert set(window) == set(range(1, stage + 1))
+
+
+def test_staging_knobs_must_be_paired() -> None:
+    for overrides in (
+        {"curriculum_window": 4},
+        {"curriculum_hold_steps": 2},
+    ):
+        with pytest.raises(ValueError, match="set together"):
+            NvArcExecutorConfig(
+                data_dir="x",
+                num_tasks=1,
+                num_val_tasks=1,
+                seed=1,
+                val_seed=2,
+                **overrides,
+            )
+
+
+def test_rejects_nonpositive_staging_knobs() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        NvArcExecutorConfig(
+            data_dir="x",
+            num_tasks=1,
+            num_val_tasks=1,
+            seed=1,
+            val_seed=2,
+            curriculum_window=4,
+            curriculum_hold_steps=0,
+        )
 
 
 def test_zero_val_tasks_disables_the_validation_split(tmp_path) -> None:
@@ -141,31 +180,6 @@ def test_rejects_bad_bucket_edges() -> None:
             seed=1,
             val_seed=2,
             bucket_edges=[9, 4],
-        )
-
-
-def test_rejects_undersized_ramp() -> None:
-    with pytest.raises(ValueError, match="cannot hold all"):
-        NvArcExecutorConfig(
-            data_dir="x",
-            num_tasks=100,
-            num_val_tasks=1,
-            seed=1,
-            val_seed=2,
-            bucket_edges=[4, 9, 16],
-            difficulty_ramp_window=2,
-            difficulty_ramp_steps=10,
-        )
-    with pytest.raises(ValueError, match="needs 80 rows"):
-        NvArcExecutorConfig(
-            data_dir="x",
-            num_tasks=64,
-            num_val_tasks=1,
-            seed=1,
-            val_seed=2,
-            bucket_edges=[4, 9, 16],
-            difficulty_ramp_window=8,
-            difficulty_ramp_steps=10,
         )
 
 
