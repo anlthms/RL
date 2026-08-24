@@ -1,0 +1,96 @@
+# NVARC executor+proposer co-training through NeMo-Gym. One policy plays two
+# roles against the arc_agi_2 resources server: single-turn executor rows
+# (apply a supplied NVARC rule to one grid, gain-over-echo reward) and
+# eval-sequence proposer episodes (induce a canonical rule from demos, revise
+# it from behavioral feedback on held-out grids, final proposer turn only in
+# loss). The 90:10 -> 10:90 role schedule and the staged ventile curriculum
+# are baked into the train JSONL row order by tools/nvarc_cotrain_materialize.py
+# (data.shuffle: false; one num_prompts_per_step window per step).
+#
+# Validation is solely the real ARC-AGI-2 evaluation split (120 tasks / 172
+# test-pair rows) as single-turn induction rows for arc_agi_2_simple_agent;
+# the verifier returns cell_match/grid_match as top-level scalars, which the
+# gym rollout surfaces as val:arc_agi_2_simple_agent/<metric>.
+
+grpo:
+  val_at_start: true
+  val_at_end: true
+  val_period: 10
+  # The gym entrypoint requires null and scores the whole validation file in
+  # one batch (val_batch_size is force-set to the file length, 172).
+  max_val_samples: null
+  val_batch_size: 172
+
+policy:
+  # 20480 engine ceiling for the ~16.3k-token real-ARC induction prompts;
+  # training samples are far smaller, so the training microbatch is pinned
+  # separately. Proposer trajectories are capped agent-side at 12288
+  # (model_context_limit below) so the trainable final turn always fits the
+  # train pack.
+  max_total_sequence_length: 20480
+  generation:
+    max_new_tokens: 6144
+    mcore_generation_config:
+      expose_http_server: true
+    vllm_cfg:
+      expose_http_server: true
+  sequence_packing:
+    train_mb_tokens: 12288
+    logprob_mb_tokens: 12288
+
+data:
+  _override_: true
+  max_input_seq_length: null  # the gym processor does not length-filter
+  shuffle: false  # the curriculum and role schedule live in the row order
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v1/train.jsonl
+  validation:
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v1/val.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: "nemo_gym"
+    prompt_file: null
+    system_prompt_file: null
+    processor: "nemo_gym_data_processor"
+
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  nemo_gym:
+    skip_venv_if_present: true
+    # Same port layout rationale as env_rl_blend.yaml: below the ephemeral
+    # floor, clear of the generation range and the sandbox.
+    port_range_low: 5000
+    port_range_high: 5999
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - resources_servers/arc_agi_2/configs/arc_agi_2.yaml
+    arc_transform_refinement_agent:
+      responses_api_agents:
+        arc_transform_refinement_agent:
+          protocol: eval_sequence
+          # Proposer chat budget: trainable trajectories (final prompt +
+          # reserved output) must fit the 12288 train pack.
+          model_context_limit: 12288
+          reserved_proposer_output_tokens: 4096
+          chat_template_margin: 512
+          proposer_max_output_tokens: 4096
+          # Match the native executor contract's output budget.
+          executor_max_output_tokens: 6144
+          # The context budget usually terminates episodes first; this is the
+          # emergency cap.
+          max_rounds: 8
+
+checkpointing:
+  enabled: true
+  # Real-split exact match sits at ~0 for a long time, so select checkpoints
+  # on the induction rows' cell match, surfaced per-agent by the gym rollout.
+  metric_name: "val:arc_agi_2_simple_agent/cell_match"
+  save_period: 10
+  keep_top_k: 2
+
+logger:
+  monitor_gpus: true
+  num_val_samples_to_print: 0  # gym message logs carry token ids, not text
