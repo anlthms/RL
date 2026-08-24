@@ -54,10 +54,10 @@ esac
 
 ENV="${ENV:-rl_blend}"
 case "${ENV}" in
-  rl_blend | nvarc_executor_4n) ;;
-  *) die "invalid ENV: ${ENV} (expected rl_blend or nvarc_executor_4n)" ;;
+  rl_blend | nvarc_executor_4n | nvarc_cotrain_4n) ;;
+  *) die "invalid ENV: ${ENV} (expected rl_blend, nvarc_executor_4n, or nvarc_cotrain_4n)" ;;
 esac
-if [[ "${ENV}" == nvarc_executor_4n && "${TOPOLOGY}" != colocated ]]; then
+if [[ "${ENV}" == nvarc_* && "${TOPOLOGY}" != colocated ]]; then
   die "${ENV} supports only colocated topology"
 fi
 
@@ -112,11 +112,11 @@ if [[ -n "${EXTRA_OVERRIDES:-}" ]]; then
 fi
 
 # ------------------------------------------- entrypoint, config, setup -----
-# The RL-blend path drives rollouts through NeMo-Gym HTTP servers and needs its
-# own entrypoint; everything else runs on the standard one.
+# Gym-driven arms (rollouts over NeMo-Gym HTTP servers) need their own
+# entrypoint; everything else runs on the standard one.
 case "${ENV}" in
-  rl_blend) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
-  *)        ENTRYPOINT="examples/run_grpo.py" ;;
+  rl_blend | nvarc_cotrain_4n) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
+  *)                           ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
