@@ -122,8 +122,9 @@ def main() -> None:
             "executor_max_output_tokens must match generation.max_new_tokens "
             "(one executor contract across both paths)"
         )
-    if checkpointing["metric_name"] != f"val:{EXECUTOR_AGENT}/cell_match":
-        errors.append(f"checkpoints must select on val:{EXECUTOR_AGENT}/cell_match")
+    # The gym rollout surfaces per-agent scalars as <agent>/<field>/<stat>.
+    if checkpointing["metric_name"] != f"val:{EXECUTOR_AGENT}/cell_match/mean":
+        errors.append(f"checkpoints must select on val:{EXECUTOR_AGENT}/cell_match/mean")
 
     # ------------------------------------------------ materialized data ----
     train_path = Path(data["train"]["data_path"])
