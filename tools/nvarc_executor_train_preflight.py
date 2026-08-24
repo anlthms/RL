@@ -33,6 +33,7 @@ from nemo_rl.data.datasets.response_datasets import load_response_dataset
 from nemo_rl.data.datasets.response_datasets.nvarc_executor import (
     TASK_NAME,
     NvArcExecutorConfig,
+    staged_choices,
 )
 from nemo_rl.data.datasets.utils import update_single_dataset_config
 from nemo_rl.utils.config import (
@@ -146,13 +147,53 @@ def main() -> None:
         errors.append("training repeats a (puzzle, input) pair; reduce num_tasks")
 
     bucket_counts = collections.Counter(dataset.dataset["bucket"])
+    final_bucket_step = None
     if curriculum is not None:
-        buckets = set(range(1, len(curriculum.bucket_edges) + 2))
-        if set(bucket_counts) != buckets:
-            errors.append(
-                f"training covers buckets {sorted(bucket_counts)} but the config "
-                f"defines {sorted(buckets)}"
+        buckets = list(range(1, len(curriculum.bucket_edges) + 2))
+        if curriculum.curriculum_window is None:
+            if set(bucket_counts) != set(buckets):
+                errors.append(
+                    f"training covers buckets {sorted(bucket_counts)} but the "
+                    f"config defines {buckets}"
+                )
+        else:
+            assert curriculum.curriculum_hold_steps is not None  # validator-paired
+            if curriculum.curriculum_window != grpo["num_prompts_per_step"]:
+                errors.append(
+                    "curriculum_window must equal grpo.num_prompts_per_step "
+                    "(one window per training step)"
+                )
+            run_rows = grpo["max_num_steps"] * grpo["num_prompts_per_step"]
+            if len(dataset.dataset) < run_rows:
+                errors.append(
+                    f"the run consumes {run_rows} rows but num_tasks is only "
+                    f"{len(dataset.dataset)}"
+                )
+            # Step (1-indexed) at which the schedule enters the final bucket;
+            # a staged pass must reach it or the top ventiles go untrained.
+            final_bucket_step = (
+                curriculum.curriculum_hold_steps * (len(buckets) - 1) + 1
             )
+            if grpo["max_num_steps"] < final_bucket_step:
+                errors.append(
+                    f"max_num_steps {grpo['max_num_steps']} never reaches the "
+                    f"final bucket (needs {final_bucket_step})"
+                )
+            # The emitted rows must be exactly the staged schedule over ALL
+            # config buckets — this also catches a ventile with no puzzles in
+            # the pool, which staging would otherwise silently skip.
+            expected = staged_choices(
+                count=len(dataset.dataset),
+                choices=buckets,
+                window=curriculum.curriculum_window,
+                hold_steps=curriculum.curriculum_hold_steps,
+                cumulative=curriculum.curriculum_cumulative,
+            )
+            if list(dataset.dataset["bucket"]) != expected:
+                errors.append(
+                    "training rows do not follow the staged bucket schedule "
+                    "(is a config bucket empty in the training pool?)"
+                )
 
     val_count = 0
     for entry in validation:
@@ -181,6 +222,13 @@ def main() -> None:
     )
     print(f"train: {len(dataset.dataset)} rows over {len(set(train_ids))} puzzles")
     print(f"train buckets: {dict(sorted(bucket_counts.items()))}")
+    if curriculum is not None and curriculum.curriculum_window is not None:
+        staging = "cumulative" if curriculum.curriculum_cumulative else "pure"
+        print(
+            f"curriculum: {staging} staging, "
+            f"{curriculum.curriculum_hold_steps} steps per bucket, final "
+            f"bucket from step {final_bucket_step} of {grpo['max_num_steps']}"
+        )
     print(f"validation: {val_count} real ARC-AGI-2 rows, {scored} scored")
     print(
         "checkpointing: "

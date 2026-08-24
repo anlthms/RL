@@ -39,21 +39,32 @@ policy:
 data:
   _override_: true
   max_input_seq_length: ${policy.max_total_sequence_length}
-  shuffle: false  # the difficulty ramp lives in the row order
+  shuffle: false  # the staged curriculum lives in the row order
   num_workers: 1
   use_multiple_dataloader: false
   train:
     dataset_name: nvarc_executor
     data_dir: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-ingested/v1
     # Inclusive upper edges on max grid area; areas above the last edge form
-    # the tenth bucket. Reported as bucket_1..bucket_10 metrics. These are
-    # the ingested-v1 train-split deciles: max-over-pairs area saturates near
-    # 900 for half the corpus, so equal-mass edges beat round numbers, and
-    # ten buckets give the ramp a genuinely easy opening decile (area <= 162).
-    bucket_edges: [162, 380, 621, 700, 750, 783, 810, 840, 870]
-    difficulty_ramp_window: ${grpo.num_prompts_per_step}
-    difficulty_ramp_steps: ${grpo.max_num_steps}
-    num_tasks: 4096
+    # the final bucket. Reported as bucket_1..bucket_19 metrics. These are
+    # the ingested-v1 train-split ventiles: max-over-pairs area saturates
+    # near 900 for half the corpus, so equal-mass edges beat round numbers,
+    # and the opening ventile (area <= 91, 2,299 puzzles) is small enough for
+    # a non-finetuned executor. The p95 edge ties the max area (900), so 18
+    # edges make 19 buckets; counts are uneven where edges tie at the top
+    # (756, 783/784, 810/812, 840/841), which is fine.
+    bucket_edges: [91, 162, 264, 380, 525, 621, 667, 700, 725, 750, 756, 783, 784, 810, 812, 840, 841, 870]
+    # Staged curriculum: hold each ventile for curriculum_hold_steps steps,
+    # easiest first; steps past the last ventile stay on it. Pure staging
+    # (windows hold the current ventile only) is the default; flip
+    # curriculum_cumulative to true — cycle the current plus all earlier
+    # ventiles — if early GRPO groups degenerate on one-ventile windows.
+    curriculum_window: ${grpo.num_prompts_per_step}
+    curriculum_hold_steps: 3
+    curriculum_cumulative: false
+    # Exactly max_num_steps (19 ventiles x 3 hold) x 32 prompts per step;
+    # the preflight requires the dataset to cover the run.
+    num_tasks: 1824
     # NVARC-side validation off: validation runs solely on the real split.
     num_val_tasks: 0
     seed: ${grpo.seed}
