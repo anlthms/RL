@@ -6,7 +6,8 @@ defaults:
   - env_nvarc_executor.yaml
 
 grpo:
-  max_num_steps: 40
+  # One full staged pass over the 19 difficulty ventiles at 3 steps per hold.
+  max_num_steps: 57
   num_prompts_per_step: 32
 
 policy:
