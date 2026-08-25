@@ -92,13 +92,16 @@ env:
           # validation loop rows override to hidden_test per row.
           protocol: eval_sequence
           # Proposer chat budget: trainable trajectories (final prompt +
-          # reserved output) must fit the 12288 train pack. 6144 output
-          # (28% of v1 proposer turns truncated at 4096): 6144 + 512 margin
-          # leaves 5632 for prompt + history inside the 12288 limit.
+          # reserved output) must fit the 12288 train/logprob pack. The
+          # plan's 6144 cap overflowed a pack bin by ~560 tokens (v2 crash
+          # at step 30), so the proposer runs at the 5120 fallback with a
+          # doubled template margin; the executor keeps the full 6144
+          # engine budget (max executor training prompt is 3428 tokens,
+          # so 3428 + 6144 always fits the pack).
           model_context_limit: 12288
-          reserved_proposer_output_tokens: 6144
-          chat_template_margin: 512
-          proposer_max_output_tokens: 6144
+          reserved_proposer_output_tokens: 5120
+          chat_template_margin: 1024
+          proposer_max_output_tokens: 5120
           # Match the native executor contract's output budget.
           executor_max_output_tokens: 6144
           # The context budget usually terminates episodes first; this is the
