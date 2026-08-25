@@ -8,18 +8,26 @@
 # (data.shuffle: false; one num_prompts_per_step window per step).
 #
 # Validation is solely the real ARC-AGI-2 evaluation split (120 tasks / 172
-# test-pair rows) as single-turn induction rows for arc_agi_2_simple_agent;
-# the verifier returns cell_match/grid_match as top-level scalars, which the
-# gym rollout surfaces as val:arc_agi_2_simple_agent/<metric>.
+# test-pair rows), measured two ways per row: single-turn induction via
+# arc_agi_2_simple_agent (the cheap single-shot curve) and the full
+# proposer-executor refinement loop via arc_transform_refinement_agent in
+# hidden_test protocol (the deployment-shaped number: refine the rule on the
+# demo pairs, then answer the hidden test grid). The verifier returns
+# grid_match/cell_match as top-level scalars, which the gym rollout surfaces
+# per agent as val:<agent>/<metric>/<stat>. Validation is greedy
+# (val_temperature 0.0, one generation per prompt): low-noise curves are a
+# precondition for the scaling-law fit.
 
 grpo:
   val_at_start: true
   val_at_end: true
-  val_period: 10
+  val_period: 16
+  val_num_generations_per_prompt: 1
   # The gym entrypoint requires null and scores the whole validation file in
-  # one batch (val_batch_size is force-set to the file length, 172).
+  # one batch (val_batch_size is force-set to the file length: 172 induction
+  # + 172 loop rows).
   max_val_samples: null
-  val_batch_size: 172
+  val_batch_size: 344
 
 policy:
   # 20480 engine ceiling for the ~16.3k-token real-ARC induction prompts;
@@ -30,6 +38,10 @@ policy:
   max_total_sequence_length: 20480
   generation:
     max_new_tokens: 6144
+    # Greedy validation on the megatron NeMo-Gym path: the sampling profile
+    # is stamped per request and mcore's dynamic server maps temperature 0.0
+    # to greedy decoding.
+    val_temperature: 0.0
     mcore_generation_config:
       expose_http_server: true
     vllm_cfg:
@@ -37,6 +49,12 @@ policy:
   sequence_packing:
     train_mb_tokens: 12288
     logprob_mb_tokens: 12288
+  megatron_cfg:
+    scheduler:
+      # Constant lr 3e-6 with no warmup: the run resumes across several
+      # 4h-wall segments with save_optimizer false, and a per-segment
+      # re-warm would ripple the scaling-law curve at every resume.
+      lr_warmup_iters: 0
 
 data:
   _override_: true
@@ -45,9 +63,9 @@ data:
   num_workers: 1
   use_multiple_dataloader: false
   train:
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v1/train.jsonl
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v2/train.jsonl
   validation:
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v1/val.jsonl
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v2/val.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: "nemo_gym"
@@ -70,13 +88,17 @@ env:
     arc_transform_refinement_agent:
       responses_api_agents:
         arc_transform_refinement_agent:
+          # Training proposer rows run the eval_sequence protocol; the
+          # validation loop rows override to hidden_test per row.
           protocol: eval_sequence
           # Proposer chat budget: trainable trajectories (final prompt +
-          # reserved output) must fit the 12288 train pack.
+          # reserved output) must fit the 12288 train pack. 6144 output
+          # (28% of v1 proposer turns truncated at 4096): 6144 + 512 margin
+          # leaves 5632 for prompt + history inside the 12288 limit.
           model_context_limit: 12288
-          reserved_proposer_output_tokens: 4096
+          reserved_proposer_output_tokens: 6144
           chat_template_margin: 512
-          proposer_max_output_tokens: 4096
+          proposer_max_output_tokens: 6144
           # Match the native executor contract's output budget.
           executor_max_output_tokens: 6144
           # The context budget usually terminates episodes first; this is the
@@ -85,13 +107,16 @@ env:
 
 checkpointing:
   enabled: true
-  # Real-split exact match sits at ~0 for a long time, so select checkpoints
-  # on the induction rows' cell match. The gym rollout surfaces per-agent
-  # scalars as <agent>/<field>/<stat> (calculate_single_metric appends the
-  # stat suffix), hence the /mean.
-  metric_name: "val:arc_agi_2_simple_agent/cell_match/mean"
-  save_period: 10
-  keep_top_k: 2
+  # Select checkpoints on the deployment-shaped loop-val metric: cell match
+  # of the final hidden-test answers (exact match sits at ~0 for a long
+  # time). The gym rollout surfaces per-agent scalars as
+  # <agent>/<field>/<stat> (calculate_single_metric appends the stat
+  # suffix), hence the /mean.
+  metric_name: "val:arc_transform_refinement_agent/cell_match/mean"
+  save_period: 16
+  # The scaling law needs kept checkpoints at multiple data scales, not just
+  # the best two.
+  keep_top_k: 6
 
 logger:
   monitor_gpus: true

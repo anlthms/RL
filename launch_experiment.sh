@@ -54,8 +54,8 @@ esac
 
 ENV="${ENV:-rl_blend}"
 case "${ENV}" in
-  rl_blend | nvarc_executor_4n | nvarc_cotrain_4n) ;;
-  *) die "invalid ENV: ${ENV} (expected rl_blend, nvarc_executor_4n, or nvarc_cotrain_4n)" ;;
+  rl_blend | nvarc_executor_4n | nvarc_cotrain_4n | nvarc_cotrain_32n) ;;
+  *) die "invalid ENV: ${ENV} (expected rl_blend, nvarc_executor_4n, nvarc_cotrain_4n, or nvarc_cotrain_32n)" ;;
 esac
 if [[ "${ENV}" == nvarc_* && "${TOPOLOGY}" != colocated ]]; then
   die "${ENV} supports only colocated topology"
@@ -115,7 +115,7 @@ fi
 # Gym-driven arms (rollouts over NeMo-Gym HTTP servers) need their own
 # entrypoint; everything else runs on the standard one.
 case "${ENV}" in
-  rl_blend | nvarc_cotrain_4n) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
+  rl_blend | nvarc_cotrain_4n | nvarc_cotrain_32n) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
   *)                           ENTRYPOINT="examples/run_grpo.py" ;;
 esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"

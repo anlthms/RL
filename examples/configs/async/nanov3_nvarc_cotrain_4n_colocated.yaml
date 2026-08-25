@@ -1,15 +1,18 @@
-# Four-node/16-GPU NVARC executor+proposer co-training over NeMo-Gym. TP4
-# topology; the sequence budget and the gym wiring live in
-# env_nvarc_cotrain.yaml; the curriculum and role schedule live in the
-# materialized JSONL (tools/nvarc_cotrain_materialize.py, whose --steps,
-# --window, and --hold-steps must match this file).
+# Four-node/16-GPU NVARC executor+proposer co-training over NeMo-Gym: the
+# small-scale plumbing vehicle for the 32-node recipe (same TP4 topology,
+# window, and global batch; fewer data-parallel replicas). The sequence
+# budget and the gym wiring live in env_nvarc_cotrain.yaml; the curriculum
+# and role schedule live in the materialized JSONL
+# (tools/nvarc_cotrain_materialize.py, whose --steps, --window, and
+# --hold-steps must match this file).
 defaults:
   - nanov3_colocated.yaml
   - env_nvarc_cotrain.yaml
 
 grpo:
-  # One full staged pass over the 19 difficulty ventiles at 3 steps per hold.
-  max_num_steps: 57
+  # Mirrors the 32-node recipe (10 ventiles x hold 32); plumbing runs cap
+  # this with MAX_STEPS.
+  max_num_steps: 320
   num_prompts_per_step: 32
 
 policy:

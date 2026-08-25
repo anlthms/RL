@@ -122,9 +122,32 @@ def main() -> None:
             "executor_max_output_tokens must match generation.max_new_tokens "
             "(one executor contract across both paths)"
         )
-    # The gym rollout surfaces per-agent scalars as <agent>/<field>/<stat>.
-    if checkpointing["metric_name"] != f"val:{EXECUTOR_AGENT}/cell_match/mean":
-        errors.append(f"checkpoints must select on val:{EXECUTOR_AGENT}/cell_match/mean")
+    if (
+        agent_override.get("proposer_max_output_tokens")
+        != policy["generation"]["max_new_tokens"]
+    ):
+        errors.append(
+            "proposer_max_output_tokens must match generation.max_new_tokens "
+            "(the engine cap would otherwise truncate proposer turns early)"
+        )
+    if agent_override.get("reserved_proposer_output_tokens", 0) < agent_override.get(
+        "proposer_max_output_tokens", 0
+    ):
+        errors.append(
+            "reserved_proposer_output_tokens must cover proposer_max_output_tokens "
+            "or the context budget under-reserves for the next proposer turn"
+        )
+    # Checkpoint selection follows the deployment-shaped loop-val metric. The
+    # gym rollout surfaces per-agent scalars as <agent>/<field>/<stat>.
+    if checkpointing["metric_name"] != f"val:{PROPOSER_AGENT}/cell_match/mean":
+        errors.append(
+            f"checkpoints must select on val:{PROPOSER_AGENT}/cell_match/mean"
+        )
+    # Low-noise validation curves are a precondition for the scaling-law fit.
+    if policy["generation"].get("val_temperature") != 0.0:
+        errors.append("validation must be greedy: generation.val_temperature 0.0")
+    if grpo.get("val_num_generations_per_prompt") != 1:
+        errors.append("greedy validation needs val_num_generations_per_prompt 1")
 
     # ------------------------------------------------ materialized data ----
     train_path = Path(data["train"]["data_path"])
@@ -147,14 +170,21 @@ def main() -> None:
 
     train_rows = _read_jsonl(train_path)
     window = stats["window"]
-    if len(train_rows) != stats["steps"] * window:
+    pad_steps = stats.get("pad_steps", 0)
+    materialized_steps = stats["steps"] + pad_steps
+    if len(train_rows) != materialized_steps * window:
         errors.append(
             f"train file has {len(train_rows)} rows but the schedule needs "
-            f"{stats['steps'] * window}"
+            f"{materialized_steps * window} ({stats['steps']} steps + {pad_steps} pad)"
+        )
+    if pad_steps == 0:
+        errors.append(
+            "no pad windows: the async collector prefetches buffer-capacity "
+            "rows and would starve the final steps (materialize with --pad-steps)"
         )
     num_stages = stats["num_stages"]
     mixture_ok = True
-    for step in range(stats["steps"]):
+    for step in range(materialized_steps):
         stage, executor_rows, _ = role_counts(
             step,
             window=window,
@@ -200,16 +230,38 @@ def main() -> None:
                 break
 
     val_rows = _read_jsonl(val_path)
-    if len(val_rows) != _REAL_SPLIT_ROWS:
+    induction_rows = [row for row in val_rows if row.get("role") == "induction"]
+    loop_rows = [row for row in val_rows if row.get("role") == "induction_loop"]
+    if len(induction_rows) != _REAL_SPLIT_ROWS or len(loop_rows) != _REAL_SPLIT_ROWS:
         errors.append(
-            f"validation file has {len(val_rows)} rows, expected {_REAL_SPLIT_ROWS}"
+            f"validation file needs {_REAL_SPLIT_ROWS} induction + "
+            f"{_REAL_SPLIT_ROWS} loop rows, found "
+            f"{len(induction_rows)} + {len(loop_rows)} (of {len(val_rows)})"
         )
-    if any(row["agent_ref"]["name"] != EXECUTOR_AGENT for row in val_rows):
-        errors.append("every validation row must route to the single-turn agent")
-    if any("target" not in row or "test_input" not in row for row in val_rows):
+    if grpo.get("val_batch_size") != len(val_rows):
         errors.append(
-            "validation rows must carry target and test_input for the verifier"
+            f"grpo.val_batch_size must equal the validation file length "
+            f"({len(val_rows)})"
         )
+    if any(row["agent_ref"]["name"] != EXECUTOR_AGENT for row in induction_rows):
+        errors.append("every induction row must route to the single-turn agent")
+    if any("target" not in row or "test_input" not in row for row in induction_rows):
+        errors.append(
+            "induction rows must carry target and test_input for the verifier"
+        )
+    for row in loop_rows:
+        if row["agent_ref"]["name"] != PROPOSER_AGENT:
+            errors.append("a loop row routes to the wrong agent")
+            break
+        if row.get("protocol") != "hidden_test":
+            errors.append("loop rows must override protocol to hidden_test")
+            break
+        if row["responses_create_params"]["input"]:
+            errors.append("a loop row carries a pre-rendered prompt")
+            break
+        if not row.get("train") or not row.get("test"):
+            errors.append("a loop row is missing demo or test pairs")
+            break
 
     print(f"config: {args.config}")
     print(f"nodes: {resolved['cluster']['num_nodes']}")
@@ -227,7 +279,8 @@ def main() -> None:
     )
     print(
         f"train: {len(train_rows)} rows "
-        f"({stats['executor_rows']} executor / {stats['proposer_rows']} proposer)"
+        f"({stats['executor_rows']} executor / {stats['proposer_rows']} proposer, "
+        f"{pad_steps} pad windows)"
     )
     if mixture_ok and stats["step_mixture"]:
         first, last = stats["step_mixture"][0], stats["step_mixture"][-1]
@@ -235,7 +288,10 @@ def main() -> None:
             f"mixture: {first['executor_rows']}:{first['proposer_rows']} at step 0 -> "
             f"{last['executor_rows']}:{last['proposer_rows']} at step {last['step']}"
         )
-    print(f"validation: {len(val_rows)} real ARC-AGI-2 induction rows")
+    print(
+        f"validation: {len(val_rows)} rows ({len(induction_rows)} induction + "
+        f"{len(loop_rows)} hidden_test loop)"
+    )
     print(
         "checkpointing: "
         f"every {checkpointing['save_period']} steps, keep {checkpointing['keep_top_k']}, "
