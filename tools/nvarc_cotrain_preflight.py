@@ -123,12 +123,12 @@ def main() -> None:
             "(one executor contract across both paths)"
         )
     if (
-        agent_override.get("proposer_max_output_tokens")
-        != policy["generation"]["max_new_tokens"]
+        agent_override.get("proposer_max_output_tokens", 0)
+        > policy["generation"]["max_new_tokens"]
     ):
         errors.append(
-            "proposer_max_output_tokens must match generation.max_new_tokens "
-            "(the engine cap would otherwise truncate proposer turns early)"
+            "proposer_max_output_tokens must not exceed generation.max_new_tokens "
+            "(the engine cap would truncate proposer turns early)"
         )
     if agent_override.get("reserved_proposer_output_tokens", 0) < agent_override.get(
         "proposer_max_output_tokens", 0
