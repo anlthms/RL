@@ -502,19 +502,25 @@ def setup(
         policy_config["generation"] = generation_config
     _validate_multimodal_dedup_capability(master_config)
 
-    # Validation-only sampling is honored only on the NeMo-Gym vLLM rollout
-    # path; everywhere else validation must sample exactly like training.
+    # Validation-only sampling is honored only on the NeMo-Gym rollout path,
+    # where the profile is stamped per-request onto responses_create_params;
+    # everywhere else validation must sample exactly like training. Both
+    # engines honor the stamped params: vLLM natively, and mcore's dynamic
+    # text-gen server reads per-request temperature/top_p (temperature 0 maps
+    # to greedy top_k=1) in its completions/chat_completions endpoints.
     val_sampling_overridden = (
         generation_config["val_temperature"] != generation_config["temperature"]
         or generation_config["val_top_p"] != generation_config["top_p"]
         or generation_config["val_top_k"] != generation_config["top_k"]
     )
     if val_sampling_overridden:
-        assert generation_config["backend"] == "vllm" and should_use_nemo_gym(
-            master_config
-        ), (
+        assert generation_config["backend"] in (
+            "vllm",
+            "megatron",
+        ) and should_use_nemo_gym(master_config), (
             "generation.val_temperature/val_top_p/val_top_k differing from the "
-            "train sampling params is only supported for vLLM NeMo-Gym rollouts."
+            "train sampling params is only supported for NeMo-Gym rollouts "
+            "(vLLM or megatron backend)."
         )
         # The NeMo-Gym path only stamps temperature/top_p onto requests and
         # rejects any top_k at rollout time, so a val_top_k override can never

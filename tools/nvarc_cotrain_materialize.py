@@ -30,8 +30,17 @@ ventile curriculum and the role schedule are baked into the row order here:
   proposer context.
 
 Validation is the real ARC-AGI-2 evaluation split (120 tasks / 172 test-pair
-rows) as single-turn induction rows for the same simple agent, so
-``cell_match`` reaches checkpoint selection as a per-agent metric.
+rows), each emitted twice: as a single-turn induction row for the simple
+agent (the cheap single-shot curve) and as a ``hidden_test`` refinement-loop
+row for ``arc_transform_refinement_agent`` (the deployment-shaped
+measurement: refine on the demo pairs, then answer the hidden test grid).
+The loop rows carry ``protocol: hidden_test``, overriding the agent's
+``eval_sequence`` training default per row.
+
+``--pad-steps`` appends extra fully-scheduled windows past ``--steps``: the
+async collector eagerly consumes buffer-capacity rows at startup, so an
+exact-sized file starves the final steps of a run (grpo.max_num_steps must
+stay ``--steps``).
 
 A reactive pause of the role schedule on executor-validation regression (the
 proposal's pause rule) is NOT possible with a pre-materialized file; monitor
@@ -82,6 +91,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hold-steps", type=int, required=True, help="steps per ventile stage"
+    )
+    parser.add_argument(
+        "--pad-steps",
+        type=int,
+        default=0,
+        help="extra materialized windows past --steps (collector prefetch tail)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--demo-pairs", type=int, default=3)
@@ -192,12 +207,14 @@ def _proposer_row(
 
 
 def _validation_rows(arc_data_path: str, template: str) -> list[dict]:
-    rows = []
+    """Each real test-pair row twice: single-shot induction and the full loop."""
+    induction_rows = []
+    loop_rows = []
     for source in load_arc_split(arc_data_path, "evaluation"):
         prompt = template.format(
             format_task_prompt(source["train_pairs"], source["test_input"])
         )
-        rows.append(
+        induction_rows.append(
             {
                 "responses_create_params": {
                     "input": [{"role": "user", "content": prompt}]
@@ -209,7 +226,18 @@ def _validation_rows(arc_data_path: str, template: str) -> list[dict]:
                 "role": "induction",
             }
         )
-    return rows
+        loop_rows.append(
+            {
+                "responses_create_params": {"input": []},
+                "agent_ref": {"type": "responses_api_agents", "name": PROPOSER_AGENT},
+                "protocol": "hidden_test",
+                "train": source["train_pairs"],
+                "test": [{"input": source["test_input"], "output": source["target"]}],
+                "task_id": source["task_id"],
+                "role": "induction_loop",
+            }
+        )
+    return induction_rows + loop_rows
 
 
 def main() -> None:
@@ -245,7 +273,7 @@ def main() -> None:
 
     train_rows: list[dict] = []
     step_mixture: list[dict] = []
-    for step in range(args.steps):
+    for step in range(args.steps + args.pad_steps):
         stage, executor_rows, progress = role_counts(
             step, window=args.window, hold_steps=args.hold_steps, num_stages=num_stages
         )
@@ -308,6 +336,7 @@ def main() -> None:
     stats = {
         "seed": args.seed,
         "steps": args.steps,
+        "pad_steps": args.pad_steps,
         "window": args.window,
         "hold_steps": args.hold_steps,
         "num_stages": num_stages,
@@ -325,7 +354,8 @@ def main() -> None:
     print(
         f"train: {stats['train_rows']} rows "
         f"({stats['executor_rows']} executor / {stats['proposer_rows']} proposer) "
-        f"over {args.steps} steps; validation: {len(val_rows)} rows"
+        f"over {args.steps} steps + {args.pad_steps} pad; "
+        f"validation: {len(val_rows)} rows"
     )
     print(f"first step mixture: {step_mixture[0]}; last: {step_mixture[-1]}")
 
