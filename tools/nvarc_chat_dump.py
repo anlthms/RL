@@ -19,16 +19,15 @@ Three kinds:
   from the newest ``train_data_step*.jsonl`` dump.
 - ``induction``: a real validation rollout on the official ARC-AGI-2
   evaluation split from the newest ``val_data_step*.jsonl`` dump.
-- ``proposer``: the full refinement-episode chat (proposer session, fresh
-  executor sessions, verification feedback, revision, test follow-up)
-  rendered from a real ingested puzzle via the gym agent's own prompt
-  builders. No proposer training runs exist yet, so the model turns are
-  clearly marked placeholders; the prompts are exactly what the agent sends.
+- ``proposer``: a real trained proposer trajectory from the newest
+  ``train_data_step*.jsonl`` dump, decoded from its token ids (proposer
+  rows log empty ``content``), with the loss-masked trainable span printed
+  separately. Requires ``--tokenizer``.
 
 Examples:
     uv run tools/nvarc_chat_dump.py --kind executor
     uv run tools/nvarc_chat_dump.py --kind induction --pick best
-    uv run tools/nvarc_chat_dump.py --kind proposer --data-dir <ingested-dir>
+    uv run tools/nvarc_chat_dump.py --kind proposer --tokenizer <model-dir>
 """
 
 from __future__ import annotations
@@ -36,11 +35,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GYM_ROOT = REPO_ROOT / "3rdparty" / "Gym-workspace" / "Gym"
 
 _TURN_RE = re.compile(r"<\|im_start\|>(\w+)\n(.*?)(?:<\|im_end\|>|$)", re.DOTALL)
 
@@ -136,117 +133,75 @@ def dump_logged_chat(log_dir: Path, prefix: str, pick: str, index: int | None) -
                 _print_turn(sub_role, sub_text)
 
 
-def _agent_instructions() -> dict[str, str]:
-    """Read the agent's role-instruction constants from its source with ast."""
-    import ast
+def dump_real_proposer_chat(
+    log_dir: Path,
+    pick: str,
+    index: int | None,
+    tokenizer_path: str,
+    agent_name: str = "arc_transform_refinement_agent",
+) -> None:
+    """Print a real trained proposer trajectory decoded from its token ids.
 
-    app_path = (
-        GYM_ROOT / "responses_api_agents" / "arc_transform_refinement_agent" / "app.py"
-    )
-    wanted = {"PROPOSER_INSTRUCTIONS", "EXECUTOR_INSTRUCTIONS"}
-    found: dict[str, str] = {}
-    for node in ast.parse(app_path.read_text()).body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in wanted:
-                    found[target.id] = ast.literal_eval(node.value)
-    missing = wanted - set(found)
-    if missing:
-        raise RuntimeError(f"could not find {sorted(missing)} in {app_path}")
-    return found
-
-
-def dump_proposer_episode(data_dir: Path, seed: int) -> None:
-    """Render a full refinement episode from a real proposer_eval puzzle.
-
-    Prompts come from the gym agent's own builders; model turns are
-    placeholders because no proposer runs exist yet.
+    Proposer rows log empty ``content`` (the episode spans gym sub-sessions),
+    so the chat is recovered from the trainable trajectory itself:
+    ``token_ids`` decoded with the run's tokenizer. The loss-masked span
+    (the final proposer turn, per the trainable-trajectory contract) is
+    printed again separately so the trained tokens are unambiguous.
     """
-    # Deferred imports: the gym tree and pyarrow are only needed here.
-    sys.path.insert(0, str(GYM_ROOT))
-    import random
+    from transformers import AutoTokenizer  # deferred: needs the run container
 
-    import pyarrow.dataset as ds
-    from resources_servers.arc_agi import (  # pyrefly: ignore[import-error]  resolved via the GYM_ROOT sys.path entry above
-        logic,
+    dump = newest_dump(log_dir, "train_data")
+    rows = [json.loads(line) for line in dump.open()]
+    filtered = [
+        (position, row)
+        for position, row in enumerate(rows)
+        if row.get("agent_ref") and row["agent_ref"][0].get("name") == agent_name
+    ]
+    if not filtered:
+        raise SystemExit(f"no {agent_name} rows in {dump}")
+
+    if index is not None:
+        position, row = filtered[index]
+    elif pick == "first":
+        position, row = filtered[0]
+    else:
+        chooser = max if pick == "best" else min
+        position, row = chooser(filtered, key=lambda item: item[1]["rewards"][0])
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    token_ids = row["token_ids"][0]
+    loss_mask = row["token_loss_mask"][0]
+    trainable = int(sum(loss_mask))
+    print(f"source: {dump}")
+    print(
+        f"sample: row {position} of {len(rows)} ({len(filtered)} {agent_name} rows)   "
+        f"reward: {row['rewards'][0]:+.3f}   "
+        f"tokens: {len(token_ids)} ({trainable} trainable)\n"
     )
 
-    # The agent's app.py imports the whole nemo_gym package (server deps this
-    # tool does not need), so lift its two instruction constants from source.
-    instructions = _agent_instructions()
+    for role, text in render_templated_prompt(tokenizer.decode(token_ids)):
+        if role == "system" and not text.strip():
+            continue
+        _print_turn(role, text)
 
-    shards = sorted(data_dir.glob("data-*.parquet"))
-    if not shards:
-        raise FileNotFoundError(f"no data-*.parquet shards under {data_dir}")
-    rows = (
-        ds.dataset([str(s) for s in shards], format="parquet")
-        .to_table(
-            columns=["puzzle_id", "pairs_json", "difficulty"],
-            filter=(ds.field("split") == "proposer_eval")
-            & (ds.field("difficulty") <= 64),
-        )
-        .to_pylist()
-    )
-    row = random.Random(seed).choice(sorted(rows, key=lambda r: r["puzzle_id"]))
-    pairs = json.loads(row["pairs_json"])
-    train_pairs, test_pair = pairs[:2], pairs[2]
-    placeholder = "[model output would appear here]"
-
-    print(f"puzzle: {row['puzzle_id']} (proposer_eval, difficulty {row['difficulty']})")
-    print("Prompts are the agent's real ones; assistant turns are placeholders.\n")
-
-    print("################ PROPOSER SESSION (persistent) ################\n")
-    _print_turn("system", instructions["PROPOSER_INSTRUCTIONS"])
-    _print_turn(
-        "user",
-        logic.build_proposer_prompt(
-            train_pairs=train_pairs, test_inputs=[test_pair["input"]]
-        ),
-    )
-    _print_turn("assistant", f"{placeholder}\n<transform_description>...rule...")
-
-    print("########## EXECUTOR SESSION (fresh chat per call) ##########\n")
-    _print_turn("system", instructions["EXECUTOR_INSTRUCTIONS"])
-    _print_turn(
-        "user",
-        logic.build_executor_prompt(
-            description="...rule text from the proposer, verbatim...",
-            inputs={
-                "train_1": train_pairs[0]["input"],
-                "train_2": train_pairs[1]["input"],
-            },
-            tag="train_predictions",
-        ),
-    )
-    _print_turn("assistant", f"{placeholder}\n<train_predictions>{{...}}")
-
-    # Show the deterministic feedback with one deliberately wrong prediction.
-    wrong = [list(cells) for cells in train_pairs[1]["output"]]
-    wrong[0][0] = (wrong[0][0] + 1) % 10
-    verification = logic.verify_predictions(
-        predictions={"train_1": train_pairs[0]["output"], "train_2": wrong},
-        correct={
-            "train_1": train_pairs[0]["output"],
-            "train_2": train_pairs[1]["output"],
-        },
-    )
-
-    print("############ PROPOSER SESSION, revision turn ############\n")
-    _print_turn("user", logic.build_revision_prompt(verification.feedback))
-    _print_turn("assistant", f"{placeholder}\n<transform_description>...revised...")
-
-    print("###### EXECUTOR SESSION (fresh), test follow-up ######\n")
-    _print_turn(
-        "user",
-        logic.build_test_followup_prompt(test_inputs={"test_1": test_pair["input"]}),
-    )
-    _print_turn("assistant", f"{placeholder}\n<answers>{{...}}")
+    spans: list[list[int]] = []
+    previous_masked = False
+    for token_id, masked in zip(token_ids, loss_mask):
+        if masked:
+            if not previous_masked:
+                spans.append([])
+            spans[-1].append(token_id)
+        previous_masked = bool(masked)
+    for span in spans:
+        _print_turn("trainable span (loss-masked tokens)", tokenizer.decode(span))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--kind", choices=("executor", "induction", "proposer"), default="executor"
+        "--kind",
+        choices=("executor", "induction", "proposer"),
+        default="executor",
     )
     parser.add_argument("--log-dir", type=Path, default=REPO_ROOT / "logs")
     parser.add_argument(
@@ -257,20 +212,16 @@ def main() -> None:
     )
     parser.add_argument("--index", type=int, default=None)
     parser.add_argument(
-        "--data-dir",
-        type=Path,
+        "--tokenizer",
         default=None,
-        help="ingested NVARC parquet dir (proposer kind only)",
+        help="tokenizer path for decoding token_ids (proposer kind only)",
     )
-    parser.add_argument("--seed", type=int, default=0, help="proposer puzzle choice")
     args = parser.parse_args()
 
     if args.kind == "proposer":
-        data_dir: Path | None = args.data_dir
-        if data_dir is None:
-            parser.error("--kind proposer requires --data-dir")
-        else:
-            dump_proposer_episode(data_dir, args.seed)
+        if args.tokenizer is None:
+            parser.error("--kind proposer requires --tokenizer")
+        dump_real_proposer_chat(args.log_dir, args.pick, args.index, args.tokenizer)
     else:
         prefix = "train_data" if args.kind == "executor" else "val_data"
         dump_logged_chat(args.log_dir, prefix, args.pick, args.index)

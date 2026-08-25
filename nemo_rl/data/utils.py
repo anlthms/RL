@@ -78,9 +78,15 @@ def load_dataloader_state(
     read out of the sibling ``config.yaml`` so every existing checkpoint is
     automatically compatible.
     """
-    saved_state = torch.load(
-        os.path.join(checkpoint_path, f"train_dataloader{suffix}.pt")
-    )
+    state_path = os.path.join(checkpoint_path, f"train_dataloader{suffix}.pt")
+    if not os.path.exists(state_path):
+        print(
+            f"  ⚠ No dataloader state at {state_path}. Skipping dataloader state "
+            f"restore; the dataset starts from index 0.",
+            flush=True,
+        )
+        return
+    saved_state = torch.load(state_path)
 
     config_path = os.path.join(checkpoint_path, "config.yaml")
     if os.path.exists(config_path):
