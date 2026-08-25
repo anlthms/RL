@@ -1,0 +1,32 @@
+# 32-node/128-GPU NVARC executor+proposer co-training over NeMo-Gym. Same
+# TP4 model parallelism as the 4-node recipe with 8x the data-parallel
+# replicas; window and global batch are unchanged, so the curriculum schedule
+# is identical and only the wall clock shrinks. The sequence budget and the
+# gym wiring live in env_nvarc_cotrain.yaml; the curriculum and role schedule
+# live in the materialized JSONL (tools/nvarc_cotrain_materialize.py, whose
+# --steps, --window, and --hold-steps must match this file; --pad-steps
+# materializes the collector-prefetch tail past max_num_steps).
+defaults:
+  - nanov3_colocated.yaml
+  - env_nvarc_cotrain.yaml
+
+grpo:
+  # Long-hold ladder: 10 ventiles x 32 steps per hold (stages past step 320
+  # are never reached; later ventiles are deliberately out of scope). Fresh
+  # puzzles throughout: 320 x 32 = 10,240 (~9.9% of the train pool).
+  max_num_steps: 320
+  num_prompts_per_step: 32
+
+policy:
+  train_global_batch_size: 512
+  make_sequence_length_divisible_by: 8
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+
+  generation:
+    mcore_generation_config:
+      tensor_model_parallel_size: 4
+      buffer_size_gb: 24
+
+cluster:
+  num_nodes: 32

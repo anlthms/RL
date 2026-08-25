@@ -131,6 +131,8 @@ def materialized(tmp_path, monkeypatch):
             "3",
             "--eval-pairs",
             "2",
+            "--pad-steps",
+            "2",
         ],
     )
     _write_nvarc_fixture(data_dir)
@@ -148,7 +150,11 @@ def materialized(tmp_path, monkeypatch):
 
 def test_materializer_bakes_the_role_schedule_into_row_order(materialized) -> None:
     train, _, stats = materialized
-    assert len(train) == 32
+    # 8 scheduled steps + 2 pad windows (collector prefetch tail), window 4.
+    assert len(train) == 40
+    assert stats["steps"] == 8
+    assert stats["pad_steps"] == 2
+    assert len(stats["step_mixture"]) == 10
     assert stats["num_stages"] == 4
     for step, entry in enumerate(stats["step_mixture"]):
         window_rows = train[step * 4 : (step + 1) * 4]
@@ -184,13 +190,27 @@ def test_proposer_rows_hold_out_disjoint_eval_pairs(materialized) -> None:
     assert len(row["test"]) == 2
 
 
-def test_validation_rows_are_induction_tasks_for_the_single_turn_agent(
+def test_validation_rows_pair_induction_with_hidden_test_loops(
     materialized,
 ) -> None:
     _, val, _ = materialized
-    assert len(val) == 3
-    for row in val:
+    induction = [row for row in val if row["role"] == "induction"]
+    loops = [row for row in val if row["role"] == "induction_loop"]
+    assert len(induction) == 3 and len(loops) == 3
+    for row in induction:
         assert row["agent_ref"]["name"] == EXECUTOR_AGENT
         prompt = row["responses_create_params"]["input"][0]["content"]
         assert "<test_input>" in prompt and "<answer>" in prompt
         assert row["target"] and row["test_input"]
+    for row in loops:
+        assert row["agent_ref"]["name"] == PROPOSER_AGENT
+        assert row["protocol"] == "hidden_test"
+        assert row["responses_create_params"]["input"] == []
+        assert row["train"] and len(row["test"]) == 1
+        assert row["test"][0]["input"] and row["test"][0]["output"]
+    # The two views cover the same test pairs: the loop row's hidden output
+    # matches the induction row's target for the same task order.
+    for single, loop in zip(induction, loops):
+        assert single["task_id"] == loop["task_id"]
+        assert single["target"] == loop["test"][0]["output"]
+        assert single["test_input"] == loop["test"][0]["input"]
