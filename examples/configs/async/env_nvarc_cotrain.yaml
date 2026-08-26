@@ -63,9 +63,13 @@ data:
   num_workers: 1
   use_multiple_dataloader: false
   train:
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v2/train.jsonl
+    # v3: same 320-step schedule/seed as v2, but 56 pad windows (~8 per 4h
+    # segment: EACH resume boundary discards up to a buffer-fill of
+    # prefetched rows -- v2 starved at step 313/320 with only 12 total)
+    # and the val loop rows stamped with the 19456 engine-window context.
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v3/train.jsonl
   validation:
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v2/val.jsonl
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-cotrain/v3/val.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: "nemo_gym"

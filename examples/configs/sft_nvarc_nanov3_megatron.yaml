@@ -25,7 +25,7 @@ checkpointing:
   higher_is_better: false
   keep_top_k: 6
   save_period: 8
-  checkpoint_must_save_by: "03:40:00"
+  checkpoint_must_save_by: "00:03:40:00"  # DD:HH:MM:SS
   # Weights only: downstream consumers are the loop-val/benchmark evaluators
   # and the RL warm start, none of which read optimizer state.
   save_optimizer: false
