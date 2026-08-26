@@ -61,6 +61,9 @@ policy:
     expert_model_parallel_size: 4
     sequence_parallel: true
     pipeline_dtype: bfloat16
+    # nano-v3's squared-relu activation is incompatible with the fusion
+    # (same setting as the GRPO nano-v3 recipe).
+    bias_activation_fusion: false
     freeze_moe_router: true
     moe_router_dtype: "fp32"
     moe_router_load_balancing_type: "none"
