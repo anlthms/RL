@@ -1,0 +1,109 @@
+# NVARC no-think SFT prior for the ARC-AGI-2 co-training campaign: nano-v3
+# imitates think-free executor answers (<answer> grid blocks) and canonical
+# 4-section proposer rules on prompts byte-parity with the RL pipeline
+# (tools/nvarc_sft_materialize.py). A SHORT format/length prior before
+# anti-runaway RL, not a convergence run: one epoch, constant small lr.
+#
+# Topology mirrors the 4-node cotrain recipe (TP4/EP4 on 4x4 GPUs); MoE and
+# optimizer hygiene mirror examples/nemo_gym/grpo_nanov3.yaml (frozen router,
+# aux loss off, distributed bf16 optimizer).
+defaults: sft.yaml
+
+sft:
+  max_num_epochs: 1
+  max_num_steps: 96
+  val_period: 8
+  val_batches: 8
+  val_global_batch_size: 64
+  val_micro_batch_size: 1
+  val_at_start: true
+  val_at_end: true
+
+checkpointing:
+  checkpoint_dir: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/checkpoints/${logger.wandb.name}
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 6
+  save_period: 8
+  checkpoint_must_save_by: "03:40:00"
+  # Weights only: downstream consumers are the loop-val/benchmark evaluators
+  # and the RL warm start, none of which read optimizer state.
+  save_optimizer: false
+
+policy:
+  model_name: "/lustre/fsw/portfolios/llmservice/users/wdykas/data/nano-v3-sft-64gbs-nickel-capybara-5e-5-constant-wd-0-load-bal-1e-4-lcx3-pretool-base-temp1-iter-0013600-hf"
+  tokenizer:
+    name: ${policy.model_name}
+    # The model's own template: assistant turns without think tags render as
+    # <think></think> + content, which is exactly the no-think prior.
+    chat_template: "default"
+    chat_template_kwargs: null
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  # Worst-case executor example (3.4k-token prompt + ~1.9k-token answer grid)
+  # plus template overhead fits comfortably; packing keeps utilization up.
+  max_total_sequence_length: 8192
+  precision: "bfloat16"
+
+  dtensor_cfg:
+    enabled: false
+
+  sequence_packing:
+    enabled: true
+
+  make_sequence_length_divisible_by: ${mul:2, ${policy.megatron_cfg.tensor_model_parallel_size}}
+
+  optimizer: null
+
+  megatron_cfg:
+    enabled: true
+    tensor_model_parallel_size: 4
+    expert_model_parallel_size: 4
+    sequence_parallel: true
+    pipeline_dtype: bfloat16
+    freeze_moe_router: true
+    moe_router_dtype: "fp32"
+    moe_router_load_balancing_type: "none"
+    moe_router_bias_update_rate: 1e-3
+    optimizer:
+      lr: 1.0e-5
+      min_lr: 1.0e-5
+      weight_decay: 0.0
+      params_dtype: "float32"
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+    scheduler:
+      lr_decay_style: "constant"
+      lr_decay_iters: null
+      lr_warmup_iters: 8
+      lr_warmup_init: 1.0e-6
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+
+data:
+  max_input_seq_length: ${policy.max_total_sequence_length}
+  # No BOS: nano-v3's im_start template carries no <s>, and the RL rollout
+  # prompts the policy must match are templated without one.
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  train:
+    dataset_name: "openai_format"
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v1/train.jsonl
+    chat_key: "messages"
+  validation:
+    dataset_name: "openai_format"
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v1/val.jsonl
+    chat_key: "messages"
+
+logger:
+  monitor_gpus: true
+  wandb_enabled: true
+  wandb:
+    project: nano-v3-megatron-inference
+    name: sft_nvarc_nanov3
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4
