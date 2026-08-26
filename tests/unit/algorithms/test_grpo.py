@@ -6777,3 +6777,51 @@ def test_grpo_train_sync_logs_data_plane_metrics_before_committing_the_step(
         if f"data_plane/{scope}/breakdown" in c.args
     ], "the per-op breakdown table was not logged"
     client.close()
+
+
+def test_clamp_overlong_samples_truncates_and_masks():
+    from nemo_rl.algorithms.grpo import clamp_overlong_samples_to_pack_bin
+
+    def message(n, role="assistant"):
+        return {
+            "role": role,
+            "token_ids": torch.arange(n),
+            "token_loss_mask": torch.ones(n, dtype=torch.long),
+            "generation_logprobs": torch.zeros(n),
+        }
+
+    fits = [message(4, role="user"), message(6)]
+    overlong = [message(8, role="user"), message(10)]
+    loss_multiplier = torch.ones(2)
+
+    clamped = clamp_overlong_samples_to_pack_bin(
+        [fits, overlong], loss_multiplier, max_tokens=12
+    )
+
+    assert clamped == 1
+    # The fitting sample is untouched, loss intact.
+    assert len(fits[1]["token_ids"]) == 6
+    assert loss_multiplier[0] == 1
+    # The overlong sample is truncated from the tail to the budget and masked.
+    assert loss_multiplier[1] == 0
+    assert len(overlong[0]["token_ids"]) == 8
+    assert len(overlong[1]["token_ids"]) == 4
+    for key in ("token_loss_mask", "generation_logprobs"):
+        assert len(overlong[1][key]) == 4
+
+
+def test_clamp_overlong_samples_drops_whole_trailing_messages():
+    from nemo_rl.algorithms.grpo import clamp_overlong_samples_to_pack_bin
+
+    log = [
+        {"role": "user", "token_ids": torch.arange(5)},
+        {"role": "assistant", "token_ids": torch.arange(5)},
+        {"role": "assistant", "token_ids": torch.arange(5)},
+    ]
+    loss_multiplier = torch.ones(1)
+
+    clamped = clamp_overlong_samples_to_pack_bin([log], loss_multiplier, max_tokens=7)
+
+    assert clamped == 1
+    assert [len(m["token_ids"]) for m in log] == [5, 2, 0]
+    assert loss_multiplier[0] == 0
