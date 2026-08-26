@@ -179,15 +179,20 @@ tokens; executor competence is trained by the separate single-turn
 executor task (native rows through the same resources server), which is
 also why both roles can share one GRPO run.
 
-Loss masking (adopted revision): masking is for failures that are *not the
-proposer's behavior* — executor double format failures, executor context
-exhaustion. Proposer-caused format failures (an unparseable rule, a think
-block that runs past the output cap) were originally masked too; measured
-over a full co-training run this creates a blind spot in which think
-runaway grows unchecked (31.5% of trained proposer turns truncating at the
-cap). The contract is therefore being changed to give proposer-caused
-format failures the reward floor with loss ON. Context exhaustion after
-valid verification remains a real behavioral outcome and is never masked.
+Loss masking (adopted revision, implemented 2026-08-26): masking is for
+failures that are *not the proposer's behavior* — executor double format
+failures, executor context exhaustion. Proposer-caused format failures (an
+unparseable rule, a think block that runs past the output cap) were
+originally masked too; measured over a full co-training run this creates a
+blind spot in which think runaway grows unchecked (31.5% of trained
+proposer turns truncating at the cap). The contract now gives
+proposer-caused format failures the reward floor with loss ON: the agent
+reports `proposer_format_failure` to `/finalize`, the server pins the
+episode reward to the floor (bonus and per-grid gains included) while the
+grid metrics keep reporting the real answers, and the field is surfaced as
+a per-agent scalar so validation tracks the proposer's format-failure rate
+directly. Context exhaustion after valid verification remains a real
+behavioral outcome and is never masked.
 
 ## Executor competence
 
@@ -204,7 +209,7 @@ exactness hides "solves the easiest bucket only").
 Per-agent validation scalars surface as `val:<agent>/<field>/<stat>`.
 The load-bearing ones: `grid_match`/`cell_match` (hidden_test final
 answers; checkpoint selection uses the loop `cell_match` mean),
-`format_valid`, `loss_masked`, `rounds_used`,
+`format_valid`, `loss_masked`, `proposer_format_failure`, `rounds_used`,
 `train_gate_pass`/`train_exact_fraction` (demo loop),
 `eval_exact_fraction`/`eval_cell_match`/`all_solved` (eval_sequence), and
 the single-turn agent's `grid_match`/`cell_match`/`copied_input`.
