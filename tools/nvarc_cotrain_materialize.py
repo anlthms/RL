@@ -35,7 +35,10 @@ agent (the cheap single-shot curve) and as a ``hidden_test`` refinement-loop
 row for ``arc_transform_refinement_agent`` (the deployment-shaped
 measurement: refine on the demo pairs, then answer the hidden test grid).
 The loop rows carry ``protocol: hidden_test``, overriding the agent's
-``eval_sequence`` training default per row.
+``eval_sequence`` training default per row, and ``model_context_limit``
+(``--loop-val-context-limit``): validation episodes are never trained, so
+they run the refinement loop against the full inference-engine window
+instead of the trainable-pack limit that gates training episodes.
 
 ``--pad-steps`` appends extra fully-scheduled windows past ``--steps``: the
 async collector eagerly consumes buffer-capacity rows at startup, so an
@@ -106,6 +109,16 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=8000,
         help="shrink demo count while the estimated proposer prompt exceeds this",
+    )
+    parser.add_argument(
+        "--loop-val-context-limit",
+        type=int,
+        default=19456,
+        help=(
+            "per-row model_context_limit stamped on the validation loop rows: "
+            "the inference-engine ceiling minus generation headroom, so the "
+            "untrained validation loop can actually refine across rounds"
+        ),
     )
     parser.add_argument(
         "--executor-prompt-file", default="examples/prompts/nvarc_executor.txt"
@@ -206,7 +219,9 @@ def _proposer_row(
     }
 
 
-def _validation_rows(arc_data_path: str, template: str) -> list[dict]:
+def _validation_rows(
+    arc_data_path: str, template: str, loop_context_limit: int
+) -> list[dict]:
     """Each real test-pair row twice: single-shot induction and the full loop."""
     induction_rows = []
     loop_rows = []
@@ -231,6 +246,9 @@ def _validation_rows(arc_data_path: str, template: str) -> list[dict]:
                 "responses_create_params": {"input": []},
                 "agent_ref": {"type": "responses_api_agents", "name": PROPOSER_AGENT},
                 "protocol": "hidden_test",
+                # Validation episodes are never trained: unthrottle the loop
+                # to the engine window instead of the trainable-pack limit.
+                "model_context_limit": loop_context_limit,
                 "train": source["train_pairs"],
                 "test": [{"input": source["test_input"], "output": source["target"]}],
                 "task_id": source["task_id"],
@@ -323,7 +341,9 @@ def main() -> None:
             }
         )
 
-    val_rows = _validation_rows(args.arc_data_path, induction_template)
+    val_rows = _validation_rows(
+        args.arc_data_path, induction_template, args.loop_val_context_limit
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -343,6 +363,7 @@ def main() -> None:
         "bucket_edges": config.bucket_edges,
         "demo_pairs": args.demo_pairs,
         "eval_pairs": args.eval_pairs,
+        "loop_val_context_limit": args.loop_val_context_limit,
         "train_rows": len(train_rows),
         "executor_rows": sum(1 for row in train_rows if row["role"] == "executor"),
         "proposer_rows": sum(1 for row in train_rows if row["role"] == "proposer"),
