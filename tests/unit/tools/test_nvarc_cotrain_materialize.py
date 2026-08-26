@@ -184,6 +184,8 @@ def test_proposer_rows_hold_out_disjoint_eval_pairs(materialized) -> None:
     row = next(row for row in train if row["role"] == "proposer")
     assert row["agent_ref"]["name"] == PROPOSER_AGENT
     assert row["responses_create_params"]["input"] == []
+    # Training episodes keep the trainable-pack context limit from config.
+    assert "model_context_limit" not in row
     demo_inputs = [json.dumps(pair["input"]) for pair in row["train"]]
     eval_inputs = [json.dumps(pair["input"]) for pair in row["test"]]
     assert not set(demo_inputs) & set(eval_inputs)
@@ -205,6 +207,9 @@ def test_validation_rows_pair_induction_with_hidden_test_loops(
     for row in loops:
         assert row["agent_ref"]["name"] == PROPOSER_AGENT
         assert row["protocol"] == "hidden_test"
+        # Untrained validation loops run against the engine window, not the
+        # trainable-pack limit.
+        assert row["model_context_limit"] == 19456
         assert row["responses_create_params"]["input"] == []
         assert row["train"] and len(row["test"]) == 1
         assert row["test"][0]["input"] and row["test"][0]["output"]
