@@ -2149,6 +2149,45 @@ def add_grpo_token_loss_masks_and_generation_logprobs(
                 )
 
 
+def clamp_overlong_samples_to_pack_bin(
+    message_logs: list[LLMMessageLogType | VLMMessageLogType],
+    loss_multiplier: torch.Tensor,
+    max_tokens: int,
+) -> int:
+    """Truncate samples that cannot fit a sequence-packing bin and mask them.
+
+    Sequence packing hard-errors on any sample longer than its bin, which
+    turns one rare overlong trajectory (e.g. an agent whose client-side
+    context accounting under-measures its own history) into a crashed run.
+    Such samples carry no usable learning signal at full fidelity anyway, so
+    truncate their trailing tokens to ``max_tokens`` and zero their loss
+    multiplier; they still occupy their slot in the group for the advantage
+    baseline, like env-masked samples. Returns the number of clamped samples.
+    """
+    clamped = 0
+    for index, message_log in enumerate(message_logs):
+        total = sum(len(message["token_ids"]) for message in message_log)
+        excess = total - max_tokens
+        if excess <= 0:
+            continue
+        clamped += 1
+        loss_multiplier[index] = 0
+        for message in reversed(message_log):
+            length = len(message["token_ids"])
+            take = min(excess, length)
+            if take:
+                keep = length - take
+                for key, value in message.items():
+                    if isinstance(value, torch.Tensor) and value.shape[:1] == (
+                        length,
+                    ):
+                        message[key] = value[:keep]
+                excess -= take
+            if excess == 0:
+                break
+    return clamped
+
+
 def _resolve_message_level_advantage_penalties(
     master_config: MasterConfig,
 ) -> tuple[float | None, float | None]:
@@ -5244,6 +5283,27 @@ def async_grpo_train(
                     add_grpo_token_loss_masks_and_generation_logprobs(
                         repeated_batch["message_log"]
                     )
+
+                    # Sequence packing rejects any sample longer than its bin,
+                    # so clamp the rare overlong trajectory (mask + truncate)
+                    # instead of crashing the run. sequence_length_round is
+                    # subtracted because the packer rounds padded lengths up.
+                    packing_cfg = master_config.policy["sequence_packing"]
+                    if packing_cfg["enabled"]:
+                        pack_bin_budget = min(
+                            packing_cfg["train_mb_tokens"],
+                            packing_cfg["logprob_mb_tokens"],
+                        ) - packing_cfg["sequence_length_round"]
+                        num_clamped = clamp_overlong_samples_to_pack_bin(
+                            repeated_batch["message_log"],
+                            repeated_batch["loss_multiplier"],
+                            pack_bin_budget,
+                        )
+                        if num_clamped:
+                            print(
+                                f"⚠️ Clamped {num_clamped} overlong sample(s) to "
+                                f"{pack_bin_budget} tokens and masked their loss"
+                            )
 
                     # Convert to flat format for training
                     flat_messages, input_lengths = batched_message_log_to_flat_message(
