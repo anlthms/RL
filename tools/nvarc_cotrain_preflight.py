@@ -249,6 +249,7 @@ def main() -> None:
         errors.append(
             "induction rows must carry target and test_input for the verifier"
         )
+    loop_context_limits: set[int] = set()
     for row in loop_rows:
         if row["agent_ref"]["name"] != PROPOSER_AGENT:
             errors.append("a loop row routes to the wrong agent")
@@ -262,6 +263,34 @@ def main() -> None:
         if not row.get("train") or not row.get("test"):
             errors.append("a loop row is missing demo or test pairs")
             break
+        row_limit = row.get("model_context_limit")
+        if row_limit is None:
+            errors.append(
+                "loop rows must carry a model_context_limit override: the "
+                "training limit throttles the validation loop to ~1 round"
+            )
+            break
+        loop_context_limits.add(row_limit)
+    if loop_context_limits:
+        loop_limit = min(loop_context_limits)
+        if len(loop_context_limits) > 1:
+            errors.append(
+                f"loop rows carry mixed model_context_limit values {sorted(loop_context_limits)}"
+            )
+        if loop_limit <= context_limit:
+            errors.append(
+                f"loop-row model_context_limit {loop_limit} does not exceed the "
+                f"training limit {context_limit}: the validation loop stays throttled"
+            )
+        if (
+            max(loop_context_limits) + agent_override.get("chat_template_margin", 0)
+            > policy["max_total_sequence_length"]
+        ):
+            errors.append(
+                f"loop-row model_context_limit {max(loop_context_limits)} plus the "
+                "template margin exceeds max_total_sequence_length: refinement "
+                "rounds the budget permits would be rejected by the engine"
+            )
 
     print(f"config: {args.config}")
     print(f"nodes: {resolved['cluster']['num_nodes']}")
@@ -275,7 +304,8 @@ def main() -> None:
         f"{policy['max_total_sequence_length']} total / "
         f"{policy['sequence_packing']['train_mb_tokens']} train pack / "
         f"{policy['generation']['max_new_tokens']} generated / "
-        f"{context_limit} proposer context"
+        f"{context_limit} proposer context / "
+        f"{min(loop_context_limits) if loop_context_limits else 'MISSING'} loop-val context"
     )
     print(
         f"train: {len(train_rows)} rows "
