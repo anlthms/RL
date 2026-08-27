@@ -114,6 +114,45 @@ def test_proposer_instructions_match_the_gym_agent() -> None:
     assert PROPOSER_INSTRUCTIONS == AGENT_INSTRUCTIONS
 
 
+def test_main_proposer_only_dataset_keeps_val_role_mix(tmp_path, monkeypatch) -> None:
+    """--executor-examples 0 yields a proposer-only prior, val included."""
+    data_dir = tmp_path / "nvarc"
+    out_dir = tmp_path / "out"
+    data_dir.mkdir()
+    _write_nvarc_fixture(data_dir)
+    template_file = tmp_path / "executor.txt"
+    template_file.write_text("executor task:\n{}\nreturn an <answer> block\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nvarc_sft_materialize.py",
+            "--data-dir",
+            str(data_dir),
+            "--output-dir",
+            str(out_dir),
+            "--executor-examples",
+            "0",
+            "--proposer-examples",
+            "6",
+            "--val-puzzles",
+            "2",
+            "--val-examples",
+            "4",
+            "--executor-prompt-file",
+            str(template_file),
+        ],
+    )
+    main()
+    train = [
+        json.loads(line) for line in (out_dir / "train.jsonl").read_text().splitlines()
+    ]
+    val = [
+        json.loads(line) for line in (out_dir / "val.jsonl").read_text().splitlines()
+    ]
+    assert {row["sft_role"] for row in train + val} == {"proposer"}
+    assert len(train) == 6 and len(val) == 4
+
+
 def test_main_splits_by_puzzle_id_and_balances_roles(tmp_path, monkeypatch) -> None:
     data_dir = tmp_path / "nvarc"
     out_dir = tmp_path / "out"

@@ -66,9 +66,17 @@ and induces a canonical rule. Fresh single-grid executor sessions apply it
 to held-out evaluation grids one at a time: an exact solve advances to the
 next grid with the same rule; a miss returns server-rendered behavioral
 evidence for a revision. Reward is aggregated server-side over the grid
-sequence — each grid contributes its best attempt's gain-over-echo score,
-unreached grids sit at the reward floor (ending early is never better than
-attempting), and solving everything earns a configured bonus.
+sequence with FINAL-RULE CREDIT (adopted 2026-08-27, implemented on gym
+branch `anthomas/colo2`; activates with the next co-training lineage):
+before finalizing, the agent re-applies the final rule once to every grid
+whose last attempt used an older rule (including unreached grids), and
+each grid is scored on its LAST attempt. The original best-attempt
+aggregation let a degraded final revision inherit rewards that earlier
+rules earned under advance-on-solve — credit misassignment on the only
+trained turn, consistent with the revision-degradation observed in the
+first two co-training runs (loop cell_match declining while training
+reward improved). Unattempted grids still sit at the reward floor and
+solving everything with the final rule earns the configured bonus.
 
 ### `hidden_test` (real ARC)
 

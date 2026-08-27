@@ -244,10 +244,17 @@ def main() -> None:
         args=args,
         rng=rng,
     )
+    # Val mirrors the train role mix, so a role-restricted dataset (e.g.
+    # --executor-examples 0 for a proposer-only prior that leaves executor
+    # thinking untouched) is validated on the same distribution it trains.
+    train_total = args.executor_examples + args.proposer_examples
+    if train_total <= 0:
+        raise SystemExit("at least one of executor/proposer examples must be positive")
+    val_executor = round(args.val_examples * args.executor_examples / train_total)
     val_rows, val_skipped = _emit(
         val_pool,
-        executor_count=args.val_examples // 2,
-        proposer_count=args.val_examples - args.val_examples // 2,
+        executor_count=val_executor,
+        proposer_count=args.val_examples - val_executor,
         template=template,
         args=args,
         rng=rng,
