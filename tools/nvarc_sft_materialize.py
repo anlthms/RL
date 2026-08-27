@@ -14,9 +14,11 @@
 """Materialize the NVARC no-think SFT JSONL (executor + proposer imitation).
 
 A SHORT format/length prior before anti-runaway RL, not a convergence run:
-both roles imitate think-free targets so the RL policy starts from a prior
-that answers in-format without runaway thinking (31.5% of trained v2
-proposer turns truncated mid-think at the output cap).
+both roles imitate empty-think targets (``NO_THINK_PREFIX`` + payload, byte-
+continuing nano-v3's generation opener) so the RL policy starts from a prior
+that closes its think block and answers in-format instead of runaway
+thinking (31.5% of trained v2 proposer turns truncated mid-think at the
+output cap).
 
 DELIBERATE INVARIANT RELAXATION (2026-08-26, user-approved, recorded in
 ARC_AGI_2_ENV_PLAN.md): the puzzles' reference canonical rules ARE proposer
@@ -70,6 +72,16 @@ PROPOSER_INSTRUCTIONS = (
     "transformation-description artifact; do not execute the test grid."
 )
 
+# nano-v3's generation prompt ends with an OPEN think tag plus newline
+# ("<|im_start|>assistant\n<think>\n"), so the trained assistant turn must
+# begin with those exact bytes for the taught continuation ("</think>" then
+# the payload) to be in-distribution at rollout time. v1 targets carried no
+# think tags, so the template rendered them as "<think></think>" + payload:
+# teacher-forced loss looked great while inference (which forces the opener)
+# collapsed to runaway thinking (loop-val format_valid 0.017 on the v1 SFT
+# checkpoint).
+NO_THINK_PREFIX = "<think>\n</think>\n\n"
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -110,7 +122,7 @@ def executor_example(puzzle: dict, pair: dict, *, template: str) -> dict:
     """One native executor task with the gold grid as a think-free target."""
     row = _executor_row(puzzle, pair, bucket=0, template=template)
     prompt = row["responses_create_params"]["input"][0]["content"]
-    answer = f"<answer>\n{serialize_grid(pair['output'])}\n</answer>"
+    answer = f"{NO_THINK_PREFIX}<answer>\n{serialize_grid(pair['output'])}\n</answer>"
     return {
         "messages": [
             {"role": "user", "content": prompt},
@@ -154,7 +166,7 @@ def proposer_example(
         "messages": [
             {"role": "system", "content": PROPOSER_INSTRUCTIONS},
             {"role": "user", "content": prompt},
-            {"role": "assistant", "content": rule},
+            {"role": "assistant", "content": NO_THINK_PREFIX + rule},
         ],
         "task_id": puzzle["puzzle_id"],
         "sft_role": "proposer",
@@ -243,7 +255,12 @@ def main() -> None:
 
     for row in train_rows + val_rows:
         target = row["messages"][-1]["content"]
-        assert "<think" not in target, "SFT targets must be think-free"
+        assert target.startswith(NO_THINK_PREFIX), (
+            "SFT targets must continue the generation opener"
+        )
+        assert "<think" not in target[len(NO_THINK_PREFIX) :], (
+            "SFT targets must carry an empty think block only"
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
