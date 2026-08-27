@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from tools.nvarc_sft_materialize import (
+    NO_THINK_PREFIX,
     PROPOSER_INSTRUCTIONS,
     executor_example,
     proposer_example,
@@ -55,7 +56,10 @@ def test_executor_example_targets_the_gold_grid_in_one_answer_block() -> None:
     assert [m["role"] for m in example["messages"]] == ["user", "assistant"]
     prompt = example["messages"][0]["content"]
     assert "<transformation>" in prompt and "1 0" in prompt
-    assert example["messages"][1]["content"] == "<answer>\n0 1\n</answer>"
+    assert (
+        example["messages"][1]["content"]
+        == f"{NO_THINK_PREFIX}<answer>\n0 1\n</answer>"
+    )
 
 
 def test_proposer_example_reuses_the_gym_prompt_and_canonical_target() -> None:
@@ -77,8 +81,8 @@ def test_proposer_example_reuses_the_gym_prompt_and_canonical_target() -> None:
     assert "Training example demo_0" in prompt
     assert "<rules_summary>" in prompt  # the 4-section request scaffold
     target = example["messages"][2]["content"]
-    assert target == CANONICAL_RULE
-    assert "<think" not in target
+    assert target == NO_THINK_PREFIX + CANONICAL_RULE
+    assert "<think" not in target[len(NO_THINK_PREFIX) :]
 
 
 def test_proposer_example_rejects_unparseable_reference_rules() -> None:
@@ -152,8 +156,11 @@ def test_main_splits_by_puzzle_id_and_balances_roles(tmp_path, monkeypatch) -> N
     assert not {row["task_id"] for row in train} & {row["task_id"] for row in val}
     for row in train + val:
         assert row["messages"][-1]["role"] == "assistant"
-        assert "<think" not in row["messages"][-1]["content"]
+        target = row["messages"][-1]["content"]
+        # Empty-think prefix continuing the generation opener, nothing more.
+        assert target.startswith(NO_THINK_PREFIX)
+        assert "<think" not in target[len(NO_THINK_PREFIX) :]
         if row["sft_role"] == "executor":
-            assert row["messages"][-1]["content"].startswith("<answer>\n")
+            assert target[len(NO_THINK_PREFIX) :].startswith("<answer>\n")
         else:
             assert row["messages"][0]["content"] == PROPOSER_INSTRUCTIONS
