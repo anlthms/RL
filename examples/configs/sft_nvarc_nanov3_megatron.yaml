@@ -40,9 +40,10 @@ policy:
     chat_template_kwargs: null
   train_global_batch_size: 128
   train_micro_batch_size: 1
-  # Worst-case executor example (3.4k-token prompt + ~1.9k-token answer grid)
-  # plus template overhead fits comfortably; packing keeps utilization up.
-  max_total_sequence_length: 8192
+  # Measured on nvarc-sft/v2: templated examples p50 2760 / p99 7695 / max
+  # 8847 tokens, so 9216 keeps every example in loss; packing keeps
+  # utilization up.
+  max_total_sequence_length: 9216
   precision: "bfloat16"
 
   dtensor_cfg:
@@ -93,11 +94,11 @@ data:
   shuffle: true
   train:
     dataset_name: "openai_format"
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v1/train.jsonl
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v2/train.jsonl
     chat_key: "messages"
   validation:
     dataset_name: "openai_format"
-    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v1/val.jsonl
+    data_path: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/datasets/nvarc-sft/v2/val.jsonl
     chat_key: "messages"
 
 logger:
