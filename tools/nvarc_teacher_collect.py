@@ -314,6 +314,7 @@ def _parse_args() -> argparse.Namespace:
         help="~4k tokens: the trainable proposer turn must fit the RL pack",
     )
     parser.add_argument("--max-output-tokens", type=int, default=8192)
+    parser.add_argument("--request-timeout", type=float, default=1200.0)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
@@ -337,6 +338,12 @@ def _make_http_complete(args: argparse.Namespace) -> CompleteFn:
 
     headers = {"Authorization": f"Bearer {os.environ.get(args.api_key_env, 'EMPTY')}"}
     url = args.endpoint.rstrip("/") + "/chat/completions"
+    # Reasoning teachers routinely exceed aiohttp's 5-minute default under
+    # load (an unhandled TimeoutError killed the first shard generation), so
+    # the timeout is explicit and generous, transient failures retry with
+    # backoff, and a persistently failing call degrades to a rejected sample
+    # instead of crashing the collection.
+    timeout = aiohttp.ClientTimeout(total=args.request_timeout)
 
     async def complete(prompt: str) -> tuple[str, str]:
         payload = {
@@ -345,12 +352,26 @@ def _make_http_complete(args: argparse.Namespace) -> CompleteFn:
             "temperature": args.temperature,
             "max_tokens": args.max_output_tokens,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                body = await response.json()
-        message = body["choices"][0]["message"]
-        return message.get("reasoning_content") or "", message.get("content") or ""
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        url, json=payload, headers=headers
+                    ) as response:
+                        response.raise_for_status()
+                        body = await response.json()
+                message = body["choices"][0]["message"]
+                return (
+                    message.get("reasoning_content") or "",
+                    message.get("content") or "",
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as error:
+                print(
+                    f"teacher call failed (attempt {attempt + 1}): {error!r}",
+                    flush=True,
+                )
+                await asyncio.sleep(10 * (attempt + 1))
+        return "", ""
 
     return complete
 
