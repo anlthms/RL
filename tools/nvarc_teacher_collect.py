@@ -36,8 +36,11 @@ teach revision from behavioral evidence, not just first proposals:
   still supports the standalone reference-rule mode.
 
 Targets byte-continue nano-v3's generation opener (open think tag, newline,
-cot, newline, close think tag, blank line, payload) and are length-capped
-(``--max-cot-chars``). With ``--tokenizer-path`` set, each emitted row is
+cot, newline, close think tag, blank line, payload). ``--max-cot-chars``
+binds only where reasoning is trained: harvested executor turns and the
+FINAL proposer turn (over-cap finals are resampled from the same history
+and re-verified). Intermediate proposer turns are payload-only, so their
+reasoning may run long. With ``--tokenizer-path`` set, each emitted row is
 additionally rendered through the model's own chat template and rejected
 when it exceeds ``--max-target-tokens`` (the SFT pack budget).
 
@@ -159,14 +162,18 @@ async def _sample_rule(
     *,
     complete: CompleteFn,
     samples: int,
-    max_cot_chars: int,
 ) -> tuple[str, str, str] | None:
-    """Sample one proposer turn; return (cot, raw_payload, canonical_rule)."""
+    """Sample one proposer turn; return (cot, raw_payload, canonical_rule).
+
+    No CoT constraints here: intermediate turns are stored payload-only, so
+    over-cap or missing reasoning is only a problem on the turn that ends up
+    FINAL -- and that is enforced (with a resample) at acceptance time.
+    Rejecting long thinking mid-loop would kill exactly the hard episodes
+    that produce revision turns.
+    """
     for _ in range(samples):
         reasoning, text = await complete(messages)
         cot, payload = split_reasoning(reasoning, text)
-        if not cot or len(cot) > max_cot_chars:
-            continue
         try:
             rule = parse_canonical_rule(payload)
         except TransformDescriptionParseError:
@@ -249,14 +256,30 @@ async def collect_episode(
         if cot:
             harvested.append(_executor_sft_row(prompt, cot, grid, puzzle["puzzle_id"]))
 
+    async def _sweep(rule: str, skip: set[str]) -> int:
+        """Apply ``rule`` to every grid not in ``skip``; count and harvest exacts."""
+        verified = 0
+        for grid_id in grid_ids:
+            if grid_id in skip:
+                continue
+            attempt = await _execute_grid(
+                rule, grids[grid_id]["input"], complete=complete, max_cot_chars=max_cot_chars
+            )
+            if attempt is None:
+                continue  # sweep miss: simply not verified
+            grid, exec_cot, exec_prompt, first_try = attempt
+            if grid == grids[grid_id]["output"]:
+                verified += 1
+                if first_try:
+                    _harvest(exec_prompt, exec_cot, grid)
+        return verified
+
     grid_index = 0
     final_cot = final_rule = None
     solved_by_final: set[str] = set()
     rounds_used = 0
     for _round in range(max_rounds):
-        proposal = await _sample_rule(
-            messages, complete=complete, samples=samples, max_cot_chars=max_cot_chars
-        )
+        proposal = await _sample_rule(messages, complete=complete, samples=samples)
         if proposal is None:
             rejects["proposer_parse"] += 1
             return None
@@ -308,24 +331,32 @@ async def collect_episode(
     assert final_cot is not None and final_rule is not None
     # Final-rule sweep: acceptance is judged on what the FINAL rule does to
     # every grid, exactly like the trained turn's reward.
-    verified = len(solved_by_final)
+    verified = len(solved_by_final) + await _sweep(final_rule, skip=solved_by_final)
     needed = len(grid_ids) if min_verified is None else min(min_verified, len(grid_ids))
-    for grid_id in grid_ids:
-        if grid_id in solved_by_final:
-            continue
-        attempt = await _execute_grid(
-            final_rule, grids[grid_id]["input"], complete=complete, max_cot_chars=max_cot_chars
-        )
-        if attempt is None:
-            continue  # sweep miss: simply not verified
-        grid, exec_cot, exec_prompt, first_try = attempt
-        if grid == grids[grid_id]["output"]:
-            verified += 1
-            if first_try:
-                _harvest(exec_prompt, exec_cot, grid)
     if verified < needed:
         rejects["final_rule_unverified"] += 1
         return None
+    # The trainable turn needs a real, cap-fitting CoT. When the winning
+    # turn's reasoning is missing or over-cap, resample just that turn from
+    # the same history; a resampled rule is a NEW rule, so it must re-verify
+    # on every grid before it may replace the final turn.
+    resampled = 0
+    while not final_cot or len(final_cot) > max_cot_chars:
+        if resampled >= samples:
+            rejects["final_cot"] += 1
+            return None
+        resampled += 1
+        proposal = await _sample_rule(messages, complete=complete, samples=1)
+        if proposal is None:
+            continue
+        cot, _raw_payload, rule = proposal
+        if not cot or len(cot) > max_cot_chars:
+            continue
+        reverified = await _sweep(rule, skip=set())
+        if reverified < needed:
+            continue
+        final_cot, final_rule, verified = cot, rule, reverified
+        break
     messages.append(_assistant(_think_target(final_cot, final_rule)))
     proposer_row = {
         "messages": messages,
@@ -333,6 +364,7 @@ async def collect_episode(
         "sft_role": "proposer",
         "rounds": rounds_used,
         "verified_pairs": verified,
+        "final_resampled": resampled,
     }
     return proposer_row, harvested
 
@@ -382,6 +414,7 @@ async def collect(
         "transcript_budget": 0,
         "rounds_exhausted": 0,
         "final_rule_unverified": 0,
+        "final_cot": 0,
         "over_token_budget": 0,
     }
 
