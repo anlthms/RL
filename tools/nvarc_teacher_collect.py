@@ -179,6 +179,8 @@ async def collect_proposer_trace(
             grid = extract_answer_grid(exec_payload)
             if grid is not None and grid == pair["output"]:
                 verified += 1
+                if verified >= needed:
+                    break  # verification met; save the remaining teacher calls
         if verified < needed:
             continue
         return {
@@ -201,12 +203,33 @@ async def collect(
     template: str,
     complete: CompleteFn,
     rng: random.Random,
+    sink: Callable[[dict], None] | None = None,
 ) -> tuple[list[dict], dict]:
-    """Walk the puzzle pool until both role quotas are met or it is exhausted."""
+    """Walk the puzzle pool until both role quotas are met or it is exhausted.
+
+    Accepted traces stream to ``sink`` as they land, so a wall-clock kill
+    loses at most the in-flight attempts, and progress prints keep long
+    collections observable.
+    """
     semaphore = asyncio.Semaphore(args.concurrency)
     executor_rows: list[dict] = []
     proposer_rows: list[dict] = []
     attempts = {"executor": 0, "proposer": 0}
+
+    def _accept(trace: dict, into: list[dict]) -> None:
+        into.append(trace)
+        if sink is not None:
+            sink(trace)
+
+    def _progress() -> None:
+        total_attempts = attempts["executor"] + attempts["proposer"]
+        if total_attempts % 10 == 0:
+            print(
+                f"attempts exec {attempts['executor']} prop {attempts['proposer']} | "
+                f"accepted exec {len(executor_rows)}/{args.executor_traces} "
+                f"prop {len(proposer_rows)}/{args.proposer_traces}",
+                flush=True,
+            )
 
     async def one_executor(puzzle: dict) -> None:
         pairs = json.loads(puzzle["pairs_json"])
@@ -221,7 +244,8 @@ async def collect(
                 max_cot_chars=args.max_cot_chars,
             )
         if trace is not None:
-            executor_rows.append(trace)
+            _accept(trace, executor_rows)
+        _progress()
 
     async def one_proposer(puzzle: dict) -> None:
         async with semaphore:
@@ -238,7 +262,8 @@ async def collect(
                 min_verified=args.min_verified,
             )
         if trace is not None:
-            proposer_rows.append(trace)
+            _accept(trace, proposer_rows)
+        _progress()
 
     pool = list(puzzles)
     rng.shuffle(pool)
@@ -298,6 +323,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--executor-prompt-file", default="examples/prompts/nvarc_executor.txt"
     )
+    parser.add_argument(
+        "--val-tasks",
+        type=int,
+        default=32,
+        help="collected puzzles held out for the SFT val split (by puzzle id)",
+    )
     return parser.parse_args()
 
 
@@ -329,20 +360,37 @@ def main() -> None:
     template = Path(args.executor_prompt_file).read_text(encoding="utf-8")
     puzzles = load_nvarc_split(args.data_dir, "train")
     rng = random.Random(args.seed)
-    rows, stats = asyncio.run(
-        collect(
-            puzzles,
-            args=args,
-            template=template,
-            complete=_make_http_complete(args),
-            rng=rng,
-        )
-    )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "collected.jsonl", "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
+    # Stream accepted traces so a wall-clock kill loses almost nothing.
+    with open(output_dir / "collected.jsonl", "w", encoding="utf-8") as collected:
+
+        def sink(row: dict) -> None:
+            collected.write(json.dumps(row) + "\n")
+            collected.flush()
+
+        rows, stats = asyncio.run(
+            collect(
+                puzzles,
+                args=args,
+                template=template,
+                complete=_make_http_complete(args),
+                rng=rng,
+                sink=sink,
+            )
+        )
+    # Split by puzzle id (the campaign invariant), directly SFT-consumable.
+    task_ids = sorted({row["task_id"] for row in rows})
+    rng.shuffle(task_ids)
+    val_ids = set(task_ids[: args.val_tasks])
+    for name, subset in (
+        ("train.jsonl", [r for r in rows if r["task_id"] not in val_ids]),
+        ("val.jsonl", [r for r in rows if r["task_id"] in val_ids]),
+    ):
+        with open(output_dir / name, "w", encoding="utf-8") as f:
+            for row in subset:
+                f.write(json.dumps(row) + "\n")
+        stats[name.split(".")[0] + "_rows"] = len(subset)
     stats.update(
         {
             "endpoint_model": args.model,
