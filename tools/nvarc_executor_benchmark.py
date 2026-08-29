@@ -62,6 +62,15 @@ class ExecutorClient(Protocol):
         """Return assistant text for one chat-completions request."""
         raise NotImplementedError
 
+    async def complete_with_reasoning(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str, str]:
+        """Return (reasoning, content) for one chat-completions request.
+
+        Reasoning is empty when the endpoint has no separated channel.
+        """
+        return "", await self.complete(messages)
+
 
 @dataclass(frozen=True)
 class BenchmarkCase:
@@ -111,6 +120,10 @@ class BenchmarkConfig:
     concurrency: int
     timeout_seconds: float
     temperature: float
+    # When set, every first-try exact solve with separated reasoning is also
+    # written as a ready-to-train SFT executor row (STaR self-distillation).
+    star_output: str | None = None
+    star_max_cot_chars: int = 12_000
 
 
 class OpenAIChatCompletionsClient:
@@ -135,9 +148,15 @@ class OpenAIChatCompletionsClient:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     async def complete(self, messages: list[dict[str, str]]) -> str:
+        _, content = await self.complete_with_reasoning(messages)
+        return content
+
+    async def complete_with_reasoning(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str, str]:
         return await asyncio.to_thread(self._complete_sync, messages)
 
-    def _complete_sync(self, messages: list[dict[str, str]]) -> str:
+    def _complete_sync(self, messages: list[dict[str, str]]) -> tuple[str, str]:
         payload = json.dumps(
             {
                 "model": self.model,
@@ -164,14 +183,16 @@ class OpenAIChatCompletionsClient:
                 f"executor endpoint returned HTTP {error.code}: {detail}"
             ) from error
         try:
-            content = body["choices"][0]["message"]["content"]
+            message = body["choices"][0]["message"]
+            content = message["content"]
         except (KeyError, IndexError, TypeError) as error:
             raise RuntimeError(
                 f"executor endpoint returned an invalid chat response: {body}"
             ) from error
         if not isinstance(content, str):
             raise RuntimeError("executor endpoint returned non-text assistant content")
-        return content
+        reasoning = message.get("reasoning_content")
+        return (reasoning if isinstance(reasoning, str) else ""), content
 
 
 def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
@@ -259,12 +280,14 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
     )
     messages = [{"role": "user", "content": prompt}]
     responses: list[str] = []
+    reasonings: list[str] = []
     prediction: Grid | None = None
     retry_used = False
 
     for attempt in range(2):
-        response = await client.complete(messages)
+        reasoning, response = await client.complete_with_reasoning(messages)
         responses.append(response)
+        reasonings.append(reasoning)
         prediction = extract_answer_grid(response)
         if prediction is not None:
             break
@@ -305,6 +328,7 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
             "input_grid": case.input_grid,
             "target_grid": case.target_grid,
             "responses": responses,
+            "reasonings": reasonings,
             "prediction": prediction,
         },
     )
@@ -399,6 +423,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--star-output",
+        default=None,
+        help="also write first-try exact solves as SFT executor rows (JSONL)",
+    )
+    parser.add_argument("--star-max-cot-chars", type=int, default=12_000)
     return parser.parse_args()
 
 
@@ -428,6 +458,42 @@ def execute_benchmark(
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if config.star_output:
+        star_rows = 0
+        star_path = Path(config.star_output)
+        star_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(star_path, "w", encoding="utf-8") as sink:
+            for result in results:
+                reasoning = result.trace["reasonings"][0]
+                if not (
+                    result.grid_exact
+                    and not result.format_retry_used
+                    and reasoning
+                    and len(reasoning) <= config.star_max_cot_chars
+                ):
+                    continue
+                prompt = build_single_grid_prompt(
+                    description=result.trace["description"],
+                    input_grid=result.trace["input_grid"],
+                )
+                answer = f"<answer>\n{serialize_grid(result.trace['prediction'])}\n</answer>"
+                target = f"<think>\n{reasoning.strip()}\n</think>\n\n{answer}"
+                sink.write(
+                    json.dumps(
+                        {
+                            "messages": [
+                                {"role": "user", "content": prompt},
+                                {"role": "assistant", "content": target},
+                            ],
+                            "task_id": result.task_id,
+                            "sft_role": "executor",
+                            "source": "star",
+                        }
+                    )
+                    + "\n"
+                )
+                star_rows += 1
+        report["summary"]["star_rows"] = star_rows
     return report
 
 
@@ -445,6 +511,8 @@ def main() -> None:
         concurrency=args.concurrency,
         timeout_seconds=args.timeout_seconds,
         temperature=args.temperature,
+        star_output=args.star_output,
+        star_max_cot_chars=args.star_max_cot_chars,
     )
     report = execute_benchmark(config, api_key=args.api_key, output=args.output)
     print(json.dumps(report["summary"], indent=2))
