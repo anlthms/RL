@@ -76,6 +76,13 @@ def _parse_args() -> argparse.Namespace:
         default=1200,
         help="rows with shorter thinks are already decisive; passed through",
     )
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="append to an existing output, skipping row indices already done",
+    )
     return parser.parse_args()
 
 
@@ -144,31 +151,52 @@ async def compress_row(row: dict, *, args: argparse.Namespace, complete) -> dict
 
 
 async def run(args: argparse.Namespace) -> None:
-    rows = [json.loads(line) for line in open(args.input, encoding="utf-8")]
-    complete = _make_http_complete(args)
-    semaphore = asyncio.Semaphore(args.concurrency)
-    done = {"count": 0}
+    """Stream compressed rows to disk as they land (wall-kill loses nothing).
+
+    Output rows carry ``row_index`` (their line number in the input file), so
+    a killed shard resumes with ``--resume`` and the final dataset is the
+    concatenation of all shard outputs, order-independent.
+    """
+    all_rows = [json.loads(line) for line in open(args.input, encoding="utf-8")]
+    todo = [
+        (index, row)
+        for index, row in enumerate(all_rows)
+        if index % args.num_shards == args.shard_index
+    ]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    results: list[dict | None] = [None] * len(rows)
+    done_indices: set[int] = set()
+    if args.resume and output.exists():
+        for line in open(output, encoding="utf-8"):
+            done_indices.add(json.loads(line)["row_index"])
+        todo = [(i, r) for i, r in todo if i not in done_indices]
+    print(f"shard {args.shard_index}/{args.num_shards}: {len(todo)} rows to do "
+          f"({len(done_indices)} resumed)", flush=True)
 
-    async def one(index: int, row: dict) -> None:
-        async with semaphore:
-            results[index] = await compress_row(row, args=args, complete=complete)
-        done["count"] += 1
-        if done["count"] % 100 == 0:
-            print(f"{done['count']}/{len(rows)} rows", flush=True)
+    complete = _make_http_complete(args)
+    semaphore = asyncio.Semaphore(args.concurrency)
+    stats = {"rows": len(todo), "compressed": 0, "passthrough": 0, "fallback": 0}
+    lock = asyncio.Lock()
+    done = {"count": 0}
 
-    await asyncio.gather(*(one(i, r) for i, r in enumerate(rows)))
-    stats = {"rows": len(rows), "compressed": 0, "passthrough": 0, "fallback": 0}
-    with open(output, "w", encoding="utf-8") as sink:
-        for row in results:
-            assert row is not None
+    with open(output, "a" if args.resume else "w", encoding="utf-8") as sink:
+
+        async def one(index: int, row: dict) -> None:
+            async with semaphore:
+                result = await compress_row(row, args=args, complete=complete)
+            result["row_index"] = index
             key = {True: "compressed", "passthrough": "passthrough", False: "fallback"}[
-                row["compressed"]
+                result["compressed"]
             ]
-            stats[key] += 1
-            sink.write(json.dumps(row) + "\n")
+            async with lock:
+                stats[key] += 1
+                sink.write(json.dumps(result) + "\n")
+                sink.flush()
+            done["count"] += 1
+            if done["count"] % 100 == 0:
+                print(f"{done['count']}/{len(todo)} rows", flush=True)
+
+        await asyncio.gather(*(one(i, r) for i, r in todo))
     with open(output.with_suffix(".stats.json"), "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2)
     print(json.dumps(stats, indent=2))
