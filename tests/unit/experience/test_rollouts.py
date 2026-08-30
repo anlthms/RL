@@ -2466,6 +2466,14 @@ def test_run_async_nemo_gym_rollout(
                 isinstance(v, (bool, int)) for v in final_batch["mask_sample"].tolist()
             )
             final_batch.pop("mask_sample")
+        # Per-sample verifier metadata carries model-dependent values; just
+        # verify the shape (one compact scalar dict per sample, no traces).
+        if "extra_env_info" in final_batch:
+            assert all(
+                isinstance(info, dict) and "trace" not in info and "response" not in info
+                for info in final_batch["extra_env_info"]
+            )
+            final_batch.pop("extra_env_info")
 
         for key in d["rollout_metrics"]:
             # We remove these fields from comparison since we cannot guarantee exact generation reproducibility
@@ -2483,3 +2491,33 @@ def test_run_async_nemo_gym_rollout(
     1. In nemo_rl/experience/rollouts.py::run_async_nemo_gym_rollout, the sampling params are passed appropriately
     2. In nemo_rl/models/generation/vllm/vllm_worker_async.py::VllmAsyncGenerationWorker::_setup_vllm_server::create_chat_completion, the sampling params (like top_k) are set as appropriate
     """
+
+
+def test_compact_verifier_metadata_keeps_scalars_and_terms_only():
+    """The gym batch metadata must carry exactness signals but never traces.
+
+    Validation reads test_exact/grid_match (or terms) per sample; the episode
+    trace and response payloads -- which can embed verifier-only grids -- must
+    stay out of the rollout batch.
+    """
+    from nemo_rl.experience.rollouts import _compact_verifier_metadata
+
+    full_result = {
+        "reward": 0.4,
+        "test_exact": False,
+        "all_solved": False,
+        "grid_match": 0.5,
+        "task_id": "task-1",
+        "terms": {"grid_match": 0.0, "cell_match": 0.97, "note": "not numeric"},
+        "trace": {"rounds": [{"secret": [[7, 8]]}]},
+        "response": {"output": ["big payload"]},
+        "expected_output": [[7, 8]],
+        "predicted_output": [[7, 9]],
+    }
+    compact = _compact_verifier_metadata(full_result)
+    assert compact["test_exact"] is False
+    assert compact["grid_match"] == 0.5
+    assert compact["task_id"] == "task-1"
+    assert compact["terms"] == {"grid_match": 0.0, "cell_match": 0.97}
+    for forbidden in ("trace", "response", "expected_output", "predicted_output"):
+        assert forbidden not in compact

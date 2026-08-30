@@ -5450,6 +5450,209 @@ class TestValidateFunction:
         assert val_metrics["accuracy"] == pytest.approx(0.125)
         assert val_metrics["pass_k"] == pytest.approx(0.5)
 
+    @staticmethod
+    def _prompt_batch(indices: list[int]) -> BatchedDataDict[DatumSpec]:
+        return BatchedDataDict[DatumSpec](
+            {
+                "message_log": [
+                    [
+                        {
+                            "role": "user",
+                            "content": f"p{i}",
+                            "token_ids": torch.tensor([i]),
+                        }
+                    ]
+                    for i in indices
+                ],
+                "task_name": ["math"] * len(indices),
+                "extra_env_info": [{} for _ in indices],
+                "loss_multiplier": torch.ones(len(indices)),
+                "idx": torch.tensor(indices),
+                "length": torch.ones(len(indices), dtype=torch.long),
+                "total_reward": torch.zeros(len(indices)),
+            }
+        )
+
+    def _run_native_validate(self, mock_config, batches, run_rollout):
+        mock_dataloader = MagicMock(spec=StatefulDataLoader)
+        mock_dataloader.__iter__ = MagicMock(return_value=iter(batches))
+        with (
+            patch(
+                "nemo_rl.algorithms.grpo.run_multi_turn_rollout",
+                side_effect=run_rollout,
+            ),
+            patch("nemo_rl.algorithms.grpo.should_use_nemo_gym", return_value=False),
+            patch(
+                "nemo_rl.algorithms.grpo.should_use_async_rollouts",
+                return_value=False,
+            ),
+            patch("nemo_rl.algorithms.grpo.print_message_log_samples"),
+        ):
+            val_metrics, _ = validate(
+                MagicMock(),
+                mock_dataloader,
+                MagicMock(),
+                {"math": MagicMock(spec=EnvironmentInterface)},
+                step=0,
+                master_config=mock_config,
+            )
+        return val_metrics
+
+    def test_positive_shaped_reward_without_exact_match_is_not_a_pass(
+        self, mock_grpo_components
+    ):
+        """A near miss with reward > 0 must not increase pass@k or solve_rate."""
+        mock_config = mock_grpo_components["master_config"]
+        mock_config.grpo.max_val_samples = 2
+        mock_config.grpo.val_batch_size = 2
+        mock_config.grpo.val_num_generations_per_prompt = 2
+
+        def run_rollout(_policy, repeated_batch, *_args, **_kwargs):
+            # Every rollout earns positive SHAPED reward, but only prompt 0's
+            # second rollout is exact.
+            repeated_batch["total_reward"] = torch.tensor([0.4, 0.9, 0.4, 0.4])
+            repeated_batch["extra_env_info"] = [
+                {"terms": {"grid_match": 0.0, "cell_match": 0.97}},
+                {"terms": {"grid_match": 1.0, "cell_match": 1.0}},
+                {"terms": {"grid_match": 0.0, "cell_match": 0.99}},
+                {"terms": {"grid_match": 0.0, "cell_match": 0.98}},
+            ]
+            return repeated_batch, {"mean_gen_tokens_per_sample": 1.0}
+
+        val_metrics = self._run_native_validate(
+            mock_config, [self._prompt_batch([0, 1])], run_rollout
+        )
+        # Reward-positive near misses do not pass; only the exact rollout does.
+        assert val_metrics["pass_k"] == pytest.approx(0.5)
+        assert val_metrics["solve_rate"] == pytest.approx(0.25)
+        assert val_metrics["accuracy"] == pytest.approx(0.525)
+
+    def test_episode_level_exactness_flags_count_as_passes(
+        self, mock_grpo_components
+    ):
+        mock_config = mock_grpo_components["master_config"]
+        mock_config.grpo.max_val_samples = 2
+        mock_config.grpo.val_batch_size = 2
+        mock_config.grpo.val_num_generations_per_prompt = 1
+
+        def run_rollout(_policy, repeated_batch, *_args, **_kwargs):
+            repeated_batch["total_reward"] = torch.tensor([-0.1, 1.5])
+            repeated_batch["extra_env_info"] = [
+                # Episode solved every grid despite a negative shaped reward.
+                {"test_exact": True, "grid_match": 1.0},
+                # High reward, but the episode did not solve all grids.
+                {"test_exact": False, "all_solved": False, "grid_match": 0.5},
+            ]
+            return repeated_batch, {"mean_gen_tokens_per_sample": 1.0}
+
+        val_metrics = self._run_native_validate(
+            mock_config, [self._prompt_batch([0, 1])], run_rollout
+        )
+        assert val_metrics["solve_rate"] == pytest.approx(0.5)
+
+    def test_null_max_val_samples_evaluates_the_whole_dataloader(
+        self, mock_grpo_components
+    ):
+        mock_config = mock_grpo_components["master_config"]
+        mock_config.grpo.max_val_samples = None
+        mock_config.grpo.val_batch_size = 2
+        mock_config.grpo.val_num_generations_per_prompt = 1
+        seen_sizes = []
+
+        def run_rollout(_policy, repeated_batch, *_args, **_kwargs):
+            seen_sizes.append(repeated_batch.size)
+            repeated_batch["total_reward"] = torch.ones(repeated_batch.size)
+            return repeated_batch, {"mean_gen_tokens_per_sample": 1.0}
+
+        batches = [self._prompt_batch([0, 1]), self._prompt_batch([2, 3])]
+        self._run_native_validate(mock_config, batches, run_rollout)
+        assert seen_sizes == [2, 2]
+
+    def test_non_divisible_and_sub_batch_limits_evaluate_exact_counts(
+        self, mock_grpo_components
+    ):
+        mock_config = mock_grpo_components["master_config"]
+        mock_config.grpo.val_batch_size = 2
+        mock_config.grpo.val_num_generations_per_prompt = 1
+
+        def run_rollout(_policy, repeated_batch, *_args, **_kwargs):
+            seen_sizes.append(repeated_batch.size)
+            repeated_batch["total_reward"] = torch.ones(repeated_batch.size)
+            return repeated_batch, {"mean_gen_tokens_per_sample": 1.0}
+
+        # Limit 3 with batch size 2: full batch, then the remainder (not 0).
+        mock_config.grpo.max_val_samples = 3
+        seen_sizes: list[int] = []
+        self._run_native_validate(
+            mock_config,
+            [self._prompt_batch([0, 1]), self._prompt_batch([2, 3])],
+            run_rollout,
+        )
+        assert seen_sizes == [2, 1]
+
+        # Limit 1 below one batch: one prompt, not zero.
+        mock_config.grpo.max_val_samples = 1
+        seen_sizes = []
+        self._run_native_validate(
+            mock_config, [self._prompt_batch([0, 1])], run_rollout
+        )
+        assert seen_sizes == [1]
+
+    def test_gym_metrics_aggregate_across_batches_weighted_by_rollouts(
+        self, mock_grpo_components
+    ):
+        """Two gym batches must aggregate like one batch, not report the last."""
+        mock_config = mock_grpo_components["master_config"]
+        mock_config.grpo.max_val_samples = 3
+        mock_config.grpo.val_batch_size = 2
+        mock_config.grpo.val_num_generations_per_prompt = 1
+        mock_config.policy["generation"].update(
+            {"val_temperature": 0.1, "val_top_p": 0.9, "val_top_k": None}
+        )
+        mock_config.logger.update({"wandb_enabled": False, "wandb": {}})
+        mock_config.env = {}
+
+        per_batch_metrics = iter(
+            [
+                {"mean_gen_tokens_per_sample": 1.0, "agent/cell_match/mean": 1.0},
+                {"mean_gen_tokens_per_sample": 1.0, "agent/cell_match/mean": 4.0},
+            ]
+        )
+
+        def run_gym_rollout(**kwargs):
+            repeated_batch = kwargs["input_batch"]
+            repeated_batch["total_reward"] = torch.zeros(repeated_batch.size)
+            return MagicMock(
+                final_batch=repeated_batch,
+                rollout_metrics=next(per_batch_metrics),
+            )
+
+        mock_dataloader = MagicMock(spec=StatefulDataLoader)
+        mock_dataloader.__iter__ = MagicMock(
+            return_value=iter(
+                [self._prompt_batch([0, 1]), self._prompt_batch([2, 3])]
+            )
+        )
+        with (
+            patch(
+                "nemo_rl.algorithms.grpo.run_nemo_gym_rollout_sync",
+                side_effect=run_gym_rollout,
+            ),
+            patch("nemo_rl.algorithms.grpo.should_use_nemo_gym", return_value=True),
+            patch("nemo_rl.algorithms.grpo.print_message_log_samples"),
+        ):
+            val_metrics, _ = validate(
+                MagicMock(),
+                mock_dataloader,
+                MagicMock(),
+                {"nemo_gym": MagicMock(spec=EnvironmentInterface)},
+                step=0,
+                master_config=mock_config,
+            )
+        # Weighted by rollout count (2 and 1): (1.0*2 + 4.0*1) / 3, identical
+        # to evaluating the same three samples in a single batch.
+        assert val_metrics["agent/cell_match/mean"] == pytest.approx(2.0)
+
     def test_validation_uses_val_sampling_params_on_gym_path(
         self, mock_grpo_components
     ):
@@ -5525,7 +5728,7 @@ class TestValidateFunction:
         )
         master_config.env = {}
 
-        with pytest.raises(AssertionError, match="only supported for vLLM NeMo-Gym"):
+        with pytest.raises(AssertionError, match="only supported for NeMo-Gym rollouts"):
             setup(master_config, MagicMock(), MagicMock(), None)
 
     def test_validate_returns_empty_when_no_dataloader(self, mock_grpo_components):

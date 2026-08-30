@@ -328,11 +328,15 @@ class GRPOConfig(BaseModel, extra="allow"):
     # final checkpoint has validation metrics, which is required for get_best_checkpoint_path().
     val_at_end: bool = False
     # Counts PROMPTS, not rollouts: with val_num_generations_per_prompt = k,
-    # total validation rollouts = max_val_samples * k.
+    # total validation rollouts = max_val_samples * k. null evaluates the whole
+    # validation set; a limit that is not a multiple of val_batch_size still
+    # evaluates exactly this many prompts.
     max_val_samples: int | None = 256  # None for NeMo-Gym compatibility
     # Number of independent validation rollouts generated for each prompt;
     # k > 1 additionally reports pass@k over each prompt's k rollouts as the
-    # pass_k metric.
+    # pass_k metric. A rollout counts as a pass only when the environment
+    # reports an exact solve (test_exact / all_solved / grid_match == 1.0);
+    # reward > 0 is the fallback for environments without exactness metadata.
     val_num_generations_per_prompt: int = 1
     # Early stop: end training once this validation metric (e.g. accuracy,
     # always reported, or pass_k with grouped validation) reaches
@@ -4117,6 +4121,32 @@ def grpo_train(
     checkpointer.shutdown()
 
 
+def _rollout_sample_solved(env_info: Any, reward: float) -> bool:
+    """Decide whether one validation rollout SOLVED its task exactly.
+
+    Exactness comes from the environment's per-sample metadata when it reports
+    any: an episode-level ``test_exact``/``all_solved`` flag, or a
+    ``grid_match`` fraction (1.0 means every scored grid matched exactly; the
+    same key inside a ``terms`` reward breakdown counts too). The scalar
+    reward is only the fallback for environments that report none of these --
+    shaped rewards can be positive on inexact near misses, and those must
+    never count toward pass@k.
+    """
+    if isinstance(env_info, dict):
+        sources: list[dict[str, Any]] = [env_info]
+        if isinstance(env_info.get("terms"), dict):
+            sources.append(env_info["terms"])
+        exact_signals = [
+            bool(source[key]) if key in ("test_exact", "all_solved") else float(source[key]) >= 1.0
+            for source in sources
+            for key in ("test_exact", "all_solved", "grid_match")
+            if key in source
+        ]
+        if exact_signals:
+            return any(exact_signals)
+    return reward > 0
+
+
 def validate(
     policy_generation: GenerationInterface,
     val_dataloader: Optional[StatefulDataLoader],
@@ -4163,21 +4193,36 @@ def validate(
         )
 
         total_rewards = []
+        total_solves: list[bool] = []
         total_reward_terms: dict[str, list[float]] = {}
         total_lengths = []
         all_message_logs = []  # Collect all message logs
+        # Weighted cross-batch aggregation for the generator/Gym metrics: a
+        # per-batch dict assigned into the summary would silently report only
+        # the LAST batch of a multi-batch validation.
+        extra_metric_sums: dict[str, float] = {}
+        extra_metric_weights: dict[str, float] = {}
+        extra_metric_nonnumeric: dict[str, Any] = {}
 
-        max_batches = (
-            master_config.grpo.max_val_samples // master_config.grpo.val_batch_size
-        )
-        for batch_idx, val_batch in enumerate(val_dataloader):
-            if batch_idx >= max_batches:
-                break
+        # Exact prompt-count limiting. max_val_samples: null means the whole
+        # dataset; a limit that is not a multiple of val_batch_size evaluates
+        # the remainder from a sliced batch instead of silently dropping it
+        # (which also fixes limits smaller than one batch evaluating nothing).
+        max_val_samples = master_config.grpo.max_val_samples
+        prompts_evaluated = 0
+        for val_batch in val_dataloader:
+            if max_val_samples is not None:
+                remaining = max_val_samples - prompts_evaluated
+                if remaining <= 0:
+                    break
+                if val_batch.size > remaining:
+                    val_batch = val_batch.slice(0, remaining)
+            batch_prompt_count = val_batch.size
+            prompts_evaluated += batch_prompt_count
 
             if val_num_generations_per_prompt > 1:
                 val_batch = val_batch.repeat_interleave(val_num_generations_per_prompt)
 
-            additional_metrics_to_report = dict()
             # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
             # Use async rollouts when enabled by config/backend defaults.
             # We cascade NeMo-Gym first since NeMo-Gym also uses async rollouts.
@@ -4246,7 +4291,22 @@ def validate(
                         break
                 val_batch = nemo_gym_rollout_result.final_batch
                 gen_metrics = nemo_gym_rollout_result.rollout_metrics
-                additional_metrics_to_report = gen_metrics
+                # Fold this batch's Gym metrics into the rollout-weighted
+                # accumulators; non-numeric values (e.g. W&B tables) keep
+                # last-batch semantics.
+                batch_weight = float(
+                    batch_prompt_count * val_num_generations_per_prompt
+                )
+                for name, value in gen_metrics.items():
+                    if isinstance(value, (bool, int, float)):
+                        extra_metric_sums[name] = (
+                            extra_metric_sums.get(name, 0.0) + float(value) * batch_weight
+                        )
+                        extra_metric_weights[name] = (
+                            extra_metric_weights.get(name, 0.0) + batch_weight
+                        )
+                    else:
+                        extra_metric_nonnumeric[name] = value
             elif should_use_async_rollouts(master_config.policy["generation"]):
                 val_batch, gen_metrics = run_async_multi_turn_rollout(
                     policy_generation,
@@ -4274,7 +4334,8 @@ def validate(
                     ),
                 )
 
-            total_rewards.extend(val_batch["total_reward"].tolist())
+            batch_rewards = val_batch["total_reward"].tolist()
+            total_rewards.extend(batch_rewards)
             total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
 
             # An environment may attach a per-sample "terms" dict to its
@@ -4284,7 +4345,11 @@ def validate(
             # is the difference between the headline score and the metric that
             # actually moves early. Environments that don't populate "terms"
             # are unaffected.
-            for env_info in val_batch.get("extra_env_info", []):
+            batch_env_infos = val_batch.get("extra_env_info", None)
+            if batch_env_infos is None or len(batch_env_infos) != len(batch_rewards):
+                batch_env_infos = [None] * len(batch_rewards)
+            for env_info, reward in zip(batch_env_infos, batch_rewards):
+                total_solves.append(_rollout_sample_solved(env_info, reward))
                 if isinstance(env_info, dict) and isinstance(
                     env_info.get("terms"), dict
                 ):
@@ -4304,18 +4369,23 @@ def validate(
         # Calculate validation metrics. accuracy is the mean reward over all
         # rollouts; grouped validation (val_num_generations_per_prompt > 1)
         # additionally reports pass@k over each prompt's k rollouts as pass_k.
+        # pass_k counts EXACT solves (see _rollout_sample_solved), never the
+        # shaped scalar reward, so a positive-reward near miss is not a pass.
         num_samples = len(total_rewards)
         pass_k = None
+        solve_rate = None
         if num_samples > 0:
             rewards_t = torch.tensor(total_rewards, dtype=torch.float32)
             accuracy = rewards_t.mean().item()
+            solves_t = torch.tensor(total_solves, dtype=torch.bool)
+            solve_rate = solves_t.float().mean().item()
             if val_num_generations_per_prompt > 1:
                 assert num_samples % val_num_generations_per_prompt == 0, (
                     "Validation rewards must be divisible by "
                     "grpo.val_num_generations_per_prompt"
                 )
                 pass_k = (
-                    (rewards_t.view(-1, val_num_generations_per_prompt) > 0)
+                    solves_t.view(-1, val_num_generations_per_prompt)
                     .any(dim=1)
                     .float()
                     .mean()
@@ -4323,6 +4393,12 @@ def validate(
                 )
         else:
             accuracy = 0.0
+
+        additional_metrics_to_report: dict[str, Any] = {
+            name: total / extra_metric_weights[name]
+            for name, total in extra_metric_sums.items()
+        }
+        additional_metrics_to_report.update(extra_metric_nonnumeric)
 
         avg_length = (
             sum(total_lengths) / len(total_lengths) if len(total_lengths) > 0 else 0.0
@@ -4338,6 +4414,8 @@ def validate(
             },
             **additional_metrics_to_report,
         }
+        if solve_rate is not None:
+            val_metrics["solve_rate"] = solve_rate
         if pass_k is not None:
             val_metrics["pass_k"] = pass_k
 
@@ -4376,6 +4454,9 @@ def validate(
         val_log_data = {
             "content": all_message_logs,
             "rewards": total_rewards,
+            # Per-sample exact-solve booleans, so solve metrics can be
+            # recomputed from the log without re-running the model.
+            "solved": [bool(solved) for solved in total_solves],
         }
         logger.log_batched_dict_as_jsonl(val_log_data, f"val_data_step{step}.jsonl")
 
