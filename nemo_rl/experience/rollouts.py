@@ -2609,6 +2609,30 @@ def run_nemo_gym_rollout_sync(
     return asyncio.run(_consume_rollout())
 
 
+def _compact_verifier_metadata(full_result: dict[str, Any]) -> dict[str, Any]:
+    """Reduce one verifier result to its scalar fields plus reward terms.
+
+    This is what rides in the rollout batch as ``extra_env_info``: enough for
+    validation to read per-sample exactness (``test_exact``/``grid_match``/
+    ``all_solved`` or a ``terms`` breakdown) without dragging the episode
+    trace -- which may embed verifier-only grids -- into batches, logs, or
+    checkpoints.
+    """
+    compact = {
+        key: value
+        for key, value in full_result.items()
+        if isinstance(value, (bool, int, float, str))
+    }
+    terms = full_result.get("terms")
+    if isinstance(terms, dict):
+        compact["terms"] = {
+            key: value
+            for key, value in terms.items()
+            if isinstance(value, (bool, int, float))
+        }
+    return compact
+
+
 def _postprocess_single_nemo_gym_group(
     nemo_gym_rows: list[dict],
     results: list[dict],
@@ -2785,6 +2809,13 @@ def _postprocess_single_nemo_gym_group(
     final_batch = BatchedDataDict[DatumSpec](
         {
             "agent_ref": [r["agent_ref"] for r in results],
+            # Compact per-sample verifier metadata (scalars + reward terms).
+            # Validation derives exact-match solve metrics from this instead of
+            # the shaped scalar reward; the full result (with its episode
+            # trace) deliberately stays out of the batch.
+            "extra_env_info": [
+                _compact_verifier_metadata(r["full_result"]) for r in results
+            ],
             "message_log": [r["message_log"] for r in results],
             # length is used downstream for mean_prompt_length
             "length": torch.tensor(
