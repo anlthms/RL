@@ -104,12 +104,20 @@ def test_pairs_do_not_repeat_before_a_full_pass(tmp_path) -> None:
         assert len(set(first_pass)) == len(first_pass), task_id
 
 
+def test_cumulative_staging_is_the_default() -> None:
+    config = NvArcExecutorConfig(
+        data_dir="unused", num_tasks=1, num_val_tasks=0, seed=0, val_seed=1
+    )
+    assert config.curriculum_cumulative is True
+
+
 def test_pure_staging_holds_each_bucket_then_clamps(tmp_path) -> None:
     dataset = _dataset(
         tmp_path,
         num_tasks=40,
         curriculum_window=4,
         curriculum_hold_steps=2,
+        curriculum_cumulative=False,
     )
     # Two 4-row windows per bucket, easiest first; the two windows past the
     # final stage stay on the last bucket.
