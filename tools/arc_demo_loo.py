@@ -35,11 +35,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 
 def build_loo_tasks(
     challenges: dict[str, dict],
-) -> tuple[dict[str, dict], dict[str, list], dict[str, dict]]:
+) -> tuple[dict[str, dict], dict[str, list], dict[str, Any]]:
     """Derive (challenges, solutions, manifest) LOO triples from source tasks.
 
     Tasks with fewer than two demos are skipped (an empty ``train`` would
@@ -47,7 +48,7 @@ def build_loo_tasks(
     """
     loo_challenges: dict[str, dict] = {}
     loo_solutions: dict[str, list] = {}
-    manifest: dict[str, dict] = {"rows": {}, "skipped_task_ids": []}
+    manifest: dict[str, Any] = {"rows": {}, "skipped_task_ids": []}
     for task_id in sorted(challenges):
         demos = challenges[task_id]["train"]
         if len(demos) < 2:
