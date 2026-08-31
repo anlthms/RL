@@ -28,11 +28,11 @@ repeating one.
 
 The training curriculum is *staged*: each difficulty bucket is held for
 ``curriculum_hold_steps`` steps before advancing to the next, starting from
-the easiest. Pure staging (the default) fills every window with the current
-bucket only — maximum on-level signal, accepted on the hypothesis that the
-opening ventile is solvable by the base model. ``curriculum_cumulative``
-switches to cycling over the current and all earlier buckets, the fallback if
-early GRPO groups degenerate (every rollout in a group equally hopeless).
+the easiest. Cumulative staging (the default) cycles every window over the
+current and all earlier buckets, so solvable rows stay mixed into every GRPO
+group as difficulty ramps — pure staging (``curriculum_cumulative: false``)
+fills windows with the current bucket only, and collapsed exec_e1 when hard
+ventiles produced all-floored groups (NaN at iteration 31).
 """
 
 import json
@@ -81,8 +81,10 @@ class NvArcExecutorConfig(BaseModel, extra="allow"):
             advances to the next; windows past the final bucket stay on it.
             Required with ``curriculum_window``.
         curriculum_cumulative: Cycle over the current and all earlier buckets
-            instead of filling windows with the current bucket only. The
-            fallback if pure staging degenerates early GRPO groups.
+            (the default) instead of filling windows with the current bucket
+            only. Pure staging starves GRPO groups of solvable rows once the
+            schedule reaches hard ventiles (all-floored groups diverged
+            exec_e1), so disable it only for single-bucket probes.
     """
 
     data_dir: str
@@ -96,7 +98,7 @@ class NvArcExecutorConfig(BaseModel, extra="allow"):
     ]  # fmt: skip
     curriculum_window: int | None = None
     curriculum_hold_steps: int | None = None
-    curriculum_cumulative: bool = False
+    curriculum_cumulative: bool = True
 
     @model_validator(mode="after")
     def _check(self) -> "NvArcExecutorConfig":
