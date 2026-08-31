@@ -55,16 +55,16 @@ data:
     # (756, 783/784, 810/812, 840/841), which is fine.
     bucket_edges: [91, 162, 264, 380, 525, 621, 667, 700, 725, 750, 756, 783, 784, 810, 812, 840, 841, 870]
     # Staged curriculum: hold each ventile for curriculum_hold_steps steps,
-    # easiest first; steps past the last ventile stay on it. Pure staging
-    # (windows hold the current ventile only) is the default; flip
-    # curriculum_cumulative to true — cycle the current plus all earlier
-    # ventiles — if early GRPO groups degenerate on one-ventile windows.
+    # easiest first; steps past the last ventile stay on it. Cumulative
+    # (default): every window cycles the current plus all earlier ventiles,
+    # keeping solvable rows in every GRPO group as difficulty ramps. Pure
+    # staging (false) starves late groups and diverged exec_e1 (NaN, iter 31).
     curriculum_window: ${grpo.num_prompts_per_step}
-    curriculum_hold_steps: 3
-    curriculum_cumulative: false
-    # Exactly max_num_steps (19 ventiles x 3 hold) x 32 prompts per step;
+    curriculum_hold_steps: 6
+    curriculum_cumulative: true
+    # Exactly max_num_steps (19 ventiles x 6 hold) x 32 prompts per step;
     # the preflight requires the dataset to cover the run.
-    num_tasks: 1824
+    num_tasks: 3648
     # NVARC-side validation off: validation runs solely on the real split.
     num_val_tasks: 0
     seed: ${grpo.seed}

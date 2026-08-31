@@ -162,8 +162,12 @@ def test_materializer_bakes_the_role_schedule_into_row_order(materialized) -> No
         proposers = [row for row in window_rows if row["role"] == "proposer"]
         assert len(executors) == entry["executor_rows"]
         assert len(proposers) == entry["proposer_rows"]
-        # Pure staging: every row in the window sits in the stage's bucket.
-        assert {row["bucket"] for row in window_rows} == {entry["stage"] + 1}
+        # Cumulative staging: rows cycle over the current and all earlier
+        # buckets, never one past the stage.
+        window_buckets = {row["bucket"] for row in window_rows}
+        assert window_buckets <= set(range(1, entry["stage"] + 2))
+        if entry["stage"] > 0:
+            assert len(window_buckets) > 1, "cumulative windows must mix buckets"
     # 90:10 at the first ventile, 10:90 at the last.
     assert stats["step_mixture"][0]["executor_rows"] == 4
     assert stats["step_mixture"][-1]["proposer_rows"] == 4

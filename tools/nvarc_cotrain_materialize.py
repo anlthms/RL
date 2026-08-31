@@ -17,8 +17,11 @@ The gym GRPO entrypoint consumes one JSONL in row order (``data.shuffle:
 false``; one ``num_prompts_per_step`` window per step), so both the staged
 ventile curriculum and the role schedule are baked into the row order here:
 
-- Step ``s`` sits at curriculum stage ``min(s // hold_steps, last)`` (the
-  staged ventile schedule of ``nvarc_executor.staged_choices``, pure staging).
+- Step ``s`` sits at curriculum stage ``min(s // hold_steps, last)``. Windows
+  cycle over the current and all earlier ventiles by default (cumulative, the
+  same contract as ``nvarc_executor.staged_choices``): pure staging
+  (``--no-cumulative``) starves late GRPO groups of solvable rows and
+  diverged exec_e1.
 - The role mixture follows ``P(executor | c) = 0.90 - 0.80 c`` with progress
   ``c = stage / (num_stages - 1)``: 90:10 executor:proposer at the first
   ventile, 10:90 at the last.
@@ -94,6 +97,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hold-steps", type=int, required=True, help="steps per ventile stage"
+    )
+    parser.add_argument(
+        "--cumulative",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="cycle windows over the current and all earlier ventiles",
     )
     parser.add_argument(
         "--pad-steps",
@@ -291,13 +300,25 @@ def main() -> None:
 
     train_rows: list[dict] = []
     step_mixture: list[dict] = []
+    bucket_order = sorted(by_bucket)
+    # Persistent cycling pointer, the staged_choices contract: every included
+    # ventile recurs evenly even when the window is smaller than the pool.
+    bucket_pointer = 0
+
+    def next_bucket(stage: int) -> int:
+        nonlocal bucket_pointer
+        pool = bucket_order[: stage + 1] if args.cumulative else [bucket_order[stage]]
+        chosen = pool[bucket_pointer % len(pool)]
+        bucket_pointer += 1
+        return chosen
+
     for step in range(args.steps + args.pad_steps):
         stage, executor_rows, progress = role_counts(
             step, window=args.window, hold_steps=args.hold_steps, num_stages=num_stages
         )
-        bucket = sorted(by_bucket)[stage]
         emitted_proposers = 0
         for _ in range(executor_rows):
+            bucket = next_bucket(stage)
             puzzle = executor_queues[bucket].next()
             if puzzle["puzzle_id"] not in pair_samplers:
                 pair_samplers[puzzle["puzzle_id"]] = _PairSampler(
@@ -312,6 +333,7 @@ def main() -> None:
             train_rows.append(row)
         skipped = 0
         while emitted_proposers < args.window - executor_rows:
+            bucket = next_bucket(stage)
             row = _proposer_row(
                 proposer_queues[bucket].next(),
                 bucket=bucket,
@@ -322,9 +344,9 @@ def main() -> None:
             )
             if row is None:
                 skipped += 1
-                if skipped > len(by_bucket[bucket]):
+                if skipped > sum(len(by_bucket[b]) for b in bucket_order[: stage + 1]):
                     raise SystemExit(
-                        f"bucket {bucket} has no puzzle with enough pairs for "
+                        f"no puzzle through bucket {bucket} has enough pairs for "
                         f"{_MIN_DEMO_PAIRS} demos + {args.eval_pairs} evals"
                     )
                 continue
@@ -359,6 +381,7 @@ def main() -> None:
         "pad_steps": args.pad_steps,
         "window": args.window,
         "hold_steps": args.hold_steps,
+        "cumulative": args.cumulative,
         "num_stages": num_stages,
         "bucket_edges": config.bucket_edges,
         "demo_pairs": args.demo_pairs,
