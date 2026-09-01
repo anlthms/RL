@@ -56,6 +56,7 @@ the per-agent validation metrics and re-materialize if the executor drifts.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import random
 from pathlib import Path
@@ -301,16 +302,13 @@ def main() -> None:
     train_rows: list[dict] = []
     step_mixture: list[dict] = []
     bucket_order = sorted(by_bucket)
-    # Persistent cycling pointer, the staged_choices contract: every included
+    # Persistent cycling cursor, the staged_choices contract: every included
     # ventile recurs evenly even when the window is smaller than the pool.
-    bucket_pointer = 0
+    bucket_cursor = itertools.count()
 
     def next_bucket(stage: int) -> int:
-        nonlocal bucket_pointer
         pool = bucket_order[: stage + 1] if args.cumulative else [bucket_order[stage]]
-        chosen = pool[bucket_pointer % len(pool)]
-        bucket_pointer += 1
-        return chosen
+        return pool[next(bucket_cursor) % len(pool)]
 
     for step in range(args.steps + args.pad_steps):
         stage, executor_rows, progress = role_counts(
