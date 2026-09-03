@@ -296,6 +296,7 @@ project-includes = [
   "tools/nvarc_executor_benchmark.py",
   "tools/nvarc_executor_benchmark_megatron.py",
   "tools/nvarc_executor_train_preflight.py",
+  "tools/nvarc_oracle_harness.py",
   "tools/nvarc_ingest.py",
   "tools/refit_bandwidth_calculator.py",
   "tools/verify_tq_data_plane_checkpoint.py",
