@@ -25,6 +25,11 @@ class FakeExecutor:
         self.messages.append([dict(message) for message in messages])
         return self.responses.pop(0)
 
+    async def complete_with_reasoning(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[str, str]:
+        return "", await self.complete(messages)
+
 
 def _case(**overrides) -> BenchmarkCase:
     fields = {
