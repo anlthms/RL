@@ -431,6 +431,7 @@ class HttpOracleClient:
         max_output_tokens: int,
         reasoning_effort: str | None,
         timeout_seconds: float,
+        stream: bool,
     ) -> None:
         self.url = endpoint.rstrip("/") + "/chat/completions"
         self.model = model
@@ -439,6 +440,98 @@ class HttpOracleClient:
         self.max_output_tokens = max_output_tokens
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
+        self.stream = stream
+        self.request_index = 0
+
+    @staticmethod
+    def _accumulate_stream_chunk(state: dict[str, Any], chunk: dict[str, Any]) -> None:
+        """Merge one OpenAI-compatible SSE chunk into a final response."""
+        for key in ("id", "model", "object", "system_fingerprint"):
+            if key in chunk:
+                state[key] = chunk[key]
+        usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            state["usage"] = usage
+        choices = chunk.get("choices", [])
+        if not choices:
+            return
+        choice = choices[0]
+        delta = choice.get("delta", {})
+        content = delta.get("content") or ""
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+        if not isinstance(content, str) or not isinstance(reasoning, str):
+            raise TypeError("streamed assistant content/reasoning must be strings")
+        state["content"] += content
+        state["reasoning_content"] += reasoning
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None:
+            state["finish_reason"] = finish_reason
+
+    async def _read_stream(
+        self, response: Any, *, role: str, request_id: int, started: float
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read NVIDIA's data-only SSE stream and report live character counts."""
+        state: dict[str, Any] = {
+            "content": "",
+            "reasoning_content": "",
+            "finish_reason": None,
+            "usage": {},
+        }
+        chunks = 0
+        saw_done = False
+        next_report_chars = 8_192
+        async for raw_line in response.content:
+            line = raw_line.decode("utf-8").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if data == "[DONE]":
+                saw_done = True
+                break
+            chunk = json.loads(data)
+            self._accumulate_stream_chunk(state, chunk)
+            chunks += 1
+            streamed_chars = len(state["content"]) + len(state["reasoning_content"])
+            if streamed_chars >= next_report_chars:
+                print(
+                    "oracle_stream: "
+                    f"request={request_id} role={role} chunks={chunks} "
+                    f"reasoning_chars={len(state['reasoning_content'])} "
+                    f"content_chars={len(state['content'])} "
+                    f"elapsed={time.perf_counter() - started:.1f}s",
+                    flush=True,
+                )
+                next_report_chars = (streamed_chars // 8_192 + 1) * 8_192
+        if not saw_done and state["finish_reason"] is None:
+            raise ValueError("SSE stream ended without [DONE] or finish_reason")
+        body = {
+            key: state[key]
+            for key in ("id", "model", "object", "system_fingerprint")
+            if key in state
+        }
+        body.update(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": state["content"],
+                            "reasoning_content": state["reasoning_content"],
+                        },
+                        "finish_reason": state["finish_reason"],
+                    }
+                ],
+                "usage": state["usage"],
+            }
+        )
+        return body, {
+            "enabled": True,
+            "chunks": chunks,
+            "saw_done": saw_done,
+            "reasoning_chars": len(state["reasoning_content"]),
+            "content_chars": len(state["content"]),
+        }
 
     async def complete(
         self, role: str, messages: list[dict[str, str]]
@@ -455,10 +548,15 @@ class HttpOracleClient:
         }
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
+        if self.stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         assert_model_request_safe(payload)
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         retry_errors: list[str] = []
         started = time.perf_counter()
+        self.request_index += 1
+        request_id = self.request_index
         for attempt in range(3):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -467,15 +565,29 @@ class HttpOracleClient:
                         json=payload,
                         headers={
                             "Authorization": f"Bearer {self.api_key}",
+                            "Accept": (
+                                "text/event-stream"
+                                if self.stream
+                                else "application/json"
+                            ),
                             "Content-Type": "application/json",
                         },
                     ) as response:
-                        response_text = await response.text()
                         if response.status >= 400:
+                            response_text = await response.text()
                             raise RuntimeError(
                                 f"HTTP {response.status}: {response_text[:500]}"
                             )
-                        body = json.loads(response_text)
+                        if self.stream:
+                            body, stream_stats = await self._read_stream(
+                                response,
+                                role=role,
+                                request_id=request_id,
+                                started=started,
+                            )
+                        else:
+                            body = json.loads(await response.text())
+                            stream_stats = {"enabled": False}
                 message = body["choices"][0]["message"]
                 content = message.get("content") or ""
                 reasoning = message.get("reasoning_content") or ""
@@ -490,6 +602,7 @@ class HttpOracleClient:
                     "usage": body.get("usage", {}),
                     "latency_seconds": time.perf_counter() - started,
                     "retry_errors": retry_errors,
+                    "stream": stream_stats,
                 }
             except (
                 aiohttp.ClientError,
@@ -993,6 +1106,7 @@ async def run_arm(
     api_key: str,
     concurrency: int,
     timeout_seconds: float,
+    stream: bool = True,
     client_factory: Callable[[], OracleClient] | None = None,
 ) -> dict[str, Any]:
     """Run or resume one arm, streaming one complete task result per JSONL row."""
@@ -1022,6 +1136,7 @@ async def run_arm(
             max_output_tokens=oracle["max_output_tokens"],
             reasoning_effort=oracle["reasoning_effort"],
             timeout_seconds=timeout_seconds,
+            stream=stream,
         )
     )
     semaphore = asyncio.Semaphore(concurrency)
@@ -1058,6 +1173,7 @@ async def run_arm(
         "mode": mode,
         "concurrency": concurrency,
         "timeout_seconds": timeout_seconds,
+        "stream": stream,
         "resumed_tasks": len(cases) - len(pending),
         "completed_now": completed_now,
         "summary": summary,
@@ -1209,6 +1325,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--api-key-env", default="NVARC_TEACHER_KEY")
     run_parser.add_argument("--concurrency", type=int, default=8)
     run_parser.add_argument("--timeout-seconds", type=float, default=1_200.0)
+    run_parser.add_argument(
+        "--stream", action=argparse.BooleanOptionalAction, default=True
+    )
 
     compare_parser = subparsers.add_parser("compare")
     compare_parser.add_argument("--direct-dir", type=Path, required=True)
@@ -1248,6 +1367,7 @@ def main() -> None:
                 api_key=api_key,
                 concurrency=args.concurrency,
                 timeout_seconds=args.timeout_seconds,
+                stream=args.stream,
             )
         )
         print(json.dumps(metadata["summary"], indent=2))

@@ -9,6 +9,7 @@ import pytest
 
 from tools.nvarc_oracle_harness import (
     ARC_PRIZE_PROMPT,
+    HttpOracleClient,
     PilotCase,
     build_arc_prize_prompt,
     diagnose_executor_response,
@@ -142,6 +143,39 @@ def test_manifest_sampling_is_frozen_and_target_free(
 )
 def test_arc_prize_parser_parity(response: str, expected: list | None) -> None:
     assert parse_arc_prize_grid(response) == expected
+
+
+def test_stream_chunks_reconstruct_reasoning_content_and_usage() -> None:
+    state: dict[str, Any] = {
+        "content": "",
+        "reasoning_content": "",
+        "finish_reason": None,
+        "usage": {},
+    }
+    HttpOracleClient._accumulate_stream_chunk(
+        state,
+        {
+            "id": "request",
+            "model": "kimi",
+            "choices": [{"delta": {"reasoning_content": "think "}}],
+        },
+    )
+    HttpOracleClient._accumulate_stream_chunk(
+        state,
+        {"choices": [{"delta": {"content": "[[1]]"}, "finish_reason": "stop"}]},
+    )
+    HttpOracleClient._accumulate_stream_chunk(
+        state, {"choices": [], "usage": {"total_tokens": 7}}
+    )
+
+    assert state == {
+        "content": "[[1]]",
+        "reasoning_content": "think ",
+        "finish_reason": "stop",
+        "usage": {"total_tokens": 7},
+        "id": "request",
+        "model": "kimi",
+    }
 
 
 @pytest.mark.parametrize(
