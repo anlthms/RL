@@ -414,6 +414,7 @@ def mock_grpo_components():
                 "train_micro_batch_size": 1,
                 "max_total_sequence_length": 2048,
                 "make_sequence_length_divisible_by": 1,
+                "sequence_packing": {"enabled": False},
                 "generation": {
                     "temperature": 1.0,
                     "top_p": 1.0,
@@ -1918,11 +1919,18 @@ def test_initial_refit_completes_before_async_collection_starts(
     def record_refit(*args, **kwargs):
         events.append("refit")
 
-    with mock_async_grpo_infrastructure(
-        mock_batch,
-        rollout_metrics,
-        collector_events=events,
-        refit_side_effect=record_refit,
+    cycling_dataloader = object()
+    with (
+        mock_async_grpo_infrastructure(
+            mock_batch,
+            rollout_metrics,
+            collector_events=events,
+            refit_side_effect=record_refit,
+        ),
+        patch(
+            "nemo_rl.algorithms.grpo.CyclingDataLoader",
+            return_value=cycling_dataloader,
+        ) as cycling_dataloader_cls,
     ):
         async_grpo_train(
             mock_grpo_components["policy"],
@@ -1940,6 +1948,9 @@ def test_initial_refit_completes_before_async_collection_starts(
         )
 
     assert events[:3] == ["refit", "set_weight_version", "start_collection"]
+    cycling_dataloader_cls.assert_called_once_with(
+        mock_grpo_components["train_dataloader"]
+    )
 
 
 def test_async_grpo_awaits_resume_after_refit_failure(mock_grpo_components) -> None:
