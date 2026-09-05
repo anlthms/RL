@@ -43,6 +43,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from tools.nvarc_http import safe_exception_summary
+
 GYM_ROOT = Path(__file__).resolve().parents[1] / "3rdparty" / "Gym-workspace" / "Gym"
 if str(GYM_ROOT) not in sys.path:
     sys.path.insert(0, str(GYM_ROOT))
@@ -591,7 +593,9 @@ class HttpOracleClient:
                             stream_stats = {"enabled": False}
                 message = body["choices"][0]["message"]
                 content = message.get("content") or ""
-                reasoning = message.get("reasoning_content") or ""
+                reasoning = (
+                    message.get("reasoning_content") or message.get("reasoning") or ""
+                )
                 if not isinstance(content, str) or not isinstance(reasoning, str):
                     raise TypeError("assistant content/reasoning must be strings")
                 return {
@@ -613,7 +617,7 @@ class HttpOracleClient:
                 ValueError,
                 RuntimeError,
             ) as error:
-                retry_errors.append(repr(error))
+                retry_errors.append(safe_exception_summary(error))
                 if attempt < 2:
                     await asyncio.sleep(10 * (attempt + 1))
         raise RuntimeError(f"oracle call failed after 3 attempts: {retry_errors}")
