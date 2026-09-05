@@ -1,17 +1,23 @@
 import asyncio
 import json
+from io import BytesIO
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import tools.nvarc_executor_benchmark as benchmark_module
 
 from tools.nvarc_executor_benchmark import (
     BenchmarkCase,
     BenchmarkConfig,
+    OpenAIChatCompletionsClient,
     build_cases,
     build_single_grid_prompt,
     evaluate_case,
+    execute_benchmark,
+    run_benchmark,
     summarize_results,
+    summarize_sampled_results,
 )
 from tools.nvarc_executor_benchmark_megatron import _resolve_weights_path
 
@@ -21,14 +27,44 @@ class FakeExecutor:
         self.responses = list(responses)
         self.messages: list[list[dict[str, str]]] = []
 
-    async def complete(self, messages: list[dict[str, str]]) -> str:
+    async def complete(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> str:
+        del seed
         self.messages.append([dict(message) for message in messages])
         return self.responses.pop(0)
 
     async def complete_with_reasoning(
-        self, messages: list[dict[str, str]]
+        self, messages: list[dict[str, str]], *, seed: int | None = None
     ) -> tuple[str, str]:
-        return "", await self.complete(messages)
+        return "", await self.complete(messages, seed=seed)
+
+
+class FakeReasoningExecutor:
+    async def complete_with_reasoning(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> tuple[str, str]:
+        del messages, seed
+        return "Reverse the row.", "<answer>\n5 4\n</answer>"
+
+
+class FakeHttpResponse(BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()
+
+
+class FakeHttpOpener:
+    def __init__(self, body: dict) -> None:
+        self.body = body
+        self.payload: dict | None = None
+
+    def open(self, request, timeout: float) -> FakeHttpResponse:
+        assert timeout == 1.0
+        self.payload = json.loads(request.data)
+        return FakeHttpResponse(json.dumps(self.body).encode())
 
 
 def _case(**overrides) -> BenchmarkCase:
@@ -111,6 +147,59 @@ def test_case_with_two_format_failures_scores_zero() -> None:
     assert result.cell_accuracy == 0.0
 
 
+def test_execute_benchmark_persists_star_row_count(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "report.json"
+    star_output = tmp_path / "star.jsonl"
+    config = _config(
+        str(tmp_path),
+        count=1,
+        star_output=str(star_output),
+    )
+    monkeypatch.setattr(benchmark_module, "build_cases", lambda _config: [_case()])
+    monkeypatch.setattr(
+        benchmark_module,
+        "OpenAIChatCompletionsClient",
+        lambda **_kwargs: FakeReasoningExecutor(),
+    )
+
+    report = execute_benchmark(config, api_key="unused", output=output)
+    persisted = json.loads(output.read_text(encoding="utf-8"))
+
+    assert report["summary"]["star_rows"] == 1
+    assert persisted["summary"]["star_rows"] == 1
+    assert len(star_output.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_http_client_sends_effort_and_accepts_reasoning_alias() -> None:
+    client = OpenAIChatCompletionsClient(
+        base_url="http://unused",
+        model="model",
+        api_key="secret",
+        max_output_tokens=32,
+        temperature=0.0,
+        timeout_seconds=1.0,
+        reasoning_effort="high",
+    )
+    opener = FakeHttpOpener(
+        {
+            "choices": [
+                {"message": {"reasoning": "brief rationale", "content": "answer"}}
+            ]
+        }
+    )
+    client.opener = opener
+
+    reasoning, content = asyncio.run(
+        client.complete_with_reasoning([{"role": "user", "content": "prompt"}], seed=1)
+    )
+
+    assert reasoning == "brief rationale"
+    assert content == "answer"
+    assert opener.payload is not None
+    assert opener.payload["reasoning_effort"] == "high"
+    assert opener.payload["seed"] == 1
+
+
 def test_prompt_contains_the_color_legend_and_contract() -> None:
     prompt = build_single_grid_prompt(description="Rotate.", input_grid=[[1, 2]])
     assert "0=black" in prompt and "6=magenta" in prompt
@@ -156,6 +245,32 @@ def test_summary_splits_by_bucket_and_grid_size() -> None:
     assert not summary["overall"]["gate_pass"]
     assert set(summary["by_bucket"]) == {"1", "3"}
     assert set(summary["by_grid_size"]) == {"2", "4"}
+
+
+def test_sampled_summary_reports_passk_and_consensus() -> None:
+    responses = [
+        "<answer>\n4 5\n</answer>",
+        "<answer>\n5 4\n</answer>",
+        "<answer>\n4 5\n</answer>",
+        "<answer>\n4 5\n</answer>",
+        *(["<answer>\n4 5\n</answer>"] * 4),
+    ]
+    results = asyncio.run(
+        run_benchmark(
+            cases=[_case(), _case(task_id="second")],
+            client=FakeExecutor(responses),
+            concurrency=1,
+            samples_per_case=4,
+        )
+    )
+    summary = summarize_sampled_results(results)
+
+    assert [row.sample_index for row in results] == [0, 1, 2, 3] * 2
+    assert summary["task_count"] == 2
+    assert summary["rollout_exact"] == 0.125
+    assert summary["pass_at_k"] == {"1": 0.125, "4": 0.5}
+    assert summary["oracle_any_exact"] == 0.5
+    assert summary["consensus_exact"] == 0.0
 
 
 def test_megatron_checkpoint_resolves_step_or_weights_directory(tmp_path) -> None:

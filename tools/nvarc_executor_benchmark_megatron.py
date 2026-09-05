@@ -84,6 +84,8 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--samples-per-case", type=int, default=1)
+    parser.add_argument("--sample-index-offset", type=int, default=0)
     parser.add_argument(
         "--star-output",
         default=None,
@@ -241,6 +243,8 @@ def main() -> None:
             concurrency=args.concurrency,
             timeout_seconds=args.timeout_seconds,
             temperature=args.temperature,
+            samples_per_case=args.samples_per_case,
+            sample_index_offset=args.sample_index_offset,
             star_output=args.star_output,
             star_max_cot_chars=args.star_max_cot_chars,
         )

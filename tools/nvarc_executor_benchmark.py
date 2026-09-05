@@ -32,6 +32,7 @@ import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from math import prod
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -58,18 +59,20 @@ DEFAULT_BUCKET_EDGES = (162, 380, 621, 700, 750, 783, 810, 840, 870)
 class ExecutorClient(Protocol):
     """Minimal async chat interface used by the real client and unit tests."""
 
-    async def complete(self, messages: list[dict[str, str]]) -> str:
+    async def complete(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> str:
         """Return assistant text for one chat-completions request."""
         raise NotImplementedError
 
     async def complete_with_reasoning(
-        self, messages: list[dict[str, str]]
+        self, messages: list[dict[str, str]], *, seed: int | None = None
     ) -> tuple[str, str]:
         """Return (reasoning, content) for one chat-completions request.
 
         Reasoning is empty when the endpoint has no separated channel.
         """
-        return "", await self.complete(messages)
+        return "", await self.complete(messages, seed=seed)
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,7 @@ class CaseResult:
     cell_accuracy: float
     latency_seconds: float
     trace: dict[str, Any]
+    sample_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,10 @@ class BenchmarkConfig:
     concurrency: int
     timeout_seconds: float
     temperature: float
+    reasoning_effort: str | None = None
+    stream: bool = False
+    samples_per_case: int = 1
+    sample_index_offset: int = 0
     # When set, every first-try exact solve with separated reasoning is also
     # written as a ready-to-train SFT executor row (STaR self-distillation).
     star_output: str | None = None
@@ -138,6 +146,7 @@ class OpenAIChatCompletionsClient:
         max_output_tokens: int,
         temperature: float,
         timeout_seconds: float,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.url = f"{base_url.rstrip('/')}/chat/completions"
         self.model = model
@@ -145,26 +154,34 @@ class OpenAIChatCompletionsClient:
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds
+        self.reasoning_effort = reasoning_effort
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    async def complete(self, messages: list[dict[str, str]]) -> str:
-        _, content = await self.complete_with_reasoning(messages)
+    async def complete(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> str:
+        _, content = await self.complete_with_reasoning(messages, seed=seed)
         return content
 
     async def complete_with_reasoning(
-        self, messages: list[dict[str, str]]
+        self, messages: list[dict[str, str]], *, seed: int | None = None
     ) -> tuple[str, str]:
-        return await asyncio.to_thread(self._complete_sync, messages)
+        return await asyncio.to_thread(self._complete_sync, messages, seed)
 
-    def _complete_sync(self, messages: list[dict[str, str]]) -> tuple[str, str]:
-        payload = json.dumps(
-            {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": self.max_output_tokens,
-                "temperature": self.temperature,
-            }
-        ).encode("utf-8")
+    def _complete_sync(
+        self, messages: list[dict[str, str]], seed: int | None
+    ) -> tuple[str, str]:
+        request_payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_output_tokens,
+            "temperature": self.temperature,
+        }
+        if self.reasoning_effort:
+            request_payload["reasoning_effort"] = self.reasoning_effort
+        if seed is not None:
+            request_payload["seed"] = seed
+        payload = json.dumps(request_payload).encode("utf-8")
         request = urllib.request.Request(
             self.url,
             data=payload,
@@ -191,8 +208,51 @@ class OpenAIChatCompletionsClient:
             ) from error
         if not isinstance(content, str):
             raise RuntimeError("executor endpoint returned non-text assistant content")
-        reasoning = message.get("reasoning_content")
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
         return (reasoning if isinstance(reasoning, str) else ""), content
+
+
+class RetryingStreamingChatCompletionsClient:
+    """Adapt the campaign's resumable SSE client to the executor interface."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str,
+        max_output_tokens: int,
+        temperature: float,
+        timeout_seconds: float,
+        reasoning_effort: str | None,
+    ) -> None:
+        # Deferred to keep local Megatron benchmarking and unit tests free of
+        # aiohttp and the Gym-backed oracle harness until streaming is selected.
+        from tools.nvarc_oracle_harness import HttpOracleClient
+
+        self._client = HttpOracleClient(
+            endpoint=base_url,
+            model=model,
+            api_key=api_key,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+            stream=True,
+        )
+
+    async def complete(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> str:
+        _, content = await self.complete_with_reasoning(messages, seed=seed)
+        return content
+
+    async def complete_with_reasoning(
+        self, messages: list[dict[str, str]], *, seed: int | None = None
+    ) -> tuple[str, str]:
+        del seed  # The external ceiling uses one greedy sample per case.
+        call = await self._client.complete("executor", messages)
+        return call["reasoning"], call["content"]
 
 
 def build_cases(config: BenchmarkConfig) -> list[BenchmarkCase]:
@@ -271,7 +331,12 @@ def build_single_grid_format_retry_prompt() -> str:
     )
 
 
-async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResult:
+async def evaluate_case(
+    case: BenchmarkCase,
+    client: ExecutorClient,
+    *,
+    sample_index: int = 0,
+) -> CaseResult:
     """Apply one rule description to one held-out grid in a fresh chat."""
     started = time.perf_counter()
     prompt = build_single_grid_prompt(
@@ -285,7 +350,10 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
     retry_used = False
 
     for attempt in range(2):
-        reasoning, response = await client.complete_with_reasoning(messages)
+        reasoning, response = await client.complete_with_reasoning(
+            messages,
+            seed=sample_index + 1 + attempt * 1_000_000,
+        )
         responses.append(response)
         reasonings.append(reasoning)
         prediction = extract_answer_grid(response)
@@ -331,6 +399,7 @@ async def evaluate_case(case: BenchmarkCase, client: ExecutorClient) -> CaseResu
             "reasonings": reasonings,
             "prediction": prediction,
         },
+        sample_index=sample_index,
     )
 
 
@@ -381,22 +450,108 @@ def summarize_results(results: list[CaseResult]) -> dict[str, Any]:
     }
 
 
+def _pass_at_k(*, samples: int, correct: int, k: int) -> float:
+    """Return the unbiased pass@k estimator for one prompt."""
+    if not 1 <= k <= samples:
+        raise ValueError("k must be between one and the sample count")
+    if samples - correct < k:
+        return 1.0
+    return 1.0 - prod(
+        (samples - correct - index) / (samples - index) for index in range(k)
+    )
+
+
+def summarize_sampled_results(results: list[CaseResult]) -> dict[str, Any]:
+    """Summarize pass@k and modal-grid consensus for grouped samples."""
+    if not results:
+        raise ValueError("cannot summarize empty sampled results")
+    by_task: dict[str, list[CaseResult]] = defaultdict(list)
+    for result in results:
+        by_task[result.task_id].append(result)
+    sample_counts = {len(group) for group in by_task.values()}
+    if len(sample_counts) != 1:
+        raise ValueError("every task must have the same number of samples")
+    samples = sample_counts.pop()
+    expected_indices = list(
+        range(
+            min(row.sample_index for row in results),
+            samples + min(row.sample_index for row in results),
+        )
+    )
+    for group in by_task.values():
+        if sorted(row.sample_index for row in group) != expected_indices:
+            raise ValueError("every task must have the same contiguous sample indices")
+
+    requested_ks = sorted({1, min(8, samples), samples})
+    pass_sums = {k: 0.0 for k in requested_ks}
+    consensus_exact = 0
+    consensus_agreement = 0.0
+    unique_valid_predictions = 0
+    for group in by_task.values():
+        correct = sum(row.grid_exact for row in group)
+        for k in requested_ks:
+            pass_sums[k] += _pass_at_k(samples=samples, correct=correct, k=k)
+
+        prediction_counts: dict[tuple[tuple[int, ...], ...], int] = defaultdict(int)
+        for row in group:
+            prediction = row.trace["prediction"]
+            if prediction is not None:
+                prediction_counts[tuple(tuple(line) for line in prediction)] += 1
+        unique_valid_predictions += len(prediction_counts)
+        if prediction_counts:
+            modal_prediction, modal_count = max(
+                prediction_counts.items(), key=lambda item: (item[1], item[0])
+            )
+            target = tuple(tuple(line) for line in group[0].trace["target_grid"])
+            consensus_exact += modal_prediction == target
+            consensus_agreement += modal_count / samples
+
+    task_count = len(by_task)
+    return {
+        "task_count": task_count,
+        "samples_per_case": samples,
+        "rollout_exact": _mean(results, "grid_exact"),
+        "pass_at_k": {str(k): pass_sums[k] / task_count for k in requested_ks},
+        "oracle_any_exact": sum(
+            any(row.grid_exact for row in group) for group in by_task.values()
+        )
+        / task_count,
+        "consensus_exact": consensus_exact / task_count,
+        "mean_consensus_agreement": consensus_agreement / task_count,
+        "mean_unique_valid_predictions": unique_valid_predictions / task_count,
+    }
+
+
 async def run_benchmark(
     *,
     cases: list[BenchmarkCase],
     client: ExecutorClient,
     concurrency: int,
+    samples_per_case: int = 1,
+    sample_index_offset: int = 0,
 ) -> list[CaseResult]:
     """Evaluate cases concurrently while preserving deterministic output order."""
     if concurrency <= 0:
         raise ValueError("concurrency must be positive")
+    if samples_per_case <= 0:
+        raise ValueError("samples_per_case must be positive")
+    if sample_index_offset < 0:
+        raise ValueError("sample_index_offset must be nonnegative")
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def evaluate(case: BenchmarkCase) -> CaseResult:
+    async def evaluate(case: BenchmarkCase, sample_index: int) -> CaseResult:
         async with semaphore:
-            return await evaluate_case(case, client)
+            return await evaluate_case(case, client, sample_index=sample_index)
 
-    return list(await asyncio.gather(*(evaluate(case) for case in cases)))
+    return list(
+        await asyncio.gather(
+            *(
+                evaluate(case, sample_index_offset + sample_index)
+                for case in cases
+                for sample_index in range(samples_per_case)
+            )
+        )
+    )
 
 
 def _comma_separated_ints(value: str) -> tuple[int, ...]:
@@ -422,6 +577,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument(
+        "--stream", action=argparse.BooleanOptionalAction, default=False
+    )
+    parser.add_argument("--samples-per-case", type=int, default=1)
+    parser.add_argument("--sample-index-offset", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--star-output",
@@ -440,24 +601,37 @@ def execute_benchmark(
 ) -> dict[str, Any]:
     """Run a benchmark against a ready endpoint and persist its full report."""
     cases = build_cases(config)
-    client = OpenAIChatCompletionsClient(
+    client_class = (
+        RetryingStreamingChatCompletionsClient
+        if config.stream
+        else OpenAIChatCompletionsClient
+    )
+    client = client_class(
         base_url=config.base_url,
         model=config.model,
         api_key=api_key,
         max_output_tokens=config.max_output_tokens,
         temperature=config.temperature,
         timeout_seconds=config.timeout_seconds,
+        reasoning_effort=config.reasoning_effort,
     )
     results = asyncio.run(
-        run_benchmark(cases=cases, client=client, concurrency=config.concurrency)
+        run_benchmark(
+            cases=cases,
+            client=client,
+            concurrency=config.concurrency,
+            samples_per_case=config.samples_per_case,
+            sample_index_offset=config.sample_index_offset,
+        )
     )
-    report = {
+    summary: dict[str, Any] = summarize_results(results)
+    if config.samples_per_case > 1:
+        summary["sampled"] = summarize_sampled_results(results)
+    report: dict[str, Any] = {
         "config": asdict(config),
-        "summary": summarize_results(results),
+        "summary": summary,
         "results": [asdict(result) for result in results],
     }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if config.star_output:
         star_rows = 0
         star_path = Path(config.star_output)
@@ -476,7 +650,9 @@ def execute_benchmark(
                     description=result.trace["description"],
                     input_grid=result.trace["input_grid"],
                 )
-                answer = f"<answer>\n{serialize_grid(result.trace['prediction'])}\n</answer>"
+                answer = (
+                    f"<answer>\n{serialize_grid(result.trace['prediction'])}\n</answer>"
+                )
                 target = f"<think>\n{reasoning.strip()}\n</think>\n\n{answer}"
                 sink.write(
                     json.dumps(
@@ -493,7 +669,9 @@ def execute_benchmark(
                     + "\n"
                 )
                 star_rows += 1
-        report["summary"]["star_rows"] = star_rows
+        summary["star_rows"] = star_rows
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
 
 
@@ -511,6 +689,10 @@ def main() -> None:
         concurrency=args.concurrency,
         timeout_seconds=args.timeout_seconds,
         temperature=args.temperature,
+        reasoning_effort=args.reasoning_effort,
+        stream=args.stream,
+        samples_per_case=args.samples_per_case,
+        sample_index_offset=args.sample_index_offset,
         star_output=args.star_output,
         star_max_cot_chars=args.star_max_cot_chars,
     )
