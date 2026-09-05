@@ -98,6 +98,11 @@ env:
     extraneous_color_weight: 0.05
     shape_weight: 0.05
     format_weight: 0.05
+    # Disabled by default. Experiments may softly penalize only exact answers
+    # that exceed a token budget; incorrect answers receive no brevity credit.
+    length_penalty_free_tokens: null
+    length_penalty_scale_tokens: 2048
+    length_penalty_max: 0.0
 
 checkpointing:
   enabled: true

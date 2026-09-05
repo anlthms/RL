@@ -702,6 +702,27 @@ async def generate_responses_async(
     return batch, generated_ids, gen_metrics
 
 
+def _prepare_extra_env_info_for_scoring(
+    message_log: LLMMessageLogType,
+    extra_env_info: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Attach opted-in rollout metadata before stripping message token fields."""
+    if extra_env_info is None or "assistant_response_tokens" not in extra_env_info:
+        return extra_env_info
+
+    response_tokens = 0
+    for message in message_log:
+        if message["role"] != "assistant":
+            continue
+        token_ids = message.get("token_ids")
+        if token_ids is None or isinstance(token_ids, str):
+            raise TypeError(
+                "assistant_response_tokens metadata requires assistant token_ids"
+            )
+        response_tokens += len(token_ids)
+    return {**extra_env_info, "assistant_response_tokens": response_tokens}
+
+
 def calculate_rewards(
     batch: BatchedDataDict[DatumSpec],
     task_to_env: dict[str, EnvironmentInterface],
@@ -746,7 +767,12 @@ def calculate_rewards(
         messages = [msg for _, msg in group]
 
         # Get corresponding environment info
-        env_info = [batch["extra_env_info"][i] for i in indices]
+        env_info = [
+            _prepare_extra_env_info_for_scoring(
+                batch["message_log"][i], batch["extra_env_info"][i]
+            )
+            for i in indices
+        ]
 
         # Submit task to environment and store future
         future = task_to_env[task_name].step.remote(messages, env_info)  # type: ignore # ray actor call
@@ -2618,7 +2644,7 @@ def _compact_verifier_metadata(full_result: dict[str, Any]) -> dict[str, Any]:
     trace -- which may embed verifier-only grids -- into batches, logs, or
     checkpoints.
     """
-    compact = {
+    compact: dict[str, Any] = {
         key: value
         for key, value in full_result.items()
         if isinstance(value, (bool, int, float, str))

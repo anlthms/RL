@@ -13,11 +13,19 @@
 # limitations under the License.
 """GRPO reward environment for single-grid ARC execution."""
 
+from collections.abc import Mapping
+
 from typing import Any, TypedDict
 
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveInt,
+    model_validator,
+)
 
 from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -66,6 +74,14 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
             maxed out for free by emitting all ten colors.
         shape_weight: Penalty weight on normalized shape error.
         format_weight: Weight on emitting exactly one parseable grid.
+        length_penalty_free_tokens: Number of generated assistant tokens that
+            an exact solution may use without a length penalty. ``None``
+            disables exact-solution length shaping.
+        length_penalty_scale_tokens: Number of excess tokens over which the
+            soft penalty ramps linearly to ``length_penalty_max``.
+        length_penalty_max: Maximum reward subtracted from an exact solution
+            for exceeding ``length_penalty_free_tokens``. Must be zero when
+            the free-token threshold is disabled.
     """
 
     exact_weight: float = 1.0
@@ -75,6 +91,20 @@ class ArcAgiEnvConfig(BaseModel, extra="allow"):
     extraneous_color_weight: float = 0.05
     shape_weight: float = 0.05
     format_weight: float = 0.05
+    length_penalty_free_tokens: NonNegativeInt | None = None
+    length_penalty_scale_tokens: PositiveInt = 2048
+    length_penalty_max: NonNegativeFloat = 0.0
+
+    @model_validator(mode="after")
+    def _check_length_penalty(self) -> "ArcAgiEnvConfig":
+        threshold_is_set = self.length_penalty_free_tokens is not None
+        penalty_is_set = self.length_penalty_max > 0
+        if threshold_is_set != penalty_is_set:
+            raise ValueError(
+                "length_penalty_free_tokens and a positive length_penalty_max "
+                "must be configured together"
+            )
+        return self
 
 
 # Which terms get a per-bucket copy. Kept short on purpose: these keys multiply
@@ -96,6 +126,41 @@ def _add_per_bucket_terms(terms: dict[str, float], bucket: int) -> dict[str, flo
     return terms
 
 
+def _metadata_response_tokens(metadata: Mapping[str, Any]) -> int:
+    """Read the rollout-provided assistant-token count from ARC metadata."""
+    response_tokens = metadata.get("assistant_response_tokens")
+    if (
+        not isinstance(response_tokens, int)
+        or isinstance(response_tokens, bool)
+        or response_tokens < 0
+    ):
+        raise TypeError(
+            "ARC exact-length shaping requires nonnegative integer "
+            "assistant_response_tokens metadata"
+        )
+    return response_tokens
+
+
+def _apply_exact_length_penalty(
+    terms: dict[str, float], response_tokens: int, cfg: ArcAgiEnvConfig
+) -> dict[str, float]:
+    """Apply a capped soft length penalty to an exact solution only."""
+    updated = {
+        **terms,
+        "response_tokens": float(response_tokens),
+        "length_penalty": 0.0,
+    }
+    if not terms["grid_match"] or cfg.length_penalty_free_tokens is None:
+        return updated
+
+    excess_tokens = max(0, response_tokens - cfg.length_penalty_free_tokens)
+    penalty_fraction = min(1.0, excess_tokens / cfg.length_penalty_scale_tokens)
+    penalty = penalty_fraction * cfg.length_penalty_max
+    updated["length_penalty"] = penalty
+    updated["reward"] -= penalty
+    return updated
+
+
 class ArcAgiEnvironmentMetadata(TypedDict):
     """Per-sample state carried through ``extra_env_info``.
 
@@ -113,6 +178,7 @@ class ArcAgiEnvironmentMetadata(TypedDict):
     test_input: Grid
     task_id: str
     bucket: int
+    assistant_response_tokens: int
     terms: dict[str, float] | None
 
 
@@ -168,14 +234,26 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         # Scoring is pure Python over grids of at most 900 cells, so it runs
         # inline rather than fanning out to verifier actors the way the math
         # environment must for math-verify.
+        length_penalty_enabled = self.cfg.length_penalty_free_tokens is not None
+        response_token_counts = (
+            [_metadata_response_tokens(meta) for meta in metadata]
+            if length_penalty_enabled
+            else [0] * len(message_log_batch)
+        )
         all_terms = [
             _add_per_bucket_terms(
-                score_response(
-                    response, meta["target"], meta["test_input"], self.weights
+                _apply_exact_length_penalty(
+                    score_response(
+                        response, meta["target"], meta["test_input"], self.weights
+                    ),
+                    response_tokens,
+                    self.cfg,
                 ),
                 meta["bucket"],
             )
-            for response, meta in zip(responses, metadata)
+            for response, response_tokens, meta in zip(
+                responses, response_token_counts, metadata
+            )
         ]
 
         updated_metadata: list[ArcAgiEnvironmentMetadata] = [
@@ -210,10 +288,18 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
         the centered-overlay accuracy, which moves long before grid match does
         and is the metric to watch early.
         """
-        rewards = batch["rewards"] * batch["is_end"]
         all_terms = [meta["terms"] for meta in batch["extra_env_info"]]
         # A sample that never reached the environment has no terms.
         scored = [terms for terms in all_terms if terms is not None]
+        exact_matches = (
+            torch.tensor(
+                [
+                    terms["grid_match"] if terms is not None else 0.0
+                    for terms in all_terms
+                ]
+            )
+            * batch["is_end"]
+        )
 
         def mean(name: str) -> float:
             if not scored:
@@ -234,8 +320,10 @@ class ArcAgiEnvironment(EnvironmentInterface[ArcAgiEnvironmentMetadata]):
             "extraneous_colors": mean("extraneous_colors"),
             "shape_mismatch": mean("shape_mismatch"),
             "format_valid": mean("format_valid"),
+            "length_penalty": mean("length_penalty"),
+            "response_tokens": mean("response_tokens"),
             "pass@samples_per_prompt": calculate_pass_rate_per_prompt(
-                batch["text"], (rewards >= self.cfg.exact_weight).float()
+                batch["text"], exact_matches
             ),
             "fraction_of_samples_properly_ended": batch["is_end"].float().mean().item(),
             "num_problems_in_batch": batch["is_end"].shape[0],

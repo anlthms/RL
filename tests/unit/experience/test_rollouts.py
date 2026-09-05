@@ -52,6 +52,7 @@ from nemo_rl.experience.rollout_manager import (
 )
 from nemo_rl.experience.rollouts import (
     _add_multimodal_generation_payload,
+    _prepare_extra_env_info_for_scoring,
     _reattach_original_multimodal_payloads,
     async_generate_response_for_sample_turn,
     generate_responses_async,
@@ -80,6 +81,29 @@ from tests.unit.test_envs import (
     MultiStepCalculatorEnv,
     _MultiStepCalculatorLogic,
 )
+
+
+def test_prepare_extra_env_info_attaches_opted_in_assistant_token_count():
+    extra_env_info = {"assistant_response_tokens": 0, "task_id": "task"}
+    message_log = [
+        {"role": "user", "content": "prompt", "token_ids": torch.tensor([1, 2])},
+        {
+            "role": "assistant",
+            "content": "first",
+            "token_ids": torch.tensor([3, 4, 5]),
+        },
+        {
+            "role": "assistant",
+            "content": "second",
+            "token_ids": torch.tensor([6, 7]),
+        },
+    ]
+
+    prepared = _prepare_extra_env_info_for_scoring(message_log, extra_env_info)
+
+    assert prepared == {"assistant_response_tokens": 5, "task_id": "task"}
+    assert extra_env_info["assistant_response_tokens"] == 0
+    assert _prepare_extra_env_info_for_scoring(message_log, None) is None
 
 
 def _initial_gym_image_batch() -> BatchedDataDict:
@@ -2463,7 +2487,9 @@ def test_run_async_nemo_gym_rollout(
         # verify the shape (one compact scalar dict per sample, no traces).
         if "extra_env_info" in final_batch:
             assert all(
-                isinstance(info, dict) and "trace" not in info and "response" not in info
+                isinstance(info, dict)
+                and "trace" not in info
+                and "response" not in info
                 for info in final_batch["extra_env_info"]
             )
             final_batch.pop("extra_env_info")
