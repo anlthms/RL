@@ -34,6 +34,8 @@ import os
 import re
 from pathlib import Path
 
+from tools.nvarc_http import safe_exception_summary
+
 _THINK_RE = re.compile(r"^<think>\n(.*)\n</think>\n\n(.*)$", re.DOTALL)
 _FORBIDDEN = ("<think>", "</think>", "<answer>", "<rules_summary>")
 
@@ -110,7 +112,11 @@ def _make_http_complete(args: argparse.Namespace):
                         body = await r.json()
                 return body["choices"][0]["message"].get("content") or ""
             except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as error:
-                print(f"compress call failed (attempt {attempt + 1}): {error!r}", flush=True)
+                print(
+                    "compress call failed "
+                    f"(attempt {attempt + 1}): {safe_exception_summary(error)}",
+                    flush=True,
+                )
                 await asyncio.sleep(10 * (attempt + 1))
         return ""
 
