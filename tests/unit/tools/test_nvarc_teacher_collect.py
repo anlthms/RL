@@ -1,11 +1,12 @@
 import asyncio
 import json
 import random
+from collections import defaultdict
 
 from tools.nvarc_sft_materialize import PROPOSER_INSTRUCTIONS
 from tools.nvarc_teacher_collect import (
+    collect_episode,
     collect_executor_trace,
-    collect_proposer_trace,
     split_reasoning,
 )
 
@@ -79,12 +80,13 @@ def test_executor_trace_rejects_overlong_cot() -> None:
     assert trace is None
 
 
-def test_proposer_trace_verifies_rules_behaviorally_without_leakage() -> None:
+def test_episode_verifies_rules_behaviorally_without_leakage() -> None:
     pairs = [{"input": [[index, 0]], "output": [[0, index]]} for index in range(6)]
     puzzle = {"puzzle_id": "p", "canonical_rule": RULE, "pairs_json": json.dumps(pairs)}
     prompts_seen: list[str] = []
 
-    async def complete(prompt: str) -> tuple[str, str]:
+    async def complete(messages: list[dict]) -> tuple[str, str]:
+        prompt = messages[-1]["content"]
         prompts_seen.append(prompt)
         if "<transformation>" in prompt:
             # Executor verification call: reverse the presented input row.
@@ -93,8 +95,8 @@ def test_proposer_trace_verifies_rules_behaviorally_without_leakage() -> None:
             return "apply", "<answer>\n" + " ".join(reversed(cells)) + "\n</answer>"
         return "induce", RULE
 
-    trace = asyncio.run(
-        collect_proposer_trace(
+    result = asyncio.run(
+        collect_episode(
             puzzle,
             demo_pairs=3,
             eval_pairs=2,
@@ -103,11 +105,17 @@ def test_proposer_trace_verifies_rules_behaviorally_without_leakage() -> None:
             complete=complete,
             samples=1,
             max_cot_chars=100,
+            max_rounds=3,
+            max_transcript_chars=10_000,
             min_verified=None,
+            rejects=defaultdict(int),
         )
     )
+    assert result is not None
+    trace, harvested = result
     assert trace is not None
     assert trace["verified_pairs"] == 2
+    assert len(harvested) == 2
     assert trace["messages"][0]["content"] == PROPOSER_INSTRUCTIONS
     assert trace["messages"][-1]["content"].startswith("<think>\ninduce\n</think>\n\n")
     # The held-out OUTPUTS never appear in any prompt sent to the teacher.
@@ -120,17 +128,19 @@ def test_proposer_trace_verifies_rules_behaviorally_without_leakage() -> None:
             )
 
 
-def test_proposer_trace_rejects_rules_the_teacher_cannot_execute() -> None:
+def test_episode_rejects_rules_the_teacher_cannot_execute() -> None:
     pairs = [{"input": [[index, 0]], "output": [[0, index]]} for index in range(6)]
     puzzle = {"puzzle_id": "p", "canonical_rule": RULE, "pairs_json": json.dumps(pairs)}
 
-    async def complete(prompt: str) -> tuple[str, str]:
+    async def complete(messages: list[dict]) -> tuple[str, str]:
+        prompt = messages[-1]["content"]
         if "<transformation>" in prompt:
             return "apply", "<answer>\n9 9\n</answer>"  # never matches
         return "induce", RULE
 
+    rejects = defaultdict(int)
     trace = asyncio.run(
-        collect_proposer_trace(
+        collect_episode(
             puzzle,
             demo_pairs=3,
             eval_pairs=2,
@@ -139,7 +149,11 @@ def test_proposer_trace_rejects_rules_the_teacher_cannot_execute() -> None:
             complete=complete,
             samples=2,
             max_cot_chars=100,
+            max_rounds=3,
+            max_transcript_chars=10_000,
             min_verified=None,
+            rejects=rejects,
         )
     )
     assert trace is None
+    assert rejects["rounds_exhausted"] == 1

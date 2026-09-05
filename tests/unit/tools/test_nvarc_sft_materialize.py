@@ -1,9 +1,9 @@
-import importlib.util
+import ast
 import json
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from tools.nvarc_sft_materialize import (
     NO_THINK_PREFIX,
@@ -102,16 +102,22 @@ def test_proposer_example_rejects_unparseable_reference_rules() -> None:
     )
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("nemo_gym") is None,
-    reason="nemo_gym extra not installed",
-)
 def test_proposer_instructions_match_the_gym_agent() -> None:
-    from responses_api_agents.arc_transform_refinement_agent.app import (
-        PROPOSER_INSTRUCTIONS as AGENT_INSTRUCTIONS,
+    source = Path(
+        "3rdparty/Gym-workspace/Gym/responses_api_agents/"
+        "arc_transform_refinement_agent/app.py"
+    ).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    assignment = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "PROPOSER_INSTRUCTIONS"
+            for target in node.targets
+        )
     )
-
-    assert PROPOSER_INSTRUCTIONS == AGENT_INSTRUCTIONS
+    assert PROPOSER_INSTRUCTIONS == ast.literal_eval(assignment.value)
 
 
 def test_main_proposer_only_dataset_keeps_val_role_mix(tmp_path, monkeypatch) -> None:

@@ -18,7 +18,10 @@ from tools.nvarc_oracle_harness import (
     materialize_manifest,
     parse_arc_prize_grid,
 )
-from resources_servers.arc_agi_2.logic import NVARC_EXECUTOR_PROMPT_TEMPLATE
+from resources_servers.arc_agi_2.logic import (
+    COLOR_MAPPING,
+    NVARC_EXECUTOR_PROMPT_TEMPLATE,
+)
 
 
 RULE = (
@@ -83,6 +86,19 @@ def test_arc_prize_prompt_is_byte_exact() -> None:
 def test_native_and_gym_executor_templates_are_byte_exact() -> None:
     native = Path("examples/prompts/nvarc_executor.txt").read_text(encoding="utf-8")
     assert native == NVARC_EXECUTOR_PROMPT_TEMPLATE
+
+
+def test_palette_names_are_consistent_across_shared_prompts() -> None:
+    prompts = [
+        COLOR_MAPPING,
+        NVARC_EXECUTOR_PROMPT_TEMPLATE,
+        Path("examples/prompts/arc_agi.txt").read_text(encoding="utf-8"),
+    ]
+    for prompt in prompts:
+        assert "magenta" in prompt and "azure" in prompt and "maroon" in prompt
+        assert (
+            "fuchsia" not in prompt and "teal" not in prompt and "brown" not in prompt
+        )
 
 
 def test_manifest_sampling_is_frozen_and_target_free(

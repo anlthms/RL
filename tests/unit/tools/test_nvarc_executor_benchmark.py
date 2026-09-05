@@ -113,8 +113,9 @@ def test_case_with_two_format_failures_scores_zero() -> None:
 
 def test_prompt_contains_the_color_legend_and_contract() -> None:
     prompt = build_single_grid_prompt(description="Rotate.", input_grid=[[1, 2]])
-    assert "0=black" in prompt and "6=fuchsia" in prompt
-    assert "8=teal" in prompt and "9=brown" in prompt
+    assert "0=black" in prompt and "6=magenta" in prompt
+    assert "8=azure" in prompt and "9=maroon" in prompt
+    assert "fuchsia" not in prompt and "teal" not in prompt and "brown" not in prompt
     assert "<transformation>\nRotate.\n</transformation>" in prompt
     assert "<input>\n1 2\n</input>" in prompt
 

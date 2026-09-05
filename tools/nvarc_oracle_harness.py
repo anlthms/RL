@@ -72,7 +72,8 @@ Grid = list[list[int]]
 CompleteFn = Callable[[str, list[dict[str, str]]], Awaitable[dict[str, Any]]]
 
 PROPOSER_INSTRUCTIONS = (
-    "Act only as an ARC transformation-rule proposer. Return the requested "
+    "Act only as an ARC transformation-rule proposer. Be precise and concise; "
+    "stop reasoning once one rule explains every example. Return the requested "
     "transformation-description artifact; do not execute the test grid."
 )
 
