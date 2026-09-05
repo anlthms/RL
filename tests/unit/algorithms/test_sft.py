@@ -22,6 +22,8 @@ from nemo_rl.algorithms.loss import NLLLossFn
 from nemo_rl.algorithms.sft import (
     MasterConfig,
     SFTConfig,
+    TokenLossWeightSpanConfig,
+    _apply_token_loss_weight_spans,
     _get_sft_save_state,
     _initial_sft_save_state,
     prepare_sft_batch,
@@ -29,6 +31,161 @@ from nemo_rl.algorithms.sft import (
 )
 from nemo_rl.data.multimodal_utils import PackedTensor
 from nemo_rl.distributed.virtual_cluster import ClusterConfig
+
+
+class _CharacterOffsetTokenizer:
+    """Minimal tokenizer whose token IDs and offsets are one per character."""
+
+    def __call__(
+        self,
+        *,
+        text: str,
+        add_special_tokens: bool,
+        return_offsets_mapping: bool,
+    ) -> dict[str, list[int] | list[tuple[int, int]]]:
+        assert not add_special_tokens
+        assert return_offsets_mapping
+        return {
+            "input_ids": [ord(character) for character in text],
+            "offset_mapping": [(index, index + 1) for index in range(len(text))],
+        }
+
+
+def test_apply_token_loss_weight_spans_weights_only_tagged_assistant_tokens():
+    content = "prefix <answer>\n1 2\n</answer> suffix"
+    user_content = "show <answer>example</answer>"
+    batch_message_log = [
+        [
+            {
+                "role": "user",
+                "content": user_content,
+                "token_ids": torch.tensor([ord(char) for char in user_content]),
+                "token_loss_mask": torch.zeros(len(user_content), dtype=torch.long),
+            },
+            {
+                "role": "assistant",
+                "content": content,
+                "token_ids": torch.tensor([ord(char) for char in content]),
+                "token_loss_mask": torch.ones(len(content), dtype=torch.long),
+            },
+        ]
+    ]
+    span_config = TokenLossWeightSpanConfig(
+        start_tag="<answer>",
+        end_tag="</answer>",
+        weight=8.0,
+    )
+
+    _apply_token_loss_weight_spans(
+        batch_message_log,
+        _CharacterOffsetTokenizer(),
+        [span_config],
+    )
+
+    user_mask = batch_message_log[0][0]["token_loss_mask"]
+    assert isinstance(user_mask, torch.Tensor)
+    assert user_mask.dtype == torch.float32
+    assert torch.equal(user_mask, torch.zeros(len(user_content)))
+    assistant_mask = batch_message_log[0][1]["token_loss_mask"]
+    assert isinstance(assistant_mask, torch.Tensor)
+    span_start = content.index("<answer>")
+    span_end = content.index("</answer>") + len("</answer>")
+    expected = torch.ones(len(content))
+    expected[span_start:span_end] = 8.0
+    assert torch.equal(assistant_mask, expected)
+
+
+def test_apply_token_loss_weight_spans_keeps_unmatched_masks_batch_compatible():
+    content = "assistant response without a tagged span"
+    batch_message_log = [
+        [
+            {
+                "role": "assistant",
+                "content": content,
+                "token_ids": torch.tensor([ord(char) for char in content]),
+                "token_loss_mask": torch.ones(len(content), dtype=torch.long),
+            }
+        ]
+    ]
+
+    _apply_token_loss_weight_spans(
+        batch_message_log,
+        _CharacterOffsetTokenizer(),
+        [
+            TokenLossWeightSpanConfig(
+                start_tag="<answer>",
+                end_tag="</answer>",
+                weight=8.0,
+            )
+        ],
+    )
+
+    token_loss_mask = batch_message_log[0][0]["token_loss_mask"]
+    assert isinstance(token_loss_mask, torch.Tensor)
+    assert token_loss_mask.dtype == torch.float32
+    assert torch.equal(token_loss_mask, torch.ones(len(content)))
+
+
+def test_apply_token_loss_weight_spans_can_select_last_span():
+    content = "mention <answer> then final <answer>\n1 2\n</answer>"
+    batch_message_log = [
+        [
+            {
+                "role": "assistant",
+                "content": content,
+                "token_ids": torch.tensor([ord(char) for char in content]),
+                "token_loss_mask": torch.ones(len(content), dtype=torch.long),
+            }
+        ]
+    ]
+
+    _apply_token_loss_weight_spans(
+        batch_message_log,
+        _CharacterOffsetTokenizer(),
+        [
+            TokenLossWeightSpanConfig(
+                start_tag="<answer>",
+                end_tag="</answer>",
+                weight=8.0,
+                occurrence="last",
+            )
+        ],
+    )
+
+    token_loss_mask = batch_message_log[0][0]["token_loss_mask"]
+    assert isinstance(token_loss_mask, torch.Tensor)
+    span_start = content.rfind("<answer>")
+    span_end = content.rfind("</answer>") + len("</answer>")
+    expected = torch.ones(len(content))
+    expected[span_start:span_end] = 8.0
+    assert torch.equal(token_loss_mask, expected)
+
+
+def test_apply_token_loss_weight_spans_rejects_unclosed_span():
+    content = "<answer>\n1 2"
+    batch_message_log = [
+        [
+            {
+                "role": "assistant",
+                "content": content,
+                "token_ids": torch.tensor([ord(char) for char in content]),
+                "token_loss_mask": torch.ones(len(content)),
+            }
+        ]
+    ]
+
+    with pytest.raises(ValueError, match="without a matching end tag"):
+        _apply_token_loss_weight_spans(
+            batch_message_log,
+            _CharacterOffsetTokenizer(),
+            [
+                TokenLossWeightSpanConfig(
+                    start_tag="<answer>",
+                    end_tag="</answer>",
+                    weight=8.0,
+                )
+            ],
+        )
 
 
 def test_get_sft_save_state_handles_legacy_checkpoint_and_filters_metrics():
@@ -83,6 +240,49 @@ def test_prepare_sft_batch_accepts_prepared_batch_and_checks_media_rows():
             only_unmask_final=False,
             make_sequence_length_divisible_by=1,
         )
+
+
+def test_prepare_sft_batch_applies_token_loss_weight_spans():
+    user_content = "solve <answer>x</answer>"
+    content = "work <answer>1 2</answer>"
+    batch = {
+        "message_log": [
+            [
+                {
+                    "role": "user",
+                    "content": user_content,
+                    "token_ids": torch.tensor([ord(char) for char in user_content]),
+                },
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "token_ids": torch.tensor([ord(char) for char in content]),
+                },
+            ]
+        ],
+        "loss_multiplier": torch.tensor([1.0]),
+    }
+    tokenizer = _CharacterOffsetTokenizer()
+    tokenizer.pad_token_id = 0
+
+    prepared = prepare_sft_batch(
+        batch,
+        tokenizer=tokenizer,
+        only_unmask_final=False,
+        make_sequence_length_divisible_by=1,
+        token_loss_weight_spans=[
+            TokenLossWeightSpanConfig(
+                start_tag="<answer>", end_tag="</answer>", weight=8.0
+            )
+        ],
+    )
+
+    span_start = content.index("<answer>")
+    span_end = content.index("</answer>") + len("</answer>")
+    expected_assistant = torch.ones(len(content))
+    expected_assistant[span_start:span_end] = 8.0
+    expected = torch.cat([torch.zeros(len(user_content)), expected_assistant])
+    assert torch.equal(prepared["token_mask"][0], expected)
 
 
 @pytest.fixture

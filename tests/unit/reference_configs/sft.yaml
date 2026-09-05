@@ -13,6 +13,7 @@ sft:
   val_at_end: false
   seed: 42
   only_unmask_final: false
+  token_loss_weight_spans: []
 
 checkpointing:
   enabled: true
