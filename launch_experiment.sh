@@ -32,6 +32,8 @@
 #   RUN_TAG           label appended to the slurm + wandb run name
 #   MAX_STEPS         cap grpo.max_num_steps
 #   TIMEOUT_MIN       slurm wall clock in minutes (default 240)
+#   EXCLUDE_NODES     optional Slurm node list to exclude
+#   MEM_PER_NODE      optional Slurm memory request; use 0 for all node memory
 #   COLL_TRACE=0      disable the NCCL flight recorder (on by default; dumps each
 #                     rank's recent collectives to ./nccl_traces on a timeout)
 #   WATCHDOG=0        do not arm the GPU-idleness watchdog (armed by default)

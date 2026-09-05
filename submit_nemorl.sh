@@ -16,12 +16,24 @@ export MOUNTS="/lustre:/lustre,/home:/home,${REPO_ROOT}:/opt/nemo-rl,${HOME}:${H
 
 export EXTRA_NEMO_RL_ARGS="$@"
 
+SBATCH_NODE_ARGS=()
+if [[ -n "${EXCLUDE_NODES:-}" ]]; then
+    SBATCH_NODE_ARGS+=(--exclude="${EXCLUDE_NODES}")
+fi
+
+SBATCH_MEMORY_ARGS=()
+if [[ -n "${MEM_PER_NODE:-}" ]]; then
+    SBATCH_MEMORY_ARGS+=(--mem="${MEM_PER_NODE}")
+fi
+
 # If JOB_NAME is not set, use the default
 if [ -z "$JOB_NAME" ]; then
     JOB_NAME="nemo_rl_0526_interactive"
 fi
 
 sbatch \
+"${SBATCH_NODE_ARGS[@]}" \
+"${SBATCH_MEMORY_ARGS[@]}" \
 --nodes=$NUM_ACTOR_NODES \
 --account=$SUBMIT_ACCOUNT \
 --job-name=$SUBMIT_ACCOUNT:$JOB_NAME \
