@@ -14,11 +14,11 @@
 import os
 import warnings
 from dataclasses import dataclass, fields
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, PositiveFloat
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -81,6 +81,15 @@ def _get_sft_save_state(
     return SFTSaveState(**state_values)
 
 
+class TokenLossWeightSpanConfig(BaseModel, extra="allow"):
+    """Increase or decrease next-token loss inside a tagged text span."""
+
+    start_tag: str = Field(..., min_length=1)
+    end_tag: str = Field(..., min_length=1)
+    weight: PositiveFloat
+    occurrence: Literal["all", "last"] = "all"
+
+
 class SFTConfig(BaseModel, extra="allow"):
     max_num_steps: int = 60
     max_num_epochs: int = 1
@@ -94,6 +103,9 @@ class SFTConfig(BaseModel, extra="allow"):
     val_at_end: bool = False
     seed: int = 42
     only_unmask_final: bool = False
+    token_loss_weight_spans: list[TokenLossWeightSpanConfig] = Field(
+        default_factory=list
+    )
 
 
 class MasterConfig(BaseModel, extra="allow"):
@@ -104,6 +116,106 @@ class MasterConfig(BaseModel, extra="allow"):
     cluster: ClusterConfig
     checkpointing: CheckpointingConfig
     telemetry: Optional[TelemetryConfig] = None
+
+
+def _apply_token_loss_weight_spans(
+    batch_message_log: list[list[dict[str, Any]]],
+    tokenizer: PreTrainedTokenizerBase,
+    span_configs: list[TokenLossWeightSpanConfig],
+) -> None:
+    """Apply configured weights to masked tokens overlapping tagged spans.
+
+    The existing ``token_loss_mask`` is also the multiplicative weight consumed
+    by ``NLLLossFn``. Offset mappings locate spans after chat-template rendering,
+    which remains correct when a tokenizer merges a tag boundary with a newline.
+    """
+    if not span_configs:
+        return
+
+    for message_log in batch_message_log:
+        for message in message_log:
+            token_loss_mask = message.get("token_loss_mask")
+            if not isinstance(token_loss_mask, torch.Tensor):
+                continue
+            weighted_mask = token_loss_mask.float()
+            message["token_loss_mask"] = weighted_mask
+            if not torch.any(token_loss_mask):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                raise TypeError("token_loss_weight_spans requires text message content")
+
+            weighted_ranges: list[tuple[int, int, float]] = []
+            for span_config in span_configs:
+                if span_config.occurrence == "last":
+                    span_start = content.rfind(span_config.start_tag)
+                    if span_start < 0:
+                        continue
+                    end_tag_start = content.rfind(span_config.end_tag)
+                    if end_tag_start < span_start:
+                        raise ValueError(
+                            "found final token-loss span start tag without a "
+                            f"matching end tag {span_config.end_tag!r}"
+                        )
+                    weighted_ranges.append(
+                        (
+                            span_start,
+                            end_tag_start + len(span_config.end_tag),
+                            span_config.weight,
+                        )
+                    )
+                    continue
+
+                search_from = 0
+                while True:
+                    span_start = content.find(span_config.start_tag, search_from)
+                    if span_start < 0:
+                        break
+                    end_tag_start = content.find(
+                        span_config.end_tag,
+                        span_start + len(span_config.start_tag),
+                    )
+                    if end_tag_start < 0:
+                        raise ValueError(
+                            "found token-loss span start tag without a matching "
+                            f"end tag {span_config.end_tag!r}"
+                        )
+                    span_end = end_tag_start + len(span_config.end_tag)
+                    weighted_ranges.append((span_start, span_end, span_config.weight))
+                    search_from = span_end
+
+            if not weighted_ranges:
+                continue
+
+            encoded = tokenizer(
+                text=content,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            encoded_ids = encoded["input_ids"]
+            if isinstance(encoded_ids, torch.Tensor):
+                encoded_ids = encoded_ids.tolist()
+            message_token_ids = message.get("token_ids")
+            if not isinstance(message_token_ids, torch.Tensor):
+                raise TypeError("token_loss_weight_spans requires token_ids")
+            if encoded_ids != message_token_ids.tolist():
+                raise ValueError(
+                    "offset tokenization did not match the processed message tokens"
+                )
+            offset_mapping = encoded["offset_mapping"]
+            if isinstance(offset_mapping, torch.Tensor):
+                offset_mapping = offset_mapping.tolist()
+
+            for span_start, span_end, span_weight in weighted_ranges:
+                overlaps_span = torch.tensor(
+                    [
+                        token_start < span_end and token_end > span_start
+                        for token_start, token_end in offset_mapping
+                    ],
+                    dtype=torch.bool,
+                    device=weighted_mask.device,
+                )
+                weighted_mask[overlaps_span & token_loss_mask.bool()] = span_weight
 
 
 # =======================================================
@@ -310,6 +422,11 @@ def validate(
                 roles_to_train_on=["assistant"],
                 only_unmask_final=master_config.sft.only_unmask_final,
             )
+            _apply_token_loss_weight_spans(
+                val_batch["message_log"],
+                tokenizer,
+                master_config.sft.token_loss_weight_spans,
+            )
 
             cat_and_padded, input_lengths = batched_message_log_to_flat_message(
                 val_batch["message_log"],
@@ -483,6 +600,11 @@ def sft_train(
                         batch["message_log"],
                         roles_to_train_on=["assistant"],
                         only_unmask_final=master_config.sft.only_unmask_final,
+                    )
+                    _apply_token_loss_weight_spans(
+                        batch["message_log"],
+                        tokenizer,
+                        master_config.sft.token_loss_weight_spans,
                     )
 
                     cat_and_padded, input_lengths = batched_message_log_to_flat_message(
