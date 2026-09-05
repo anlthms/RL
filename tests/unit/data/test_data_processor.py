@@ -119,6 +119,7 @@ def test_arc_executor_processor_keeps_target_out_of_the_prompt():
     assert "0 1\n2 3" in prompt
     assert "9 9" not in prompt
     assert output["extra_env_info"]["target"] == datum["target"]
+    assert output["extra_env_info"]["assistant_response_tokens"] == 0
     assert output["loss_multiplier"] == 1.0
 
 

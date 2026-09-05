@@ -24,7 +24,7 @@ def arc_env():
     time.sleep(0.1)
 
 
-def message_log(response: str):
+def message_log(response: str) -> list[dict[str, str]]:
     return [
         {"role": "user", "content": "prompt"},
         {"role": "assistant", "content": response},
@@ -46,6 +46,53 @@ def test_config_defaults_are_centralized():
 
 def test_config_override_is_honored():
     assert ArcAgiEnvConfig(cell_weight=0.5).cell_weight == 0.5
+
+
+def test_length_penalty_config_must_be_enabled_consistently():
+    with pytest.raises(ValueError, match="must be configured together"):
+        ArcAgiEnvConfig(length_penalty_free_tokens=1024)
+    with pytest.raises(ValueError, match="must be configured together"):
+        ArcAgiEnvConfig(length_penalty_max=0.2)
+
+
+def test_exact_length_penalty_does_not_reward_short_wrong_answers():
+    env = create_env(
+        "arc_agi",
+        {
+            "length_penalty_free_tokens": 2,
+            "length_penalty_scale_tokens": 4,
+            "length_penalty_max": 0.2,
+        },
+    )
+    responses = [answer("12\n34"), answer("12\n34"), answer("12\n33")]
+    metadata = [
+        {
+            "target": TARGET,
+            "test_input": TEST_INPUT,
+            "task_id": "t",
+            "bucket": 1,
+            "assistant_response_tokens": response_tokens,
+            "terms": None,
+        }
+        for response_tokens in (2, 4, 6)
+    ]
+    try:
+        result = ray.get(
+            env.step.remote(
+                [message_log(response) for response in responses],
+                metadata,
+            )
+        )
+    finally:
+        env.shutdown.remote()
+        ray.kill(env)
+
+    short_exact, long_exact, long_wrong = result.metadata
+    assert short_exact["terms"]["length_penalty"] == 0.0
+    assert long_exact["terms"]["length_penalty"] == pytest.approx(0.1)
+    assert long_exact["terms"]["response_tokens"] == 4.0
+    assert long_wrong["terms"]["length_penalty"] == 0.0
+    assert result.rewards[0] > result.rewards[1] > result.rewards[2]
 
 
 def test_step_scores_a_batch(arc_env):
@@ -161,13 +208,15 @@ def test_global_metrics_are_reported_per_bucket(arc_env):
     )
     scored = []
     for bucket, response in ((0, "12\n34"), (0, "99\n99"), (1, "12\n34")):
+        terms = score_response(answer(response), TARGET, TEST_INPUT, weights)
+        terms.update({"length_penalty": 0.0, "response_tokens": 0.0})
         scored.append(
             {
                 "target": TARGET,
                 "test_input": TEST_INPUT,
                 "task_id": "t",
                 "bucket": bucket,
-                "terms": score_response(answer(response), TARGET, TEST_INPUT, weights),
+                "terms": terms,
             }
         )
     # Two of the three are exact, and the one in bucket 1 is one of them, so
