@@ -1,16 +1,32 @@
 # Verifier-Guided Multi-Turn ARC-AGI
 
-Revised 2026-08-26 to describe the implemented system (NeMo-Gym
+Revised 2026-09-04 to record the completed executor investigation and its
+stopping decision. The sections below still describe the implemented system
+(NeMo-Gym
 `arc_transform_refinement_agent` + `arc_agi_2` resources server on the Gym
 submodule, co-trained with single-turn executor rows through
 `examples/nemo_gym/run_grpo_nemo_gym.py`). Sections marked *adopted
 revision* record design changes made after measurement.
 
+## Disposition
+
+The current free-form natural-language executor is a no-go for a reliable
+proposer-executor loop with Nemotron Nano. Its selected checkpoint solves
+27/150 frozen executor cases, and neither SFT, continued RL, dynamic sampling,
+nor repeated-sample consensus produced a durable improvement. The final broad
+gold-rationale SFT run reduced exact accuracy from 27/150 to 4/150 while its
+validation loss improved.
+
+This document remains the design record for the implemented system, not a
+recommendation to scale the current recipe. See the
+[investigation closeout](arc-agi-multiturn-investigation.md) for the full
+evidence and the conditions required to revisit the direction.
+
 ## Motivation
 
-A single model response that infers a rule, mentally tests it, and emits
-the test grid anchors on its own narration. This design replaces the
-narrated self-check with an actual check: rules are executed by a separate
+A single model response that infers a rule, mentally tests it, and emits the
+test grid anchors on its own narration. This investigation tested replacing
+the narrated self-check with an actual check: rules are executed by a separate
 chat and compared against known outputs by a deterministic verifier, and
 failures come back as behavioral evidence for revision.
 
@@ -212,6 +228,14 @@ co-training because shared weights mean executor competence can drift.
 Per-difficulty-bucket splits in its report are the primary view (aggregate
 exactness hides "solves the easiest bucket only").
 
+The completed investigation shows that removing the gate did not remove the
+underlying dependency. The selected exact-RL checkpoint reached 27/150 exact
+(18.0%). A frozen continuation briefly reached 31/150 and then regressed to
+20/150; dynamic sampling ended at 27/150. Across 16 sampled attempts per case,
+oracle-any exactness was 34.0%, but target-free modal consensus reached
+only 20.667%. The executor is therefore too noisy for a failed execution to be
+reliable evidence about the proposed rule.
+
 ## Metrics
 
 Per-agent validation scalars surface as `val:<agent>/<field>/<stat>`.
@@ -238,36 +262,38 @@ full-result tables stay disabled (traces are large).
 | Test target leaks into a prompt | Invalid evaluation | Server-side targets, forbidden-key scan on every model request |
 | Disjoint chats concatenated as one trajectory | Invalid policy loss | Final-proposer-turn-only trainable response |
 
-## Status and evidence (2026-08-26)
+## Status and evidence (2026-09-04)
 
-Implemented and proven end to end (gym branch `anthomas/colo1`; RL branch
-`async_arc4`): unit-tested protocol logic and agents, executor+proposer
-co-training over one JSONL (curriculum and role mixture baked into row
-order), greedy dual validation (single-shot + hidden_test loop per real
-row), per-agent metric plumbing and loop-metric checkpoint selection.
-Measured: the refinement loop beats single-shot induction ~3x on real-ARC
-cell accuracy at matched checkpoints (0.166 vs 0.059 at the best anchor);
-real-ARC exact match remains 0/172; the binding constraints are proposer
-think runaway and the throttled inference loop, addressed by the adopted
-revisions above. Campaign status and the next-session plan live in the
-untracked `ARC_AGI_2_ENV_PLAN.md`; experiment history in the untracked
-research ledger.
+The protocol, agents, co-training rows, greedy validation, metric plumbing,
+and trace capture work end to end. The earlier refinement loop improved
+real-ARC cell accuracy from 0.059 to 0.166 at the best matched checkpoint,
+but exact match remained 0/172.
 
-## Open questions
+Three closing diagnostics tested the executor bottleneck. Continued exact-RL
+with frozen and dynamic curricula produced no durable gain over 27/150.
+Sixteen-sample inference reached 34.0% oracle-any exactness but only 20.667%
+modal-consensus exactness. Finally, one epoch of broad, answer-weighted
+gold-rationale SFT drove the frozen benchmark from 27/150 to 4/150 even as
+held-out teacher-forced loss improved from 0.1116 to 0.0880. These results
+close the current investigation: the executor channel is not accurate enough
+to distinguish a bad rule from a bad execution.
 
-- Does floor-rewarding proposer format failures suppress runaway without
-  suppressing useful long reasoning, or is an explicit think budget
-  needed?
-- How much does multi-round refinement buy at inference once the loop is
-  unthrottled — and does it convert cell-accuracy gains into exact solves?
-- Is a short SFT stage on NVARC reference rules (deliberately relaxing the
-  no-imitation invariant) a net win as a format/length prior before RL?
-- Once the single-path loop works, does selecting among several
-  independently proposed rules (deferred phase) justify the extra
-  inference?
+## Conditions for revisiting
+
+- Demonstrate a durable paired exact-match gain on the same frozen executor
+  benchmark, including a later checkpoint rather than a transient peak.
+- Change the representation or selection hypothesis materially; do not reopen
+  for another learning-rate, reward-weight, prompt, or epoch sweep alone.
+- Keep exact grid match as the decision metric. Token loss, shorter reasoning,
+  and cell accuracy are useful diagnostics but did not predict success here.
+- Keep the executor benchmark disjoint from generated SFT data and continue to
+  record both proposer and executor traces.
+- Run the deferred Kimi K3 oracle-rule ceiling only if that diagnostic is
+  explicitly reopened.
 
 ## References
 
+- [Executor investigation closeout](arc-agi-multiturn-investigation.md)
 - [NeMo-Gym integration](nemo-gym-integration.md)
 - Gym components: `responses_api_agents/arc_transform_refinement_agent/`,
   `resources_servers/arc_agi_2/` (submodule branch `anthomas/colo1`)
