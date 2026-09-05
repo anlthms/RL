@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
+import math
 
 import pytest
 import torch
@@ -1047,6 +1048,50 @@ def test_clipped_pg_loss_kl_gradient_includes_sampling_term(
     expected_kl_gradient = beta * kl_weight * (kl + kl_gradient) / curr_logprobs.numel()
 
     torch.testing.assert_close(actual_kl_gradient, expected_kl_gradient)
+
+
+@pytest.mark.parametrize("sequence_level_importance_ratios", [False, True])
+def test_clipped_pg_loss_masks_invalid_samples_before_exponentiation(
+    sequence_level_importance_ratios,
+):
+    """Masked samples with extreme log-ratios must not create NaN gradients."""
+    data, _, _, _ = _setup_clipped_pg_test_data(batch_size=2, device="cpu")
+    data["sample_mask"] = torch.tensor([1, 0])
+    data["advantages"][:, 1:] = torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]])
+    data["prev_logprobs"][:, 1:] = torch.tensor(
+        [[-1.0, -1.0, -1.0], [-100.0, 0.0, -100.0]]
+    )
+    data["generation_logprobs"][:, 1:] = torch.tensor(
+        [[-1.0, -1.0, -1.0], [0.0, -100.0, 0.0]]
+    )
+
+    next_token_logprobs = torch.full((2, 3), -1.0, requires_grad=True)
+    cfg = ClippedPGLossConfig(
+        reference_policy_kl_penalty=0.01,
+        use_on_policy_kl_approximation=True,
+        sequence_level_importance_ratios=sequence_level_importance_ratios,
+        token_level_loss=not sequence_level_importance_ratios,
+    )
+    loss_fn = ClippedPGLossFn(cfg)
+
+    loss, metrics = loss_fn(
+        next_token_logprobs=next_token_logprobs,
+        data=data,
+        global_valid_seqs=torch.sum(data["sample_mask"]),
+        global_valid_toks=torch.sum(
+            data["sample_mask"].unsqueeze(-1) * data["token_mask"]
+        ),
+    )
+
+    assert torch.isfinite(loss)
+    assert all(
+        math.isfinite(value) for value in metrics.values() if isinstance(value, float)
+    )
+    loss.backward()
+    grad = next_token_logprobs.grad
+    assert grad is not None
+    assert torch.isfinite(grad).all()
+    torch.testing.assert_close(grad[1], torch.zeros_like(grad[1]))
 
 
 # Masking tests - Should work with original Loss Fn if needed, but less critical

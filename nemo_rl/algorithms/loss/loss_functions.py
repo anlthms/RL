@@ -395,6 +395,9 @@ class ClippedPGLossFn(LossFunction):
             )
 
         mask = token_mask * sample_mask.unsqueeze(-1)
+        # Mask log-ratios before exponentiation. Applying the mask afterward can
+        # turn an overflow from an intentionally rejected sample into 0 * inf.
+        valid_token_mask = mask.bool()
 
         # For truly on-policy training, use curr_logprobs as prev_logprobs
         # This avoids computing prev_logprobs upstream
@@ -406,16 +409,35 @@ class ClippedPGLossFn(LossFunction):
         lp_error = torch.abs(generation_logprobs - prev_logprobs)  # noqa: F841  (precommit ignore for now)
         # average over all tokens in the microbatch
         mult_prob_error = masked_mean(
-            torch.exp(lp_error * mask),
+            torch.exp(
+                torch.where(
+                    valid_token_mask,
+                    lp_error,
+                    torch.zeros_like(lp_error),
+                )
+            ),
             mask,
             global_normalization_factor=global_valid_toks,
         ).item()
 
+        # Keep diagnostic-only distribution comparisons finite for rejected
+        # samples too. Their values do not contribute to any masked reduction.
+        diagnostic_generation_logprobs = torch.where(
+            valid_token_mask,
+            generation_logprobs,
+            torch.zeros_like(generation_logprobs),
+        )
+        diagnostic_prev_logprobs = torch.where(
+            valid_token_mask,
+            prev_logprobs,
+            torch.zeros_like(prev_logprobs),
+        )
+
         # gen-kl: kl(P_gen || P_train)
         # where log_ratio = prev_logprobs - generation_logprobs
         gen_kl_error = calculate_kl(
-            logprobs=generation_logprobs,
-            logprobs_reference=prev_logprobs,
+            logprobs=diagnostic_generation_logprobs,
+            logprobs_reference=diagnostic_prev_logprobs,
             kl_type=self.reference_policy_kl_type,
             input_clamp_value=None,
             output_clamp_value=None,
@@ -429,8 +451,8 @@ class ClippedPGLossFn(LossFunction):
         # policy-kl: kl(P_train || P_gen)
         # where log_ratio = generation_logprobs - prev_logprobs
         policy_kl_error = calculate_kl(
-            logprobs=prev_logprobs,
-            logprobs_reference=generation_logprobs,
+            logprobs=diagnostic_prev_logprobs,
+            logprobs_reference=diagnostic_generation_logprobs,
             kl_type=self.reference_policy_kl_type,
             input_clamp_value=None,
             output_clamp_value=None,
@@ -445,17 +467,20 @@ class ClippedPGLossFn(LossFunction):
         # M = 0.5 * (P_train + P_gen)
         # JSD = 0.5 * KL(P_train || M) + 0.5 * KL(P_gen || M)
         log_mixture = torch.log(
-            0.5 * torch.exp(prev_logprobs) + 0.5 * torch.exp(generation_logprobs)
+            0.5 * torch.exp(diagnostic_prev_logprobs)
+            + 0.5 * torch.exp(diagnostic_generation_logprobs)
         )
         # KL(P_train || M)
         kl_prev_to_mixture = (
-            torch.exp(prev_logprobs - log_mixture) - (prev_logprobs - log_mixture) - 1
+            torch.exp(diagnostic_prev_logprobs - log_mixture)
+            - (diagnostic_prev_logprobs - log_mixture)
+            - 1
         )
 
         # KL(P_gen || M)
         kl_gen_to_mixture = (
-            torch.exp(generation_logprobs - log_mixture)
-            - (generation_logprobs - log_mixture)
+            torch.exp(diagnostic_generation_logprobs - log_mixture)
+            - (diagnostic_generation_logprobs - log_mixture)
             - 1
         )
 
@@ -481,9 +506,12 @@ class ClippedPGLossFn(LossFunction):
             # exp(x - x.detach()) has forward value 1 while preserving that gradient.
             if self.use_on_policy_kl_approximation:
                 # See: docs/guides/grpo.md#on-policy-kl-approximation
-                kl_importance_weights = torch.exp(
-                    curr_logprobs_unfiltered - generation_logprobs
+                kl_log_ratios = torch.where(
+                    valid_token_mask,
+                    curr_logprobs_unfiltered - generation_logprobs,
+                    torch.zeros_like(curr_logprobs_unfiltered),
                 )
+                kl_importance_weights = torch.exp(kl_log_ratios)
             else:
                 kl_importance_weights = torch.exp(
                     curr_logprobs_unfiltered - curr_logprobs_unfiltered.detach()
@@ -524,16 +552,31 @@ class ClippedPGLossFn(LossFunction):
             ratios = log_ratios.exp()  # = exp(0) = 1.0, but depends on curr_logprobs
             ratios_clamped = ratios
         elif not self.disable_ppo_ratio:
-            log_ratios = curr_logprobs - prev_logprobs
+            raw_log_ratios = curr_logprobs - prev_logprobs
             if self.sequence_level_importance_ratios:
+                log_ratios = torch.where(
+                    token_mask.bool(),
+                    raw_log_ratios,
+                    torch.zeros_like(raw_log_ratios),
+                )
                 seq_log_ratio_mean = masked_mean(
                     log_ratios,
                     token_mask,
                     dim=-1,
                 ).unsqueeze(-1)
+                seq_log_ratio_mean = torch.where(
+                    sample_mask.bool().unsqueeze(-1),
+                    seq_log_ratio_mean,
+                    torch.zeros_like(seq_log_ratio_mean),
+                )
                 seq_ratio = seq_log_ratio_mean.exp()
                 ratios = seq_ratio.repeat(1, advantages.shape[1])
             else:
+                log_ratios = torch.where(
+                    valid_token_mask,
+                    raw_log_ratios,
+                    torch.zeros_like(raw_log_ratios),
+                )
                 ratios = log_ratios.exp()
             ratios_clamped = ratios.clamp(
                 1.0 - self.ratio_clip_min, 1.0 + self.ratio_clip_max
@@ -710,8 +753,18 @@ class ClippedPGLossFn(LossFunction):
         # Approximating entropy as E_{s ~ \pi_{gen}(s)}[-(\pi_{curr}/\pi_{gen})log(\pi_{curr}(s))]
         # See more details and other metrics in docs/guides/grpo.md#metrics
         with torch.no_grad():
+            entropy_log_ratios = torch.where(
+                valid_token_mask,
+                curr_logprobs - generation_logprobs,
+                torch.zeros_like(curr_logprobs),
+            )
+            entropy_logprobs = torch.where(
+                valid_token_mask,
+                curr_logprobs,
+                torch.zeros_like(curr_logprobs),
+            )
             seq_entropy_approx = -masked_mean(
-                torch.exp(curr_logprobs - generation_logprobs) * curr_logprobs,
+                torch.exp(entropy_log_ratios) * entropy_logprobs,
                 mask,
                 global_normalization_factor=global_valid_toks,
             )
