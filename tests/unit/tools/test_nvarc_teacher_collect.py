@@ -3,6 +3,7 @@ import json
 import random
 from collections import defaultdict
 
+from tools.nvarc_http import safe_exception_summary
 from tools.nvarc_sft_materialize import PROPOSER_INSTRUCTIONS
 from tools.nvarc_teacher_collect import (
     collect_episode,
@@ -16,6 +17,20 @@ RULE = (
     "<key_insight>\nOrder flips.\n</key_insight>\n\n"
     "<puzzle_concepts>\nreversal\n</puzzle_concepts>"
 )
+
+
+def test_http_error_summary_never_renders_request_or_secret() -> None:
+    class ResponseError(Exception):
+        status = 503
+
+        def __repr__(self) -> str:
+            return "Authorization: Bearer secret-value"
+
+        __str__ = __repr__
+
+    summary = safe_exception_summary(ResponseError())
+    assert summary == "ResponseError status=503"
+    assert "secret-value" not in summary
 
 
 def test_split_reasoning_prefers_channel_then_think_then_marker() -> None:

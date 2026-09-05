@@ -68,6 +68,7 @@ from nemo_rl.data.datasets.response_datasets.nvarc_executor import (
 )
 from nemo_rl.environments.arc_agi_grid import serialize_grid
 from tools.nvarc_cotrain_materialize import _executor_row, _proposer_row
+from tools.nvarc_http import safe_exception_summary
 from tools.nvarc_sft_materialize import PROPOSER_INSTRUCTIONS
 
 _GYM_ROOT = Path(__file__).resolve().parents[1] / "3rdparty" / "Gym-workspace" / "Gym"
@@ -649,7 +650,8 @@ def _make_http_complete(args: argparse.Namespace) -> CompleteFn:
                 )
             except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as error:
                 print(
-                    f"teacher call failed (attempt {attempt + 1}): {error!r}",
+                    "teacher call failed "
+                    f"(attempt {attempt + 1}): {safe_exception_summary(error)}",
                     flush=True,
                 )
                 await asyncio.sleep(10 * (attempt + 1))
