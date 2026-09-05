@@ -5,11 +5,13 @@ Each grid is a 2-D picture written one row per line, with the cells of a row
 separated by single spaces. Each cell holds a digit naming its color:
 
   0 = black    1 = blue     2 = red      3 = green    4 = yellow
-  5 = gray     6 = fuchsia  7 = orange   8 = teal     9 = brown
+  5 = gray     6 = magenta  7 = orange   8 = azure    9 = maroon
 
 {}
 
-Work through the puzzle in this order, then answer.
+Reason carefully but concisely. Do not repeat complete grids in prose, and stop
+once one rule accounts for every example. Work through the puzzle in this order,
+then answer.
 
 1. Describe the example input grids: their sizes, which colors they use, and
    the shapes, objects, or patterns they contain. Say what all of the input

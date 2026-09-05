@@ -68,7 +68,8 @@ from resources_servers.arc_agi_2.logic import (  # noqa: E402
 # agent module imports fastapi/nemo_gym, too heavy for this tool); a guarded
 # unit test asserts the copies stay identical.
 PROPOSER_INSTRUCTIONS = (
-    "Act only as an ARC transformation-rule proposer. Return the requested "
+    "Act only as an ARC transformation-rule proposer. Be precise and concise; "
+    "stop reasoning once one rule explains every example. Return the requested "
     "transformation-description artifact; do not execute the test grid."
 )
 

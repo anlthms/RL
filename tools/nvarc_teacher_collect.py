@@ -59,6 +59,7 @@ import os
 import random
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -124,7 +125,9 @@ def _assistant(content: str) -> dict:
     return {"role": "assistant", "content": content}
 
 
-def _executor_sft_row(prompt: str, cot: str, grid: list[list[int]], task_id: str) -> dict:
+def _executor_sft_row(
+    prompt: str, cot: str, grid: list[list[int]], task_id: str
+) -> dict:
     canonical = f"<answer>\n{serialize_grid(grid)}\n</answer>"
     return {
         "messages": [_user(prompt), _assistant(_think_target(cot, canonical))],
@@ -263,7 +266,10 @@ async def collect_episode(
             if grid_id in skip:
                 continue
             attempt = await _execute_grid(
-                rule, grids[grid_id]["input"], complete=complete, max_cot_chars=max_cot_chars
+                rule,
+                grids[grid_id]["input"],
+                complete=complete,
+                max_cot_chars=max_cot_chars,
             )
             if attempt is None:
                 continue  # sweep miss: simply not verified
@@ -291,7 +297,10 @@ async def collect_episode(
         while grid_index < len(grid_ids):
             grid_id = grid_ids[grid_index]
             attempt = await _execute_grid(
-                rule, grids[grid_id]["input"], complete=complete, max_cot_chars=max_cot_chars
+                rule,
+                grids[grid_id]["input"],
+                complete=complete,
+                max_cot_chars=max_cot_chars,
             )
             if attempt is None:
                 rejects["executor_format"] += 1
@@ -404,6 +413,8 @@ async def collect(
     collections observable.
     """
     semaphore = asyncio.Semaphore(args.concurrency)
+    started = time.monotonic()
+    runtime_limit_reached = False
     rows: list[dict] = []
     counts = {"executor": 0, "proposer": 0}
     attempts = {"executor": 0, "episode": 0}
@@ -484,6 +495,12 @@ async def collect(
     while cursor < len(pool) and (
         counts["executor"] < args.executor_traces or counts["proposer"] < args.episodes
     ):
+        if (
+            args.max_runtime_seconds is not None
+            and time.monotonic() - started >= args.max_runtime_seconds
+        ):
+            runtime_limit_reached = True
+            break
         batch = pool[cursor : cursor + args.concurrency]
         cursor += len(batch)
         tasks = []
@@ -500,6 +517,8 @@ async def collect(
         "episode_attempts": attempts["episode"],
         "puzzles_consumed": cursor,
         "rejects": rejects,
+        "elapsed_seconds": time.monotonic() - started,
+        "runtime_limit_reached": runtime_limit_reached,
     }
     return rows, stats
 
@@ -562,10 +581,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument(
         "--reasoning-effort",
+        choices=("low", "high", "max"),
         default=None,
         help="teacher reasoning effort (e.g. 'max'); omitted from the request when unset",
     )
     parser.add_argument("--request-timeout", type=float, default=1200.0)
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=None,
+        help="stop cleanly between batches after this elapsed time",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
@@ -618,7 +644,7 @@ def _make_http_complete(args: argparse.Namespace) -> CompleteFn:
                         body = await response.json()
                 message = body["choices"][0]["message"]
                 return (
-                    message.get("reasoning_content") or "",
+                    message.get("reasoning_content") or message.get("reasoning") or "",
                     message.get("content") or "",
                 )
             except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as error:
@@ -634,6 +660,8 @@ def _make_http_complete(args: argparse.Namespace) -> CompleteFn:
 
 def main() -> None:
     args = _parse_args()
+    if not os.environ.get(args.api_key_env):
+        raise SystemExit(f"missing API key in {args.api_key_env}")
     template = Path(args.executor_prompt_file).read_text(encoding="utf-8")
     puzzles = load_nvarc_split(args.data_dir, "train")
     rng = random.Random(args.seed)
