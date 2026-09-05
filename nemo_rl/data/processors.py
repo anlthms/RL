@@ -462,6 +462,9 @@ def _arc_grid_data_processor(
         "task_id": datum_dict["task_id"],
         # Carried so the environment can report per-difficulty-bucket metrics.
         "bucket": datum_dict["bucket"],
+        # calculate_rewards replaces this opt-in sentinel with the exact
+        # cumulative assistant-token count before stripping token_ids.
+        "assistant_response_tokens": 0,
         "terms": None,
     }
 
