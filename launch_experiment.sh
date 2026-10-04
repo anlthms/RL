@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Launch an async GRPO experiment (Megatron inference) via submit_nemorl.sh.
+# Launch a GRPO experiment via submit_nemorl.sh (async + Megatron inference for Nano).
 #
-# Each supported environment has a config at
-# examples/configs/async/nanov3_<env>_<topology>.yaml.
+# Each supported model x environment has a config at
+# examples/configs/async/<model>_<env>_<topology>.yaml.
 #
+#   MODEL     nanov3 (default)            Nemotron Nano v3, Megatron inference
+#             qwen38                      Qwen3.8-27B, colocated vLLM inference
+#                                         (synchronous GRPO; nvarc_executor_4n only)
 #   ENV       rl_blend                    RL-blend dataset over NeMo-Gym servers
 #             nvarc_executor_4n           NVARC-description executor training
 #   topology  colocated | non_colocated   share GPUs with generation, or split them
 #
 # Usage:
-#   SUBMIT_ACCOUNT=<account> [ENV=...] \
+#   SUBMIT_ACCOUNT=<account> [MODEL=...] [ENV=...] \
 #     bash launch_experiment.sh {colocated|non_colocated}
 #
 # Common env:
@@ -63,6 +66,15 @@ if [[ "${ENV}" == nvarc_* && "${TOPOLOGY}" != colocated ]]; then
   die "${ENV} supports only colocated topology"
 fi
 
+MODEL="${MODEL:-nanov3}"
+case "${MODEL}" in
+  nanov3) ;;
+  qwen38)
+    [[ "${ENV}" == nvarc_executor_4n ]] || die "MODEL=qwen38 supports only ENV=nvarc_executor_4n"
+    ;;
+  *) die "invalid MODEL: ${MODEL} (expected nanov3 or qwen38)" ;;
+esac
+
 export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
 USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
@@ -73,7 +85,10 @@ USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 export CONTAINER="${CONTAINER:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/asolergibert/RL/images/archive/20261003-051543-nemo-rl-nightly-gym.sqsh}"
 
 # One name for both slurm and wandb, so a job id always maps to a run.
-RUN_NAME="async_${TOPOLOGY}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
+# Nano runs keep their historical async_* names.
+RUN_PREFIX="async"
+[[ "${MODEL}" != nanov3 ]] && RUN_PREFIX="${MODEL}"
+RUN_NAME="${RUN_PREFIX}_${TOPOLOGY}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
 export JOB_NAME="${RUN_NAME}"
 
 # ------------------------------------------------- override accumulator ----
@@ -85,17 +100,20 @@ SETUP_PARTS=()
 add_setup() { SETUP_PARTS+=("$*"); }
 
 # Layer 1: base.
-add_override "policy.generation.backend=megatron"
 add_override "cluster.num_nodes=${NUM_ACTOR_NODES}"
 add_override "logger.wandb.name=${RUN_NAME}"
 add_override "+logger.wandb.entity=${WANDB_ENTITY:-adlr}"
-# Native MCore refit: main requires refit_transport=mcore for colocated Megatron
-# generation and reads refit_backend only under it. Non-colocated reshards
-# weights over the network: nvshmem is proven stable at <=4 generation nodes,
-# while nccl hangs the reshard there. Colocated shares weights in-process
-# (CUDA-IPC), so the backend is a no-op there.
-add_override "++policy.generation.refit_transport=mcore"
-add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
+# Nano generates with Megatron inference; Qwen3.8 with vLLM, set in its config.
+if [[ "${MODEL}" == nanov3 ]]; then
+  add_override "policy.generation.backend=megatron"
+  # Native MCore refit: main requires refit_transport=mcore for colocated
+  # Megatron generation and reads refit_backend only under it. Non-colocated
+  # reshards weights over the network: nvshmem is proven stable at <=4
+  # generation nodes, while nccl hangs the reshard there. Colocated shares
+  # weights in-process (CUDA-IPC), so the backend is a no-op there.
+  add_override "++policy.generation.refit_transport=mcore"
+  add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
+fi
 [[ -n "${WANDB_PROJECT:-}" ]] && add_override "logger.wandb.project=${WANDB_PROJECT}"
 [[ -n "${MAX_STEPS:-}" ]] && add_override "grpo.max_num_steps=${MAX_STEPS}"
 
@@ -120,7 +138,7 @@ case "${ENV}" in
   rl_blend | nvarc_cotrain_4n | nvarc_cotrain_32n) ENTRYPOINT="examples/nemo_gym/run_grpo_nemo_gym.py" ;;
   *)                           ENTRYPOINT="examples/run_grpo.py" ;;
 esac
-CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
+CONFIG="examples/configs/async/${MODEL}_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
 
 # No arm adds a setup step by default, so the array can be empty here.

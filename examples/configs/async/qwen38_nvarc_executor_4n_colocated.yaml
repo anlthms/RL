@@ -1,0 +1,80 @@
+# Four-node/16-GPU NVARC executor GRPO on Qwen3.8-27B (dense hybrid attention).
+#
+# Main supports Qwen3.8 only with vLLM inference, and colocated async GRPO only
+# with Megatron inference, so unlike the Nano executor this arm is synchronous
+# GRPO with colocated vLLM. Data, reward, validation and the sequence budget come
+# from env_nvarc_executor.yaml, shared with the Nano executor.
+defaults:
+  - ../recipes/llm/grpo-qwen3.8-27b-2n8g-megatron-tp4pp2cp2.yaml
+  - env_nvarc_executor.yaml
+
+grpo:
+  # One full staged pass over the 19 difficulty ventiles at 6 steps per hold
+  # (cumulative windows; see env_nvarc_executor.yaml).
+  max_num_steps: 114
+  num_prompts_per_step: 32
+  num_generations_per_prompt: 16
+  overlong_filtering: true
+
+# Same objective as the Nano executor: no reference KL, DAPO clip-higher.
+loss_fn:
+  reference_policy_kl_penalty: 0
+  ratio_clip_max: 0.28
+  use_on_policy_kl_approximation: true
+  use_importance_sampling_correction: true
+
+policy:
+  model_name: Qwen/Qwen3.8-27B
+  train_global_batch_size: 512  # num_prompts_per_step * num_generations_per_prompt
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  make_sequence_length_divisible_by: 8
+
+  # Qwen3.8 thinks far longer than Nano: on the frozen 150-case executor split
+  # at 16k output tokens it solved 100/150, and all 31 format failures were
+  # budget exhaustion inside the thinking block. Keep the benchmark's 16k
+  # generation budget, and pack bins that hold a whole sequence so long
+  # rollouts are not clamped (env_nvarc_executor.yaml sizes these for Nano).
+  max_total_sequence_length: 32768
+  sequence_packing:
+    train_mb_tokens: 32768
+    logprob_mb_tokens: 32768
+
+  # GB200 (186 GB) fits 27B at TP4 without the recipe's PP2/CP2 (sized for 80 GB).
+  megatron_cfg:
+    tensor_model_parallel_size: 4
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    optimizer:
+      lr: 1.0e-6
+      min_lr: 1.0e-6
+    scheduler:
+      lr_decay_style: constant
+      lr_warmup_iters: 10
+      lr_warmup_init: 1.0e-7
+
+  generation:
+    backend: vllm
+    max_new_tokens: 16384
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+    vllm_cfg:
+      tensor_parallel_size: 4
+      gpu_memory_utilization: 0.6
+
+logger:
+  wandb_enabled: true
+  wandb:
+    project: nano-v3-megatron-inference
+    name: qwen38_nvarc_executor
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 4
+
+checkpointing:
+  checkpoint_dir: /lustre/fs1/portfolios/nemotron/projects/nemotron_sw_pre/users/anthomas/checkpoints/${logger.wandb.name}
+  save_optimizer: false
