@@ -67,8 +67,10 @@ export NUM_ACTOR_NODES="${NUM_ACTOR_NODES:-8}"
 export TIMEOUT_MIN="${TIMEOUT_MIN:-240}"
 USER_NAME="$(whoami)"  # resolve on the host; the container runs as root
 
-# The image ships the interpreter this checkout's requires-python resolves to.
-export CONTAINER="${CONTAINER:-/lustre/fs1/portfolios/llmservice/projects/llmservice_fm_text/users/tene/nemo_rl_0807.sqsh}"
+# Nightly built from main fb8396ad: its uv.lock matches this checkout, so the
+# baked driver and worker venvs (incl. torch_memory_saver for the colocated KV
+# offload) are used as-is.
+export CONTAINER="${CONTAINER:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/asolergibert/RL/images/archive/20261003-051543-nemo-rl-nightly-gym.sqsh}"
 
 # One name for both slurm and wandb, so a job id always maps to a run.
 RUN_NAME="async_${TOPOLOGY}_${ENV}${RUN_TAG:+_${RUN_TAG}}"
@@ -87,9 +89,12 @@ add_override "policy.generation.backend=megatron"
 add_override "cluster.num_nodes=${NUM_ACTOR_NODES}"
 add_override "logger.wandb.name=${RUN_NAME}"
 add_override "+logger.wandb.entity=${WANDB_ENTITY:-adlr}"
-# Non-colocated reshards weights over the network: nvshmem is proven stable at
-# <=4 generation nodes, while nccl hangs the reshard there. Colocated shares
-# weights in-process (CUDA-IPC), so the backend is a no-op.
+# Native MCore refit: main requires refit_transport=mcore for colocated Megatron
+# generation and reads refit_backend only under it. Non-colocated reshards
+# weights over the network: nvshmem is proven stable at <=4 generation nodes,
+# while nccl hangs the reshard there. Colocated shares weights in-process
+# (CUDA-IPC), so the backend is a no-op there.
+add_override "++policy.generation.refit_transport=mcore"
 add_override "policy.generation.mcore_generation_config.refit_backend=${REFIT_BACKEND:-nvshmem}"
 [[ -n "${WANDB_PROJECT:-}" ]] && add_override "logger.wandb.project=${WANDB_PROJECT}"
 [[ -n "${MAX_STEPS:-}" ]] && add_override "grpo.max_num_steps=${MAX_STEPS}"
@@ -99,11 +104,6 @@ if [[ "${TOPOLOGY}" == non_colocated ]]; then
   # Symmetric train/gen split; asymmetric splits hang the reshard.
   NUM_GEN_NODES="${NUM_GEN_NODES:-$((NUM_ACTOR_NODES / 2))}"
   add_override "policy.generation.colocated.resources.num_nodes=${NUM_GEN_NODES}"
-else
-  # Every colocated arm offloads the KV cache during the training pause. mcore
-  # asserts torch_memory_saver (or UVM) for any non-persist cache mode, and the
-  # wheel predates the container uv.lock, so install it in the worker venv.
-  add_setup "uv pip install --python /opt/ray_venvs/nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker/bin/python --no-deps /lustre/fsw/portfolios/nemotron/users/anthomas/wheels/torch_memory_saver-0.0.9.post1-cp39-abi3-manylinux2014_aarch64.whl"
 fi
 
 # Layer 3: caller overrides, last so they win. Newlines are folded to spaces:
@@ -123,7 +123,7 @@ esac
 CONFIG="examples/configs/async/nanov3_${ENV}_${TOPOLOGY}.yaml"
 [[ -f "${CONFIG}" ]] || die "no config for ${ENV} x ${TOPOLOGY}: ${CONFIG}"
 
-# Only the colocated arm adds a setup step, so the array can be empty here.
+# No arm adds a setup step by default, so the array can be empty here.
 if ((${#SETUP_PARTS[@]})); then
   printf -v SETUP_JOINED '%s && ' "${SETUP_PARTS[@]}"
   export SETUP_COMMAND="${SETUP_COMMAND:+${SETUP_COMMAND} && }${SETUP_JOINED% && }"
