@@ -593,8 +593,13 @@ class MegatronGeneration(GenerationInterface):
     ) -> AsyncGenerator[tuple[int, BatchedDataDict[GenerationOutputSpec]], None]:
         """Generate asynchronously, yielding `(index, batch)` tuples as they complete."""
         worker = self._policy.worker_group.workers[0]
-        futures = worker.generate_async.options(num_returns="streaming").remote(
-            data=data, greedy=greedy
+        # Not `.options(num_returns="streaming")`: since Ray 2.58 that validates
+        # against the handle's per-method generator flag, and a caller whose venv
+        # cannot import the worker class (the driver, the vLLM-venv async
+        # collector) only has Ray's placeholder class, whose methods are not
+        # generators. `_remote` submits the same streaming task without it.
+        futures = worker.generate_async._remote(
+            kwargs={"data": data, "greedy": greedy}, num_returns="streaming"
         )
         async for result_ref in futures:
             index, result_batch = await result_ref
