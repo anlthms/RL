@@ -206,6 +206,10 @@ class OpenAIChatCompletionsClient:
             raise RuntimeError(
                 f"executor endpoint returned an invalid chat response: {body}"
             ) from error
+        # A reasoning parser returns null content when the output budget runs out
+        # inside the thinking block; that is an unanswered (format-failed) case.
+        if content is None:
+            content = ""
         if not isinstance(content, str):
             raise RuntimeError("executor endpoint returned non-text assistant content")
         reasoning = message.get("reasoning_content") or message.get("reasoning")

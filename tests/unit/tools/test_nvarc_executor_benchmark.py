@@ -200,6 +200,28 @@ def test_http_client_sends_effort_and_accepts_reasoning_alias() -> None:
     assert opener.payload["seed"] == 1
 
 
+def test_http_client_treats_null_content_as_unanswered() -> None:
+    client = OpenAIChatCompletionsClient(
+        base_url="http://unused",
+        model="model",
+        api_key="secret",
+        max_output_tokens=32,
+        temperature=0.0,
+        timeout_seconds=1.0,
+    )
+    # A reasoning parser returns null content when the budget ends mid-thought.
+    client.opener = FakeHttpOpener(
+        {"choices": [{"message": {"reasoning": "still thinking", "content": None}}]}
+    )
+
+    reasoning, content = asyncio.run(
+        client.complete_with_reasoning([{"role": "user", "content": "prompt"}])
+    )
+
+    assert reasoning == "still thinking"
+    assert content == ""
+
+
 def test_prompt_contains_the_color_legend_and_contract() -> None:
     prompt = build_single_grid_prompt(description="Rotate.", input_grid=[[1, 2]])
     assert "0=black" in prompt and "6=magenta" in prompt
